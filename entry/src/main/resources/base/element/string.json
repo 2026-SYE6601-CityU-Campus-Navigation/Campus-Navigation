@@ -1,0 +1,24 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "RoomMarker 房间标记与轨迹采集"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "RoomMarker"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "RoomMarker"
+    },
+    {
+      "name": "perm_location_reason",
+      "value": "用于记录房间标记点和轨迹的 GPS 坐标，以及获取 WiFi 扫描结果"
+    },
+    {
+      "name": "perm_activity_reason",
+      "value": "用于计步传感器展示与室内惯性导航研究"
+    }
+  ]
+}

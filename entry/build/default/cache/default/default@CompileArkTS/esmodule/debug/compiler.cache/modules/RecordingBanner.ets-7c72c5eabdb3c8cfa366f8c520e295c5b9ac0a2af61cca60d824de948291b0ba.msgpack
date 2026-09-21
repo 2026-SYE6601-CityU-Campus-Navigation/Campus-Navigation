@@ -1,0 +1,512 @@
+Ôr@Ÿªassertions¤code´customTransformCache¬dependencies¢id¤meta±moduleSideEffects¬originalCode±originalSourcemap«resolvedIds®sourcemapChainµsyntheticNamedExportsµtransformDependencies®transformFiles¨cacheAstÔrAÚ.aif (!("finalizeConstruction" in ViewPU.prototype)) {
+    Reflect.set(ViewPU.prototype, "finalizeConstruction", () => { });
+}
+import promptAction from "@ohos.promptAction";
+import { Store } from '../data/Store';
+import { TrackRecorder } from '../sensors/TrackRecorder';
+import { captureTrackPhoto, deletePhotoFile } from '../sensors/TrackMedia';
+import { fmtDuration } from '../common/Utils';
+import { PhotoNoteDialog, TrackTagDialog } from './CaptureDialogs';
+export class RecordingBanner extends ViewPU {
+    constructor(parent, params, __localStorage, elmtId = -1, paramsLambda = undefined, extraInfo) {
+        super(parent, __localStorage, elmtId, extraInfo);
+        if (typeof paramsLambda === "function") {
+            this.paramsGenerator_ = paramsLambda;
+        }
+        this.__heartbeat = new ObservedPropertySimplePU(0, this, "heartbeat");
+        this.timer = -1;
+        this.tagDialog = null;
+        this.photoDialog = null;
+        this.setInitiallyProvidedValue(params);
+        this.finalizeConstruction();
+    }
+    setInitiallyProvidedValue(params) {
+        if (params.heartbeat !== undefined) {
+            this.heartbeat = params.heartbeat;
+        }
+        if (params.timer !== undefined) {
+            this.timer = params.timer;
+        }
+        if (params.tagDialog !== undefined) {
+            this.tagDialog = params.tagDialog;
+        }
+        if (params.photoDialog !== undefined) {
+            this.photoDialog = params.photoDialog;
+        }
+    }
+    updateStateVars(params) {
+    }
+    purgeVariableDependenciesOnElmtId(rmElmtId) {
+        this.__heartbeat.purgeDependencyOnElmtId(rmElmtId);
+    }
+    aboutToBeDeleted() {
+        this.__heartbeat.aboutToBeDeleted();
+        SubscriberManager.Get().delete(this.id__());
+        this.aboutToBeDeletedInternal();
+    }
+    get heartbeat() {
+        return this.__heartbeat.get();
+    }
+    set heartbeat(newValue) {
+        this.__heartbeat.set(newValue);
+    }
+    aboutToAppear() {
+        this.timer = setInterval(() => {
+            this.heartbeat++;
+        }, 500);
+    }
+    aboutToDisappear() {
+        if (this.timer >= 0) {
+            clearInterval(this.timer);
+            this.timer = -1;
+        }
+    }
+    openTagDialog() {
+        const rec = TrackRecorder.get();
+        if (!rec.isRunning()) {
+            promptAction.showToast({ message: 'å½“å‰æ²¡æœ‰è¿›è¡Œä¸­çš„è½¨è¿¹' });
+            return;
+        }
+        this.tagDialog = new CustomDialogController({
+            builder: () => {
+                let jsDialog = new TrackTagDialog(this, {
+                    onSave: (tagType, note) => {
+                        const snap = rec.getSnapshot();
+                        Store.insertTrackTag(rec.getTrackId(), Date.now(), tagType, note, snap.latitude, snap.longitude, snap.altitude, snap.headingDeg)
+                            .then(() => {
+                            promptAction.showToast({ message: `å·²è®°å½•ã€Œ${tagType}ã€æ ‡ç­¾` });
+                        })
+                            .catch(() => {
+                            promptAction.showToast({ message: 'æ ‡ç­¾ä¿å­˜å¤±è´¥' });
+                        });
+                    }
+                }, undefined, -1, () => { }, { page: "entry/src/main/ets/pages/RecordingBanner.ets", line: 41, col: 16 });
+                jsDialog.setController(this.tagDialog);
+                ViewPU.create(jsDialog);
+                let paramsLambda = () => {
+                    return {
+                        onSave: (tagType, note) => {
+                            const snap = rec.getSnapshot();
+                            Store.insertTrackTag(rec.getTrackId(), Date.now(), tagType, note, snap.latitude, snap.longitude, snap.altitude, snap.headingDeg)
+                                .then(() => {
+                                promptAction.showToast({ message: `å·²è®°å½•ã€Œ${tagType}ã€æ ‡ç­¾` });
+                            })
+                                .catch(() => {
+                                promptAction.showToast({ message: 'æ ‡ç­¾ä¿å­˜å¤±è´¥' });
+                            });
+                        }
+                    };
+                };
+                jsDialog.paramsGenerator_ = paramsLambda;
+            },
+            customStyle: false
+        }, this);
+        this.tagDialog.open();
+    }
+    takePhoto() {
+        const rec = TrackRecorder.get();
+        if (!rec.isRunning()) {
+            promptAction.showToast({ message: 'å½“å‰æ²¡æœ‰è¿›è¡Œä¸­çš„è½¨è¿¹' });
+            return;
+        }
+        const trackId = rec.getTrackId();
+        captureTrackPhoto(trackId).then((cap) => {
+            // æ‹ç…§æœŸé—´ç”¨æˆ·å¯èƒ½å·²åœæ­¢è®°å½•ï¼Œæ­¤æ—¶ä¸¢å¼ƒç…§ç‰‡é¿å…å­¤å„¿æ•°æ®
+            if (!rec.isRunning() || rec.getTrackId() !== trackId) {
+                deletePhotoFile(cap.absPath);
+                promptAction.showToast({ message: 'è½¨è¿¹å·²åœæ­¢ï¼Œç…§ç‰‡å·²ä¸¢å¼ƒ' });
+                return;
+            }
+            this.photoDialog = new CustomDialogController({
+                builder: () => {
+                    let jsDialog = new PhotoNoteDialog(this, {
+                        absPath: cap.absPath,
+                        onSave: (note) => {
+                            const snap = rec.getSnapshot();
+                            Store.insertTrackPhoto(trackId, cap.timeMs, cap.relPath, note, snap.latitude, snap.longitude, snap.altitude, snap.headingDeg)
+                                .then(() => {
+                                promptAction.showToast({ message: 'ç…§ç‰‡å·²å…³è”åˆ°è½¨è¿¹' });
+                            })
+                                .catch(() => {
+                                promptAction.showToast({ message: 'ç…§ç‰‡ä¿å­˜å¤±è´¥' });
+                            });
+                        },
+                        onDiscard: () => {
+                            deletePhotoFile(cap.absPath);
+                            promptAction.showToast({ message: 'ç…§ç‰‡å·²ä¸¢å¼ƒ' });
+                        }
+                    }, undefined, -1, () => { }, { page: "entry/src/main/ets/pages/RecordingBanner.ets", line: 74, col: 18 });
+                    jsDialog.setController(this.photoDialog);
+                    ViewPU.create(jsDialog);
+                    let paramsLambda = () => {
+                        return {
+                            absPath: cap.absPath,
+                            onSave: (note) => {
+                                const snap = rec.getSnapshot();
+                                Store.insertTrackPhoto(trackId, cap.timeMs, cap.relPath, note, snap.latitude, snap.longitude, snap.altitude, snap.headingDeg)
+                                    .then(() => {
+                                    promptAction.showToast({ message: 'ç…§ç‰‡å·²å…³è”åˆ°è½¨è¿¹' });
+                                })
+                                    .catch(() => {
+                                    promptAction.showToast({ message: 'ç…§ç‰‡ä¿å­˜å¤±è´¥' });
+                                });
+                            },
+                            onDiscard: () => {
+                                deletePhotoFile(cap.absPath);
+                                promptAction.showToast({ message: 'ç…§ç‰‡å·²ä¸¢å¼ƒ' });
+                            }
+                        };
+                    };
+                    jsDialog.paramsGenerator_ = paramsLambda;
+                },
+                customStyle: false
+            }, this);
+            this.photoDialog.open();
+        }).catch(() => {
+            promptAction.showToast({ message: 'æ‹ç…§æœªå®Œæˆ' });
+        });
+    }
+    stopRecording() {
+        TrackRecorder.get().stop().then(() => {
+            promptAction.showToast({ message: 'è½¨è¿¹å·²ä¿å­˜' });
+        }).catch(() => {
+        });
+    }
+    initialRender() {
+        this.observeComponentCreation2((elmtId, isInitialRender) => {
+            If.create();
+            if (AppStorage.get('rm_recording')) {
+                this.ifElseBranchUpdateFunction(0, () => {
+                    this.observeComponentCreation2((elmtId, isInitialRender) => {
+                        ForEach.create();
+                        const forEachItemGenFunction = _item => {
+                            const h = _item;
+                            this.observeComponentCreation2((elmtId, isInitialRender) => {
+                                Column.create({ space: 8 });
+                                Column.width('100%');
+                                Column.padding(12);
+                                Column.backgroundColor('#330A59F7');
+                            }, Column);
+                            this.observeComponentCreation2((elmtId, isInitialRender) => {
+                                Text.create(`â— æ­£åœ¨è®°å½•ã€Œ${AppStorage.get('rm_rec_track_name')}ã€  ${fmtDuration(AppStorage.get('rm_elapsed'))}ï¼ˆåˆ‡é¡µé¢ä¸ä¸­æ–­ï¼‰`);
+                                Text.fontSize(14);
+                                Text.width('100%');
+                                Text.maxLines(1);
+                                Text.textOverflow({ overflow: TextOverflow.Ellipsis });
+                            }, Text);
+                            Text.pop();
+                            this.observeComponentCreation2((elmtId, isInitialRender) => {
+                                Row.create({ space: 10 });
+                                Row.width('100%');
+                            }, Row);
+                            this.observeComponentCreation2((elmtId, isInitialRender) => {
+                                Button.createWithLabel('æ‹ç…§');
+                                Button.fontSize(13);
+                                Button.layoutWeight(1);
+                                Button.onClick(() => {
+                                    this.takePhoto();
+                                });
+                            }, Button);
+                            Button.pop();
+                            this.observeComponentCreation2((elmtId, isInitialRender) => {
+                                Button.createWithLabel('æ‰“æ ‡ç­¾');
+                                Button.fontSize(13);
+                                Button.layoutWeight(1);
+                                Button.onClick(() => {
+                                    this.openTagDialog();
+                                });
+                            }, Button);
+                            Button.pop();
+                            this.observeComponentCreation2((elmtId, isInitialRender) => {
+                                Button.createWithLabel('â–  åœæ­¢');
+                                Button.fontSize(13);
+                                Button.layoutWeight(1);
+                                Button.fontColor(Color.White);
+                                Button.backgroundColor('#E84026');
+                                Button.onClick(() => {
+                                    this.stopRecording();
+                                });
+                            }, Button);
+                            Button.pop();
+                            Row.pop();
+                            Column.pop();
+                        };
+                        this.forEachUpdateFunction(elmtId, [this.heartbeat], forEachItemGenFunction, (h) => h + '', false, false);
+                    }, ForEach);
+                    ForEach.pop();
+                });
+            }
+            else {
+                this.ifElseBranchUpdateFunction(1, () => {
+                });
+            }
+        }, If);
+        If.pop();
+    }
+    rerender() {
+        this.updateDirtyElements();
+    }
+}
+//# sourceMappingURL=RecordingBanner.js.mapÂ–Ù^ hvigor_ignore_D:_DevEco_DevEco Studio_sdk_default_openharmony_ets_api_@ohos.promptAction.d.tsÙTD:\CityUproject\CampusNavigation\RoomMarkerHarmony\entry\src\main\ets\data\Store.etsÙ_D:\CityUproject\CampusNavigation\RoomMarkerHarmony\entry\src\main\ets\sensors\TrackRecorder.etsÙ\D:\CityUproject\CampusNavigation\RoomMarkerHarmony\entry\src\main\ets\sensors\TrackMedia.etsÙVD:\CityUproject\CampusNavigation\RoomMarkerHarmony\entry\src\main\ets\common\Utils.etsÙ^D:\CityUproject\CampusNavigation\RoomMarkerHarmony\entry\src\main\ets\pages\CaptureDialogs.etsÙ_D:\CityUproject\CampusNavigation\RoomMarkerHarmony\entry\src\main\ets\pages\RecordingBanner.etsÔrBœªmoduleName±isLocalDependency¯isNodeEntryFile§pkgPath±belongProjectPath§pkgNameªpkgVersion±dependencyPkgInfo¯hostModulesInfo°belongModulePath§checker¬shouldEmitJs¥entryÃÂÙ8D:\CityUproject\CampusNavigation\RoomMarkerHarmony\entryÙ2D:\CityUproject\CampusNavigation\RoomMarkerHarmony¥entry¥1.0.0Ô  ’ÔrC’²hostDependencyName®hostModuleName±./RecordingBanner¥entryC±./RecordingBanner¥entryÙ8D:\CityUproject\CampusNavigation\RoomMarkerHarmony\entryÔrDÜ ®¬getNodeCount²getIdentifierCount®getSymbolCount¬getTypeCountµgetInstantiationCountµgetRelationCacheSizes±isUndefinedSymbol±isArgumentsSymbol¯isUnknownSymbol¯getMergedSymbol®getDiagnostics´getGlobalDiagnostics´getRecursionIdentity¶getUnmatchedProperties¹getTypeOfSymbolAtLocation¯getTypeOfSymbolÙ(getSymbolsOfParameterPropertyDeclaration·getDeclaredTypeOfSymbol³getPropertiesOfType±getPropertyOfTypeÙ"getPrivateIdentifierPropertyOfType·getTypeOfPropertyOfType²getIndexInfoOfType³getIndexInfosOfTypeºgetIndexInfosOfIndexSymbol³getSignaturesOfType²getIndexTypeOfType¬getIndexType¬getBaseTypes¸getBaseTypeOfLiteralType®getWidenedType³getTypeFromTypeNode°getParameterTypeÙ$getParameterIdentifierNameAtPosition¸getPromisedTypeOfPromise®getAwaitedType¸getReturnTypeOfSignature®isNullableType¯getNullableType²getNonNullableType²getNonOptionalType°getTypeArguments®typeToTypeNodeÙ$indexInfoToIndexSignatureDeclaration¿signatureToSignatureDeclaration²symbolToEntityName²symbolToExpression¬symbolToNodeÙ!symbolToTypeParameterDeclarations¼symbolToParameterDeclarationºtypeParameterToDeclaration±getSymbolsInScope³getSymbolAtLocation·getIndexInfosAtLocationÙ!getShorthandAssignmentValueSymbolÙ#getExportSpecifierLocalTargetSymbol·getExportSymbolOfSymbol±getTypeAtLocationºgetTypeAtLocationForLinterÙ tryGetTypeAtLocationWithoutCheckºgetTypeOfAssignmentPatternÙ*getPropertySymbolOfDestructuringAssignment±signatureToString¬typeToString®symbolToStringµtypePredicateToString®writeSignature©writeType«writeSymbol²writeTypePredicate¼getAugmentedPropertiesOfType®getRootSymbols²getSymbolOfExpando±getContextualTypeÙ(getContextualTypeForObjectLiteralElementÙ#getContextualTypeForArgumentAtIndexÙ getContextualTypeForJsxAttribute²isContextSensitiveÙ!getTypeOfPropertyOfContextualTypeµgetFullyQualifiedNameÙ#tryGetResolvedSignatureWithoutCheck´getResolvedSignatureÙ/getResolvedSignatureForStringLiteralCompletionsÙ$getResolvedSignatureForSignatureHelpµgetExpandedParameters¹hasEffectiveRestParameterºcontainsArgumentsReference°getConstantValueµisValidPropertyAccessÙ#isValidPropertyAccessForCompletions»getSignatureFromDeclarationºisImplementationOfOverload¹getImmediateAliasedSymbol°getAliasedSymbol¯getEmitResolver²getExportsOfModule¿getExportsAndPropertiesOfModuleÙ forEachExportAndPropertyOfModule¯getSymbolWalker±getAmbientModules¹getJsxIntrinsicTagNamesAt³isOptionalParameter»tryGetMemberInModuleExportsÙ(tryGetMemberInModuleExportsAndProperties´tryFindAmbientModuleÙ(tryFindAmbientModuleWithoutAugmentations¯getApparentType¬getUnionType²isTypeAssignableTo³createAnonymousType¯createSignature¬createSymbol¯createIndexInfoªgetAnyType­getStringType­getNumberType±createPromiseType¯createArrayType¹getElementTypeOfArrayType®getBooleanType¬getFalseType«getTrueType«getVoidType°getUndefinedType«getNullType¯getESSymbolType¬getNeverType¯getOptionalType®getPromiseType²getPromiseLikeType´getAsyncIterableType²isSymbolAccessible«isArrayType«isTupleType¯isArrayLikeTypeÙ#isTypeInvalidDueToUnionDiscriminantºgetExactOptionalProperties¿getAllPossiblePropertiesOfTypesÙ(getSuggestedSymbolForNonexistentPropertyÙ#getSuggestionForNonexistentPropertyÙ,getSuggestedSymbolForNonexistentJSXAttributeÙ&getSuggestedSymbolForNonexistentSymbolÙ!getSuggestionForNonexistentSymbolÙ&getSuggestedSymbolForNonexistentModuleÙ!getSuggestionForNonexistentExportÙ+getSuggestedSymbolForNonexistentClassMember·getBaseConstraintOfType»getDefaultFromTypeParameter«resolveName¯getJsxNamespaceµgetJsxFragmentFactory¸getAccessibleSymbolChain»getTypePredicateOfSignature¹resolveExternalModuleName»resolveExternalModuleSymbol°tryGetThisTypeAt¹getTypeArgumentConstraint¸getSuggestionDiagnostics¸runWithCancellationTokenÙ3getLocalTypeParametersOfClassOrInterfaceOrTypeAlias´isDeclarationVisible´isPropertyAccessible»getTypeOnlyAliasDeclaration¿getMemberOverrideModifierStatusÙ!isTypeParameterPossiblyReferenced²getConstEnumRelate´clearConstEnumRelateµdeleteConstEnumRelateÙ$getTypeArgumentsForResolvedSignatureµgetCheckedSourceFilesÙ"collectHaveTsNoCheckFilesForLinter·clearQualifiedNameCache®isStaticRecord²isStaticSourceFileÔ  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  ÃÃÚ«import { promptAction } from '@kit.ArkUI';
+import { Store } from '../data/Store';
+import { TrackRecorder } from '../sensors/TrackRecorder';
+import { captureTrackPhoto, deletePhotoFile } from '../sensors/TrackMedia';
+import { fmtDuration } from '../common/Utils';
+import { PhotoNoteDialog, TrackTagDialog } from './CaptureDialogs';
+
+/**
+ * è®°å½•ä¸­æ¨ªå¹…ï¼šæ‹ç…§ / æ‰“æ ‡ç­¾ / åœæ­¢ã€‚
+ * åˆ·æ–°æ–¹æ¡ˆæ²¿ç”¨æœ¬å·¥ç¨‹ API 21 éªŒè¯è¿‡çš„ã€Œ@State heartbeat + ForEach é‡å»ºã€ï¼š
+ * AppStorageâ†’@StorageLink åœ¨ NavDestination åœºæ™¯ä¸‹ä¸è§¦å‘åˆ·æ–°ï¼Œ
+ * è¿™é‡Œ 500ms è‡ªå¢å¿ƒè·³å¼ºåˆ¶é‡å»ºæ¨ªå¹…ï¼Œè¯»å–æœ€æ–°è®°å½•çŠ¶æ€ã€‚
+ */
+@Component
+export struct RecordingBanner {
+  @State heartbeat: number = 0;
+  private timer: number = -1;
+  private tagDialog: CustomDialogController | null = null;
+  private photoDialog: CustomDialogController | null = null;
+
+  aboutToAppear(): void {
+    this.timer = setInterval(() => {
+      this.heartbeat++;
+    }, 500);
+  }
+
+  aboutToDisappear(): void {
+    if (this.timer >= 0) {
+      clearInterval(this.timer);
+      this.timer = -1;
+    }
+  }
+
+  private openTagDialog(): void {
+    const rec = TrackRecorder.get();
+    if (!rec.isRunning()) {
+      promptAction.showToast({ message: 'å½“å‰æ²¡æœ‰è¿›è¡Œä¸­çš„è½¨è¿¹' });
+      return;
+    }
+    this.tagDialog = new CustomDialogController({
+      builder: TrackTagDialog({
+        onSave: (tagType: string, note: string): void => {
+          const snap = rec.getSnapshot();
+          Store.insertTrackTag(rec.getTrackId(), Date.now(), tagType, note,
+            snap.latitude, snap.longitude, snap.altitude, snap.headingDeg)
+            .then(() => {
+              promptAction.showToast({ message: `å·²è®°å½•ã€Œ${tagType}ã€æ ‡ç­¾` });
+            })
+            .catch(() => {
+              promptAction.showToast({ message: 'æ ‡ç­¾ä¿å­˜å¤±è´¥' });
+            });
+        }
+      }),
+      customStyle: false
+    });
+    this.tagDialog.open();
+  }
+
+  private takePhoto(): void {
+    const rec = TrackRecorder.get();
+    if (!rec.isRunning()) {
+      promptAction.showToast({ message: 'å½“å‰æ²¡æœ‰è¿›è¡Œä¸­çš„è½¨è¿¹' });
+      return;
+    }
+    const trackId = rec.getTrackId();
+    captureTrackPhoto(trackId).then((cap) => {
+      // æ‹ç…§æœŸé—´ç”¨æˆ·å¯èƒ½å·²åœæ­¢è®°å½•ï¼Œæ­¤æ—¶ä¸¢å¼ƒç…§ç‰‡é¿å…å­¤å„¿æ•°æ®
+      if (!rec.isRunning() || rec.getTrackId() !== trackId) {
+        deletePhotoFile(cap.absPath);
+        promptAction.showToast({ message: 'è½¨è¿¹å·²åœæ­¢ï¼Œç…§ç‰‡å·²ä¸¢å¼ƒ' });
+        return;
+      }
+      this.photoDialog = new CustomDialogController({
+        builder: PhotoNoteDialog({
+          absPath: cap.absPath,
+          onSave: (note: string): void => {
+            const snap = rec.getSnapshot();
+            Store.insertTrackPhoto(trackId, cap.timeMs, cap.relPath, note,
+              snap.latitude, snap.longitude, snap.altitude, snap.headingDeg)
+              .then(() => {
+                promptAction.showToast({ message: 'ç…§ç‰‡å·²å…³è”åˆ°è½¨è¿¹' });
+              })
+              .catch(() => {
+                promptAction.showToast({ message: 'ç…§ç‰‡ä¿å­˜å¤±è´¥' });
+              });
+          },
+          onDiscard: (): void => {
+            deletePhotoFile(cap.absPath);
+            promptAction.showToast({ message: 'ç…§ç‰‡å·²ä¸¢å¼ƒ' });
+          }
+        }),
+        customStyle: false
+      });
+      this.photoDialog.open();
+    }).catch(() => {
+      promptAction.showToast({ message: 'æ‹ç…§æœªå®Œæˆ' });
+    });
+  }
+
+  private stopRecording(): void {
+    TrackRecorder.get().stop().then(() => {
+      promptAction.showToast({ message: 'è½¨è¿¹å·²ä¿å­˜' });
+    }).catch(() => {
+    });
+  }
+
+  build() {
+    if (AppStorage.get<boolean>('rm_recording')) {
+      ForEach([this.heartbeat], (h: number) => {
+        Column({ space: 8 }) {
+          Text(`â— æ­£åœ¨è®°å½•ã€Œ${AppStorage.get<string>('rm_rec_track_name')}ã€  ${fmtDuration(AppStorage.get<number>('rm_elapsed') as number)}ï¼ˆåˆ‡é¡µé¢ä¸ä¸­æ–­ï¼‰`)
+            .fontSize(14)
+            .width('100%')
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+          Row({ space: 10 }) {
+            Button('æ‹ç…§').fontSize(13).layoutWeight(1).onClick(() => {
+              this.takePhoto();
+            })
+            Button('æ‰“æ ‡ç­¾').fontSize(13).layoutWeight(1).onClick(() => {
+              this.openTagDialog();
+            })
+            Button('â–  åœæ­¢').fontSize(13).layoutWeight(1)
+              .fontColor(Color.White)
+              .backgroundColor('#E84026')
+              .onClick(() => {
+                this.stopRecording();
+              })
+          }.width('100%')
+        }
+        .width('100%')
+        .padding(12)
+        .backgroundColor('#330A59F7')
+      }, (h: number) => h + '')
+    }
+  }
+}
+ÀÔrE–²@ohos.promptAction­../data/Store¸../sensors/TrackRecorder¯../common/Utilsµ../sensors/TrackMedia°./CaptureDialogsÔrF—ªassertions¨external¢id¤meta±moduleSideEffectsªresolvedByµsyntheticNamedExportsAÃÙ^ hvigor_ignore_D:_DevEco_DevEco Studio_sdk_default_openharmony_ets_api_@ohos.promptAction.d.tsAÃªoh-resolveÂFAÂÙTD:\CityUproject\CampusNavigation\RoomMarkerHarmony\entry\src\main\ets\data\Store.etsAÃªoh-resolveÂFAÂÙ_D:\CityUproject\CampusNavigation\RoomMarkerHarmony\entry\src\main\ets\sensors\TrackRecorder.etsAÃªoh-resolveÂFAÂÙVD:\CityUproject\CampusNavigation\RoomMarkerHarmony\entry\src\main\ets\common\Utils.etsAÃªoh-resolveÂFAÂÙ\D:\CityUproject\CampusNavigation\RoomMarkerHarmony\entry\src\main\ets\sensors\TrackMedia.etsAÃªoh-resolveÂFAÂÙ^D:\CityUproject\CampusNavigation\RoomMarkerHarmony\entry\src\main\ets\pages\CaptureDialogs.etsAÃªoh-resolveÂ“ÔrG–§version¤fileªsourceRoot§sources¥names¨mappings²RecordingBanner.js ‘³RecordingBanner.etsÜ õ–”    ”  	”  ”  ”-  )”.  *˜”   ” ”	 	” ” ” ”% %”& &˜”   ” ”	 	” ” ” ”8 8”9 9š”   ” ”	 	” ” ”+ +”- -”3 3”ÌJ ÌJ”ÌK ÌK˜”   ” ”	 	” ” ” ”- -”. .š”   ” ”	 	” ” ”( (”* *”0 0”ÌB ÌB”ÌC ÌC””   ” ” ” ‘”  ’”8 ”9 “” ” ” ’” 5” 9’” 7” ;‘” ÌC’” 	” ’” 	” ’” ” ™” ” ” 	” ” ”  ”! ”$  ”& "–” ” 
+” ” ” ” –” ”	 ” ” 
+” ” ’” ” ’” ” ˜” ” ” ” ” ” ” ” ˜” ” ” ” ” ”$ ”% ”&  ˜” ” 
+” ” ” ” ” ” ‘”	 ’” ” ’” !
+” !™” "” "
+” "” "”! "”" "”% "!”' "#”( "$˜” #” #” #	” #” #” #” #” #œ” $” $” $”" $”# $”% $”, $&”. $(”: $4”< $6”= $7”> $8’” %” %‘”	 &–” '” '” '	” '” '”3 '/’” (” (“”# (”1 (”8 (™” )” )” )” )”$ ) ”& )"”* ).”, )6”. )8™” *
+” *”" *”% *”( *”) *”4 *&”6 *(”7 *)Ü #” +
+” +” +”, +”- +”0 +"”1 +#”; +-”= +/”? +1”ÌC +5”ÌD +6”ÌG +9”ÌI +;”ÌK +=”ÌR +ÌD”ÌT +ÌF”ÌX +ÌJ”ÌZ ,”Ì^ ,”Ì_ ,”Ìg ,”Ìi ,”Ìm ,”Ìn , ”Ìw ,)”Ìy ,+”Ì} ,/”Ì~ ,0”Ì† ,8”Ìˆ ,:”ÌŒ ,>”Ì ,?”Ì— ,ÌI”Ì˜ ,ÌJ•” -”! -”" -”% -”' -” .”( .”) .”2 .$”3 .%”5 .'”< ..”> .0”ÌE .7”ÌL .>”ÌQ .ÌC”ÌS .ÌE”ÌT .ÌF”ÌU .ÌG“” /” /” /•” 0”" 0”# 0”& 0”( 0œ” 1”( 1”) 1”2 1$”3 1%”5 1'”< 1.”> 10”ÌF 18”ÌH 1:”ÌI 1;”ÌJ 1<”” 2” 2” 2” 2’” 3” 3	‘” 4””' '”+ '”, '	”5 '™” )” )”  )”! )”( ) ”* )"”. ).”0 )6”2 )8™” *
+”" *”& *”) *”, *”- *”8 *&”: *(”; *)Ü #” +
+”! +”" +”0 +”1 +”4 +"”5 +#”? +-”ÌA +/”ÌC +1”ÌG +5”ÌH +6”ÌK +9”ÌM +;”ÌO +=”ÌV +ÌD”ÌX +ÌF”Ì\ +ÌJ”Ì^ ,”Ìb ,”Ìc ,”Ìk ,”Ìm ,”Ìq ,”Ìr , ”Ì{ ,)”Ì} ,+”Ì ,/”Ì‚ ,0”ÌŠ ,8”ÌŒ ,:”Ì ,>”Ì‘ ,?”Ì› ,ÌI”Ìœ ,ÌJ•”! -”% -”& -”) -”+ -”  .”, .”- .”6 .$”7 .%”9 .'”Ì@ ..”ÌB .0”ÌI .7”ÌP .>”ÌU .ÌC”ÌW .ÌE”ÌX .ÌF”ÌY .ÌG“” /” /” /•”! 0”& 0”' 0”* 0”, 0œ”  1”, 1”- 1”6 1$”7 1%”9 1'”Ì@ 1.”ÌB 10”ÌJ 18”ÌL 1:”ÌM 1;”ÌN 1<”” 2” 2” 2” 2’” 3” 3	‘” 4”” 5” 5” 5” 5’” 6” 6˜” 7” 7” 7	” 7” 7” 7” 7” 7’” 8” 8’” :
+” :™” ;” ;
+” ;” ;”! ;”" ;”% ;!”' ;#”( ;$˜” <” <” <	” <” <” <” <” <œ” =” =” =”" =”# =”% =”, =&”. =(”: =4”< =6”= =7”> =8’” >” >‘”	 ?™” Ì@” Ì@
+” Ì@” Ì@” Ì@” Ì@”& Ì@"”( Ì@$”) Ì@%œ” ÌA” ÌA” ÌA”! ÌA”" ÌA”# ÌA”' ÌA#”( ÌA$”) ÌA%”, ÌA(”. ÌA*”0 ÌA,’” ÌB”) ÌB#Ÿ” ÌC” ÌC
+” ÌC” ÌC” ÌC” ÌC”  ÌC”$ ÌC”' ÌC!”( ÌC"”2 ÌC,”4 ÌC.”9 ÌC3”Ì@ ÌC:”ÌB ÌC<˜” ÌD” ÌD”  ÌD”# ÌD”$ ÌD”+ ÌD#”, ÌD$”- ÌD%œ” ÌE” ÌE” ÌE”& ÌE”' ÌE”) ÌE!”0 ÌE(”2 ÌE*”? ÌE7”ÌA ÌE9”ÌB ÌE:”ÌC ÌE;’” ÌF” ÌF‘” ÌG–” ÌH” ÌH
+” ÌH” ÌH”# ÌH”9 ÌH3’” ÌI” ÌI“”' ÌI”6 ÌI ”= ÌI!–” ÌJ
+” ÌJ”! ÌJ”$ ÌJ”% ÌJ”, ÌJ—” ÌK
+” ÌK”  ÌK”! ÌK”% ÌK”' ÌK'”) ÌK)™” ÌL”" ÌL”& ÌL”) ÌL”, ÌL”- ÌL”8 ÌL(”: ÌL*”; ÌL+Ü !” ÌM”! ÌM”" ÌM”2 ÌM"”3 ÌM#”: ÌM*”< ÌM,”? ÌM/”Ì@ ÌM0”ÌF ÌM6”ÌH ÌM8”ÌK ÌM;”ÌL ÌM<”ÌS ÌMÌC”ÌU ÌMÌE”ÌY ÌMÌI”Ì[ ÌN”Ì_ ÌN”Ì` ÌN”Ìh ÌN”Ìj ÌN”Ìn ÌN!”Ìo ÌN"”Ìx ÌN+”Ìz ÌN-”Ì~ ÌN1”Ì ÌN2”Ì‡ ÌN:”Ì‰ ÌN<”Ì ÌNÌ@”Ì ÌNÌA”Ì˜ ÌNÌK”Ì™ ÌNÌL•”! ÌO”% ÌO”& ÌO”) ÌO”+ ÌOœ”  ÌP”, ÌP”- ÌP”6 ÌP&”7 ÌP'”9 ÌP)”Ì@ ÌP0”ÌB ÌP2”ÌL ÌP<”ÌN ÌP>”ÌO ÌP?”ÌP ÌPÌ@“” ÌQ” ÌQ” ÌQ•”! ÌR”& ÌR”' ÌR”* ÌR”, ÌRœ”  ÌS”, ÌS”- ÌS”6 ÌS&”7 ÌS'”9 ÌS)”Ì@ ÌS0”ÌB ÌS2”ÌJ ÌS:”ÌL ÌS<”ÌM ÌS=”ÌN ÌS>”” ÌT” ÌT” ÌT” ÌT’” ÌU
+” ÌU•” ÌV
+”! ÌV”# ÌV”& ÌV”( ÌV ˜” ÌW”+ ÌW”, ÌW”/ ÌW”0 ÌW ”7 ÌW'”8 ÌW(”9 ÌW)œ” ÌX”( ÌX”) ÌX”2 ÌX"”3 ÌX#”5 ÌX%”< ÌX,”> ÌX.”ÌE ÌX5”ÌG ÌX7”ÌH ÌX8”ÌI ÌX9’” ÌY
+” ÌY‘” ÌZ	””+ ÌH”/ ÌH
+”0 ÌH”; ÌH–” ÌJ
+”# ÌJ”% ÌJ”( ÌJ”) ÌJ”0 ÌJ—” ÌK
+”" ÌK”$ ÌK”% ÌK”) ÌK”+ ÌK'”- ÌK)™”  ÌL”& ÌL”* ÌL”- ÌL”0 ÌL”1 ÌL”< ÌL(”> ÌL*”? ÌL+Ü !”  ÌM”% ÌM”& ÌM”6 ÌM"”7 ÌM#”> ÌM*”Ì@ ÌM,”ÌC ÌM/”ÌD ÌM0”ÌJ ÌM6”ÌL ÌM8”ÌO ÌM;”ÌP ÌM<”ÌW ÌMÌC”ÌY ÌMÌE”Ì] ÌMÌI”Ì_ ÌN”Ìc ÌN”Ìd ÌN”Ìl ÌN”Ìn ÌN”Ìr ÌN!”Ìs ÌN"”Ì| ÌN+”Ì~ ÌN-”Ì‚ ÌN1”Ìƒ ÌN2”Ì‹ ÌN:”Ì ÌN<”Ì‘ ÌNÌ@”Ì’ ÌNÌA”Ìœ ÌNÌK”Ì ÌNÌL•”% ÌO”) ÌO”* ÌO”- ÌO”/ ÌOœ”$ ÌP”0 ÌP”1 ÌP”: ÌP&”; ÌP'”= ÌP)”ÌD ÌP0”ÌF ÌP2”ÌP ÌP<”ÌR ÌP>”ÌS ÌP?”ÌT ÌPÌ@“”  ÌQ”! ÌQ”" ÌQ•”% ÌR”* ÌR”+ ÌR”. ÌR”0 ÌRœ”$ ÌS”0 ÌS”1 ÌS”: ÌS&”; ÌS'”= ÌS)”ÌD ÌS0”ÌF ÌS2”ÌN ÌS:”ÌP ÌS<”ÌQ ÌS=”ÌR ÌS>””  ÌT”! ÌT”" ÌT”# ÌT’” ÌU
+” ÌU•” ÌV
+”% ÌV”' ÌV”* ÌV”, ÌV ˜”  ÌW”/ ÌW”0 ÌW”3 ÌW”4 ÌW ”; ÌW'”< ÌW(”= ÌW)œ”  ÌX”, ÌX”- ÌX”6 ÌX"”7 ÌX#”9 ÌX%”Ì@ ÌX,”ÌB ÌX.”ÌI ÌX5”ÌK ÌX7”ÌL ÌX8”ÌM ÌX9’” ÌY
+” ÌY‘” ÌZ
+”” Ì[” Ì[” Ì[”" Ì[’” Ì\” Ì\	˜” Ì]” Ì]
+” Ì]” Ì]” Ì]”! Ì]”# Ì]”$ Ì]˜” Ì^”	 Ì^”
+ Ì^” Ì^” Ì^” Ì^” Ì^” Ì^œ” Ì_” Ì_” Ì_”" Ì_”# Ì_”% Ì_”, Ì_&”. Ì_(”5 Ì_/”7 Ì_1”8 Ì_2”9 Ì_3”” Ì`”	 Ì`”
+ Ì`” Ì`’” Ìa” Ìa’” Ìc
+” Ìc” Ìd” Ìd” Ìd” Ìd” Ìd” Ìd”  Ìd”" Ìd”# Ìd”' Ìd#”( Ìd$”+ Ìd'”- Ìd)œ” Ìe” Ìe” Ìe”" Ìe”# Ìe”% Ìe”, Ìe&”. Ìe(”5 Ìe/”7 Ìe1”8 Ìe2”9 Ìe3˜” Ìf”	 Ìf”
+ Ìf” Ìf” Ìf” Ìf” Ìf” Ìf”” Ìg”	 Ìg”
+ Ìg” Ìg’” Ìh” Ìh‘” Ìj™” Ìk” Ìk” Ìk” Ìk” Ìk” Ìk ”- Ìk.”. Ìk/”0 Ìk1’” Ìl” Ìl˜”  Ìm”& Ìm”. Ìm”0 Ìm”5 Ìm”7 Ìm”8 Ìm”: Ìm–”  Ìm”& Ìm”' Ì‚	”, Ì‚”- Ì‚”3 Ì‚–”  Ìm”& Ìm”' Ìƒ	”. Ìƒ”/ Ìƒ”1 Ìƒ–”  Ìm”& Ìm”' Ì„	”6 Ì„”7 Ì„”ÌB Ì„$Ü ”  Ìn
+”$ Ìn”, Ìn”6 Ìn”Ì@ Ìn#”ÌA Ìn$”ÌD Ìn'”ÌE Ìn0”ÌX ÌnÌC”ÌY ÌnÌD”Ì_ ÌnÌJ”Ìj ÌnÌU”Ìk ÌnÌV”Ìu ÌnÌ`”Ìv ÌnÌa”Ìy ÌnÌd”Ìz ÌnÌm”Ì† ÌnÌy”Ì‡ ÌnÌ„”Ìˆ ÌnÌ…”Ì’ ÌnÌ–”  Ìn
+”$ Ìn”% Ìo”- Ìo”. Ìo”0 Ìo–”  Ìn
+”$ Ìn”% Ìp”* Ìp”+ Ìp”1 Ìp–”  Ìn
+”$ Ìn”% Ìq”- Ìq”. Ìq”/ Ìqœ”  Ìn
+”$ Ìn”% Ìr”1 Ìr”2 Ìr”4 Ìr”< Ìr$”> Ìr&”ÌJ Ìr2”ÌK Ìr3”ÌS Ìr;”ÌU Ìr=’” Ìn
+”  Ìn˜”  Ìs
+”# Ìs”+ Ìs”- Ìs”2 Ìs”4 Ìs”6 Ìs”8 Ìs–”  Ìs
+”# Ìs”$ Ì€”) Ì€”* Ì€”0 Ì€””  Ìt”& Ìt”7 Ìt”; Ìt–”  Ìt”& Ìt”' Ìt”/ Ìt!”0 Ìt"”2 Ìt$–”  Ìt”& Ìt”' Ìt&”3 Ìt2”4 Ìt3”5 Ìt4—”  Ìt”& Ìt”' Ìt6”. Ìt=”/ Ìt>”2 ÌtÌA”4 ÌtÌC–”$ Ìu”( Ìu”) Ìu”2 Ìu”4 Ìu”5 Ìu’”  Ìv”! Ìv’” Ìt”" Ìt””  Ìw”& Ìw”7 Ìw”< Ìw–”  Ìw”& Ìw”' Ìw”/ Ìw"”0 Ìw#”2 Ìw%–”  Ìw”& Ìw”' Ìw'”3 Ìw3”4 Ìw4”5 Ìw5—”  Ìw”& Ìw”' Ìw7”. Ìw>”/ Ìw?”2 ÌwÌB”4 ÌwÌD–”$ Ìx”( Ìx”) Ìx”6 Ìx ”8 Ìx"”9 Ìx#’”  Ìy”! Ìy’” Ìw”" Ìw””  Ìz”& Ìz”7 Ìz”= Ìz–”  Ìz”& Ìz”' Ìz”/ Ìz#”0 Ìz$”2 Ìz&–”  Ìz”& Ìz”' Ìz(”3 Ìz4”4 Ìz5”5 Ìz6˜”  Ìz”& Ìz”' Ì{”0 Ì{”1 Ì{”6 Ì{”7 Ì{”< Ì{$–”  Ìz”& Ìz”' Ì|”6 Ì|”7 Ì|”Ì@ Ì|(—”  Ìz”& Ìz”' Ì}”. Ì}”/ Ì}”2 Ì}”4 Ì}–”$ Ì~”( Ì~”) Ì~”6 Ì~"”8 Ì~$”9 Ì~%’”  Ì”! Ì’” Ìz”" Ìz’” Ìs
+” Ìs’” Ìm”" ÌmŸ”; Ìl”< Ìl”Ì@ Ìl”ÌA Ìl”ÌJ Ìl”ÌK Ìl”Ìe Ì…	”Ìf Ì…
+”Ìg Ì…”Ìi Ì…”Ìk Ì…”Ìl Ì…”Ìm Ì…”Ìp Ì…”Ìr Ì…’” Ìl” Ìl‘” Ì†‘” Ì†‘” Ì‡ÔrH–§version¤file§sources®sourcesContent¥names¨mappingsÀ‘À‘ÀÜ ú‘”    ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”  	 ‘”  
+ ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”    ‘”  ! ‘”  " ‘”  # ‘”  $ ‘”  % ‘”  & ‘”  ' ‘”  ( ‘”  ) ‘”  * ‘”  + ‘”  , ‘”  - ‘”  . ‘”  / ‘”  0 ‘”  1 ‘”  2 ‘”  3 ‘”  4 ‘”  5 ‘”  6 ‘”  7 ‘”  8 ‘”  9 ‘”  : ‘”  ; ‘”  < ‘”  = ‘”  > ‘”  ? ‘”  Ì@ ‘”  ÌA ‘”  ÌB ‘”  ÌC ‘”  ÌD ‘”  ÌE ‘”  ÌF ‘”  ÌG ‘”  ÌH ‘”  ÌI ‘”  ÌJ ‘”  ÌK ‘”  ÌL ‘”  ÌM ‘”  ÌN ‘”  ÌO ‘”  ÌP ‘”  ÌQ ‘”  ÌR ‘”  ÌS ‘”  ÌT ‘”  ÌU ‘”  ÌV ‘”  ÌW ‘”  ÌX ‘”  ÌY ‘”  ÌZ ‘”  Ì[ ‘”  Ì\ ‘”  Ì] ‘”  Ì^ ‘”  Ì_ ‘”  Ì` ‘”  Ìa ‘”  Ìb ‘”  Ìc ‘”  Ìd ‘”  Ìe ‘”  Ìf ‘”  Ìg ‘”  Ìh ‘”  Ìi ‘”  Ìj ‘”  Ìk ‘”  Ìl ‘”  Ìm ‘”  Ìn ‘”  Ìo ‘”  Ìp ‘”  Ìq ‘”  Ìr ‘”  Ìs ‘”  Ìt ‘”  Ìu ‘”  Ìv ‘”  Ìw ‘”  Ìx ‘”  Ìy ‘”  Ìz ‘”  Ì{ ‘”  Ì| ‘”  Ì} ‘”  Ì~ ‘”  Ì ‘”  Ì€ ‘”  Ì ‘”  Ì‚ ‘”  Ìƒ ‘”  Ì„ ‘”  Ì… ‘”  Ì† ‘”  Ì‡ ‘”  Ìˆ ‘”  Ì‰ ‘”  ÌŠ ‘”  Ì‹ ‘”  ÌŒ ‘”  Ì ‘”  Ì ‘”  Ì ‘”  Ì ‘”  Ì‘ ‘”  Ì’ ‘”  Ì“ ‘”  Ì” ‘”  Ì• ‘”  Ì– ‘”  Ì— ‘”  Ì˜ ‘”  Ì™ ‘”  Ìš ‘”  Ì› ‘”  Ìœ ‘”  Ì ‘”  Ì ‘”  ÌŸ ‘”  Ì  ‘”  Ì¡ ‘”  Ì¢ ‘”  Ì£ ‘”  Ì¤ ‘”  Ì¥ ‘”  Ì¦ ‘”  Ì§ ‘”  Ì¨ ‘”  Ì© ‘”  Ìª ‘”  Ì« ‘”  Ì¬ ‘”  Ì­ ‘”  Ì® ‘”  Ì¯ ‘”  Ì° ‘”  Ì± ‘”  Ì² ‘”  Ì³ ‘”  Ì´ ‘”  Ìµ ‘”  Ì¶ ‘”  Ì· ‘”  Ì¸ ‘”  Ì¹ ‘”  Ìº ‘”  Ì» ‘”  Ì¼ ‘”  Ì½ ‘”  Ì¾ ‘”  Ì¿ ‘”  ÌÀ ‘”  ÌÁ ‘”  ÌÂ ‘”  ÌÃ ‘”  ÌÄ ‘”  ÌÅ ‘”  ÌÆ ‘”  ÌÇ ‘”  ÌÈ ‘”  ÌÉ ‘”  ÌÊ ‘”  ÌË ‘”  ÌÌ ‘”  ÌÍ ‘”  ÌÎ ‘”  ÌÏ ‘”  ÌĞ ‘”  ÌÑ ‘”  ÌÒ ‘”  ÌÓ ‘”  ÌÔ ‘”  ÌÕ ‘”  ÌÖ ‘”  Ì× ‘”  ÌØ ‘”  ÌÙ ‘”  ÌÚ ‘”  ÌÛ ‘”  ÌÜ ‘”  Ìİ ‘”  ÌŞ ‘”  Ìß ‘”  Ìà ‘”  Ìá ‘”  Ìâ ‘”  Ìã ‘”  Ìä ‘”  Ìå ‘”  Ìæ ‘”  Ìç ‘”  Ìè ‘”  Ìé ‘”  Ìê ‘”  Ìë ‘”  Ìì ‘”  Ìí ‘”  Ìî ‘”  Ìï ‘”  Ìğ ‘”  Ìñ ‘”  Ìò ‘”  Ìó ‘”  Ìô ‘”  Ìõ ‘”  Ìö ‘”  Ì÷ ‘”  Ìø ‘”  Ìù ÔrI’§missing¦pluginÃ¦genAbcÂÔ  ÔrJ”²dynamicImportCache¹exportAllDeclarationCache»exportNamedDeclarationCache«importCache‘ÔrK–¤type¥start£end«declarationªspecifiers¦source¶ExportNamedDeclarationÍÕÍ- ÔrL–¤type¥start£end¢idªsuperClass¤body°ClassDeclarationÍÜÍ- ÔrM”¤type¥start£end¤nameªIdentifierÍâÍñ¯RecordingBannerMªIdentifierÍúÍ ¦ViewPUÔrN”¤type¥start£end¤body©ClassBodyÍÍ- ÔrO˜¤type¥start£end¦static¨computed£key¤kind¥value°MethodDefinitionÍÍÂÂMªIdentifierÍÍ«constructor«constructorÔrP™¤type¥start£end¢idªexpression©generator¥async¦params¤body²FunctionExpressionÍÍÀÂÂÂ–MªIdentifierÍÍ¦parentMªIdentifierÍÍ"¦paramsMªIdentifierÍ$Í2®__localStorageÔrQ•¤type¥start£end¤left¥right±AssignmentPatternÍ4Í?MªIdentifierÍ4Í:¦elmtIdÔrR–¤type¥start£end¨operator¦prefix¨argument¯UnaryExpressionÍ=Í?¡-ÃÔrS•¤type¥start£end¥value£raw§LiteralÍ>Í?¡1Q±AssignmentPatternÍAÍYMªIdentifierÍAÍM¬paramsLambdaMªIdentifierÍPÍY©undefinedMªIdentifierÍ[Íd©extraInfoN®BlockStatementÍfÍ˜ÔrT”¤type¥start£endªexpression³ExpressionStatementÍqÍ¢ÔrU–¤type¥start£end¦callee©arguments¨optional®CallExpressionÍqÍ¡ÔrV“¤type¥start£end¥SuperÍqÍv”MªIdentifierÍwÍ}¦parentMªIdentifierÍÍ®__localStorageMªIdentifierÍÍ•¦elmtIdMªIdentifierÍ—Í ©extraInfoÂÔrW–¤type¥start£end¤testªconsequent©alternate«IfStatementÍ¬ÍÔrX–¤type¥start£end¤left¨operator¥right°BinaryExpressionÍ°ÍÒR¯UnaryExpressionÍ°ÍÃ¦typeofÃMªIdentifierÍ·ÍÃ¬paramsLambda£===S§LiteralÍÈÍÒ¨functionª"function"N®BlockStatementÍÔÍ‘T³ExpressionStatementÍãÍÔrY–¤type¥start£end¨operator¤left¥right´AssignmentExpressionÍãÍ¡=ÔrZ—¤type¥start£end¦object¨property¨computed¨optional°MemberExpressionÍãÍøV®ThisExpressionÍãÍçMªIdentifierÍèÍø°paramsGenerator_ÂÂMªIdentifierÍûÍ¬paramsLambdaÀT³ExpressionStatementÍÍcY´AssignmentExpressionÍÍb¡=Z°MemberExpressionÍÍ-V®ThisExpressionÍÍ!MªIdentifierÍ"Í-«__heartbeatÂÂÔr[•¤type¥start£end¦callee©arguments­NewExpressionÍ0ÍbMªIdentifierÍ4ÍL¸ObservedPropertySimplePU“S§LiteralÍMÍN ¡0V®ThisExpressionÍPÍTS§LiteralÍVÍa©heartbeat«"heartbeat"T³ExpressionStatementÍmÍ}Y´AssignmentExpressionÍmÍ|¡=Z°MemberExpressionÍmÍwV®ThisExpressionÍmÍqMªIdentifierÍrÍw¥timerÂÂR¯UnaryExpressionÍzÍ|¡-ÃS§LiteralÍ{Í|¡1T³ExpressionStatementÍ‡ÍY´AssignmentExpressionÍ‡Íœ¡=Z°MemberExpressionÍ‡Í•V®ThisExpressionÍ‡Í‹MªIdentifierÍŒÍ•©tagDialogÂÂS§LiteralÍ˜ÍœÀ¤nullT³ExpressionStatementÍ§Í¿Y´AssignmentExpressionÍ§Í¾¡=Z°MemberExpressionÍ§Í·V®ThisExpressionÍ§Í«MªIdentifierÍ¬Í·«photoDialogÂÂS§LiteralÍºÍ¾À¤nullT³ExpressionStatementÍÉÍğU®CallExpressionÍÉÍïZ°MemberExpressionÍÉÍçV®ThisExpressionÍÉÍÍMªIdentifierÍÎÍç¹setInitiallyProvidedValueÂÂ‘MªIdentifierÍèÍî¦paramsÂT³ExpressionStatementÍúÍU®CallExpressionÍúÍZ°MemberExpressionÍúÍV®ThisExpressionÍúÍşMªIdentifierÍÿÍ´finalizeConstructionÂÂÂO°MethodDefinitionÍ#ÍïÂÂMªIdentifierÍ#Í<¹setInitiallyProvidedValue¦methodP²FunctionExpressionÍ<ÍïÀÂÂÂ‘MªIdentifierÍ=ÍC¦paramsN®BlockStatementÍEÍï”W«IfStatementÍPÍ°X°BinaryExpressionÍTÍrZ°MemberExpressionÍTÍdMªIdentifierÍTÍZ¦paramsMªIdentifierÍ[Íd©heartbeatÂÂ£!==MªIdentifierÍiÍr©undefinedN®BlockStatementÍtÍ°‘T³ExpressionStatementÍƒÍ¥Y´AssignmentExpressionÍƒÍ¤¡=Z°MemberExpressionÍƒÍ‘V®ThisExpressionÍƒÍ‡MªIdentifierÍˆÍ‘©heartbeatÂÂZ°MemberExpressionÍ”Í¤MªIdentifierÍ”Íš¦paramsMªIdentifierÍ›Í¤©heartbeatÂÂÀW«IfStatementÍºÍX°BinaryExpressionÍ¾ÍØZ°MemberExpressionÍ¾ÍÊMªIdentifierÍ¾ÍÄ¦paramsMªIdentifierÍÅÍÊ¥timerÂÂ£!==MªIdentifierÍÏÍØ©undefinedN®BlockStatementÍÚÍ‘T³ExpressionStatementÍéÍY´AssignmentExpressionÍéÍ¡=Z°MemberExpressionÍéÍóV®ThisExpressionÍéÍíMªIdentifierÍîÍó¥timerÂÂZ°MemberExpressionÍöÍMªIdentifierÍöÍü¦paramsMªIdentifierÍıÍ¥timerÂÂÀW«IfStatementÍÍxX°BinaryExpressionÍÍ:Z°MemberExpressionÍÍ,MªIdentifierÍÍ"¦paramsMªIdentifierÍ#Í,©tagDialogÂÂ£!==MªIdentifierÍ1Í:©undefinedN®BlockStatementÍ<Íx‘T³ExpressionStatementÍKÍmY´AssignmentExpressionÍKÍl¡=Z°MemberExpressionÍKÍYV®ThisExpressionÍKÍOMªIdentifierÍPÍY©tagDialogÂÂZ°MemberExpressionÍ\ÍlMªIdentifierÍ\Íb¦paramsMªIdentifierÍcÍl©tagDialogÂÂÀW«IfStatementÍ‚ÍèX°BinaryExpressionÍ†Í¦Z°MemberExpressionÍ†Í˜MªIdentifierÍ†ÍŒ¦paramsMªIdentifierÍÍ˜«photoDialogÂÂ£!==MªIdentifierÍÍ¦©undefinedN®BlockStatementÍ¨Íè‘T³ExpressionStatementÍ·ÍİY´AssignmentExpressionÍ·ÍÜ¡=Z°MemberExpressionÍ·ÍÇV®ThisExpressionÍ·Í»MªIdentifierÍ¼ÍÇ«photoDialogÂÂZ°MemberExpressionÍÊÍÜMªIdentifierÍÊÍĞ¦paramsMªIdentifierÍÑÍÜ«photoDialogÂÂÀO°MethodDefinitionÍõÍÂÂMªIdentifierÍõÍ¯updateStateVars¦methodP²FunctionExpressionÍÍÀÂÂÂ‘MªIdentifierÍÍ¦paramsN®BlockStatementÍÍO°MethodDefinitionÍÍŒÂÂMªIdentifierÍÍ<Ù!purgeVariableDependenciesOnElmtId¦methodP²FunctionExpressionÍ<ÍŒÀÂÂÂ‘MªIdentifierÍ=ÍE¨rmElmtIdN®BlockStatementÍGÍŒ‘T³ExpressionStatementÍRÍ…U®CallExpressionÍRÍ„Z°MemberExpressionÍRÍzZ°MemberExpressionÍRÍbV®ThisExpressionÍRÍVMªIdentifierÍWÍb«__heartbeatÂÂMªIdentifierÍcÍz·purgeDependencyOnElmtIdÂÂ‘MªIdentifierÍ{Íƒ¨rmElmtIdÂO°MethodDefinitionÍ’Í;ÂÂMªIdentifierÍ’Í¢°aboutToBeDeleted¦methodP²FunctionExpressionÍ¢Í;ÀÂÂÂN®BlockStatementÍ¥Í;“T³ExpressionStatementÍ°ÍÔU®CallExpressionÍ°ÍÓZ°MemberExpressionÍ°ÍÑZ°MemberExpressionÍ°ÍÀV®ThisExpressionÍ°Í´MªIdentifierÍµÍÀ«__heartbeatÂÂMªIdentifierÍÁÍÑ°aboutToBeDeletedÂÂÂT³ExpressionStatementÍŞÍ
+U®CallExpressionÍŞÍ	Z°MemberExpressionÍŞÍüU®CallExpressionÍŞÍõZ°MemberExpressionÍŞÍóMªIdentifierÍŞÍï±SubscriberManagerMªIdentifierÍğÍó£GetÂÂÂMªIdentifierÍöÍü¦deleteÂÂ‘U®CallExpressionÍıÍZ°MemberExpressionÍıÍV®ThisExpressionÍıÍMªIdentifierÍÍ¤id__ÂÂÂÂT³ExpressionStatementÍÍ4U®CallExpressionÍÍ3Z°MemberExpressionÍÍ1V®ThisExpressionÍÍMªIdentifierÍÍ1¸aboutToBeDeletedInternalÂÂÂO°MethodDefinitionÍAÍÂÂMªIdentifierÍEÍN©heartbeat£getP²FunctionExpressionÍNÍÀÂÂÂN®BlockStatementÍQÍ‘Ôr\”¤type¥start£end¨argument¯ReturnStatementÍ\ÍzU®CallExpressionÍcÍyZ°MemberExpressionÍcÍwZ°MemberExpressionÍcÍsV®ThisExpressionÍcÍgMªIdentifierÍhÍs«__heartbeatÂÂMªIdentifierÍtÍw£getÂÂÂO°MethodDefinitionÍ‡ÍĞÂÂMªIdentifierÍ‹Í”©heartbeat£setP²FunctionExpressionÍ”ÍĞÀÂÂÂ‘MªIdentifierÍ•Í¨newValueN®BlockStatementÍŸÍĞ‘T³ExpressionStatementÍªÍÉU®CallExpressionÍªÍÈZ°MemberExpressionÍªÍ¾Z°MemberExpressionÍªÍºV®ThisExpressionÍªÍ®MªIdentifierÍ¯Íº«__heartbeatÂÂMªIdentifierÍ»Í¾£setÂÂ‘MªIdentifierÍ¿ÍÇ¨newValueÂO°MethodDefinitionÍÖÍIÂÂMªIdentifierÍÖÍã­aboutToAppear¦methodP²FunctionExpressionÍãÍIÀÂÂÂN®BlockStatementÍæÍI‘T³ExpressionStatementÍñÍBY´AssignmentExpressionÍñÍA¡=Z°MemberExpressionÍñÍûV®ThisExpressionÍñÍõMªIdentifierÍöÍû¥timerÂÂU®CallExpressionÍşÍAMªIdentifierÍşÍ	«setInterval’P·ArrowFunctionExpressionÍ
+Í;ÀÂÂÂN®BlockStatementÍÍ;‘T³ExpressionStatementÍÍ0R°UpdateExpressionÍÍ/¢++ÂZ°MemberExpressionÍÍ-V®ThisExpressionÍÍ#MªIdentifierÍ$Í-©heartbeatÂÂS§LiteralÍ=Í@Íô£500ÂO°MethodDefinitionÍOÍÛÂÂMªIdentifierÍOÍ_°aboutToDisappear¦methodP²FunctionExpressionÍ_ÍÛÀÂÂÂN®BlockStatementÍbÍÛ‘W«IfStatementÍmÍÔX°BinaryExpressionÍqÍ€Z°MemberExpressionÍqÍ{V®ThisExpressionÍqÍuMªIdentifierÍvÍ{¥timerÂÂ¢>=S§LiteralÍÍ€ ¡0N®BlockStatementÍ‚ÍÔ’T³ExpressionStatementÍ‘Í«U®CallExpressionÍ‘ÍªMªIdentifierÍ‘Í­clearInterval‘Z°MemberExpressionÍŸÍ©V®ThisExpressionÍŸÍ£MªIdentifierÍ¤Í©¥timerÂÂÂT³ExpressionStatementÍ¹ÍÉY´AssignmentExpressionÍ¹ÍÈ¡=Z°MemberExpressionÍ¹ÍÃV®ThisExpressionÍ¹Í½MªIdentifierÍ¾ÍÃ¥timerÂÂR¯UnaryExpressionÍÆÍÈ¡-ÃS§LiteralÍÇÍÈ¡1ÀO°MethodDefinitionÍáÍíÂÂMªIdentifierÍáÍî­openTagDialog¦methodP²FunctionExpressionÍîÍíÀÂÂÂN®BlockStatementÍñÍí”Ôr]•¤type¥start£end¬declarations¤kind³VariableDeclarationÍüÍ	‘Ôr^•¤type¥start£end¢id¤init²VariableDeclaratorÍ	Í	MªIdentifierÍ	Í	£recU®CallExpressionÍ	Í	Z°MemberExpressionÍ	Í	MªIdentifierÍ	Í	­TrackRecorderMªIdentifierÍ	Í	£getÂÂÂ¥constW«IfStatementÍ	&Í	R¯UnaryExpressionÍ	*Í	:¡!ÃU®CallExpressionÍ	+Í	:Z°MemberExpressionÍ	+Í	8MªIdentifierÍ	+Í	.£recMªIdentifierÍ	/Í	8©isRunningÂÂÂN®BlockStatementÍ	<Í	’T³ExpressionStatementÍ	KÍ	}U®CallExpressionÍ	KÍ	|Z°MemberExpressionÍ	KÍ	aMªIdentifierÍ	KÍ	W¬promptActionMªIdentifierÍ	XÍ	a©showToastÂÂ‘Ôr_”¤type¥start£endªproperties°ObjectExpressionÍ	bÍ	{‘Ôr`™¤type¥start£end¦method©shorthand¨computed£key¥value¤kind¨PropertyÍ	dÍ	yÂÂÂMªIdentifierÍ	dÍ	k§messageS§LiteralÍ	mÍ	y¾å½“å‰æ²¡æœ‰è¿›è¡Œä¸­çš„è½¨è¿¹Ù 'å½“å‰æ²¡æœ‰è¿›è¡Œä¸­çš„è½¨è¿¹'¤initÂ\¯ReturnStatementÍ	‹Í	’ÀÀT³ExpressionStatementÍ	§ÍÆY´AssignmentExpressionÍ	§ÍÅ¡=Z°MemberExpressionÍ	§Í	µV®ThisExpressionÍ	§Í	«MªIdentifierÍ	¬Í	µ©tagDialogÂÂ[­NewExpressionÍ	¸ÍÅMªIdentifierÍ	¼Í	Ò¶CustomDialogController’_°ObjectExpressionÍ	ÓÍ¾’`¨PropertyÍ	âÍ’ÂÂÂMªIdentifierÍ	âÍ	é§builderP·ArrowFunctionExpressionÍ	ëÍ’ÀÂÂÂN®BlockStatementÍ	ñÍ’•]³VariableDeclarationÍ
+Íø‘^²VariableDeclaratorÍ
+Í÷MªIdentifierÍ
+Í
+¨jsDialog[­NewExpressionÍ
+Í÷MªIdentifierÍ
+Í
+%®TrackTagDialog–V®ThisExpressionÍ
+&Í
+*_°ObjectExpressionÍ
+,Í‘`¨PropertyÍ
+CÍ|ÂÂÂMªIdentifierÍ
+CÍ
+I¦onSaveP·ArrowFunctionExpressionÍ
+KÍ|ÀÂÂÂ’MªIdentifierÍ
+LÍ
+S§tagTypeMªIdentifierÍ
+UÍ
+Y¤noteN®BlockStatementÍ
+^Í|’]³VariableDeclarationÍ
+yÍ
+˜‘^²VariableDeclaratorÍ
+Í
+—MªIdentifierÍ
+Í
+ƒ¤snapU®CallExpressionÍ
+†Í
+—Z°MemberExpressionÍ
+†Í
+•MªIdentifierÍ
+†Í
+‰£recMªIdentifierÍ
+ŠÍ
+•«getSnapshotÂÂÂ¥constT³ExpressionStatementÍ
+²ÍeU®CallExpressionÍ
+²ÍdZ°MemberExpressionÍ
+²ÍôU®CallExpressionÍ
+²ÍĞZ°MemberExpressionÍ
+²ÍUU®CallExpressionÍ
+²Í2Z°MemberExpressionÍ
+²Í
+ÆMªIdentifierÍ
+²Í
+·¥StoreMªIdentifierÍ
+¸Í
+Æ®insertTrackTagÂÂ˜U®CallExpressionÍ
+ÇÍ
+×Z°MemberExpressionÍ
+ÇÍ
+ÕMªIdentifierÍ
+ÇÍ
+Ê£recMªIdentifierÍ
+ËÍ
+ÕªgetTrackIdÂÂÂU®CallExpressionÍ
+ÙÍ
+ãZ°MemberExpressionÍ
+ÙÍ
+áMªIdentifierÍ
+ÙÍ
+İ¤DateMªIdentifierÍ
+ŞÍ
+á£nowÂÂÂMªIdentifierÍ
+åÍ
+ì§tagTypeMªIdentifierÍ
+îÍ
+ò¤noteZ°MemberExpressionÍ
+ôÍMªIdentifierÍ
+ôÍ
+ø¤snapMªIdentifierÍ
+ùÍ¨latitudeÂÂZ°MemberExpressionÍÍMªIdentifierÍÍ¤snapMªIdentifierÍÍ©longitudeÂÂZ°MemberExpressionÍÍ MªIdentifierÍÍ¤snapMªIdentifierÍÍ ¨altitudeÂÂZ°MemberExpressionÍ"Í1MªIdentifierÍ"Í&¤snapMªIdentifierÍ'Í1ªheadingDegÂÂÂMªIdentifierÍQÍU¤thenÂÂ‘P·ArrowFunctionExpressionÍVÍÏÀÂÂÂN®BlockStatementÍ\ÍÏ‘T³ExpressionStatementÍ{Í´U®CallExpressionÍ{Í³Z°MemberExpressionÍ{Í‘MªIdentifierÍ{Í‡¬promptActionMªIdentifierÍˆÍ‘©showToastÂÂ‘_°ObjectExpressionÍ’Í²‘`¨PropertyÍ”Í°ÂÂÂMªIdentifierÍ”Í›§messageÔra•¤type¥start£end«expressions¦quasis¯TemplateLiteralÍÍ°‘MªIdentifierÍ¤Í«§tagType’Ôrb•¤type¥start£end¥value¤tail¯TemplateElementÍÍ¢Ôrc’£raw¦cooked¬å·²è®°å½•ã€Œ¬å·²è®°å½•ã€ŒÂb¯TemplateElementÍ¬Í¯c©ã€æ ‡ç­¾©ã€æ ‡ç­¾Ã¤initÂÂMªIdentifierÍïÍô¥catchÂÂ‘P·ArrowFunctionExpressionÍõÍcÀÂÂÂN®BlockStatementÍûÍc‘T³ExpressionStatementÍÍHU®CallExpressionÍÍGZ°MemberExpressionÍÍ0MªIdentifierÍÍ&¬promptActionMªIdentifierÍ'Í0©showToastÂÂ‘_°ObjectExpressionÍ1ÍF‘`¨PropertyÍ3ÍDÂÂÂMªIdentifierÍ3Í:§messageS§LiteralÍ<ÍD²æ ‡ç­¾ä¿å­˜å¤±è´¥´'æ ‡ç­¾ä¿å­˜å¤±è´¥'¤initÂÂ¤initMªIdentifierÍ‘Íš©undefinedR¯UnaryExpressionÍœÍ¡-ÃS§LiteralÍÍ¡1P·ArrowFunctionExpressionÍ Í©ÀÂÂÂN®BlockStatementÍ¦Í©_°ObjectExpressionÍ«Íö“`¨PropertyÍ­ÍáÂÂÂMªIdentifierÍ­Í±¤pageS§LiteralÍ³ÍáÙ,entry/src/main/ets/pages/RecordingBanner.etsÙ."entry/src/main/ets/pages/RecordingBanner.ets"¤init`¨PropertyÍãÍëÂÂÂMªIdentifierÍãÍç¤lineS§LiteralÍéÍë)¢41¤init`¨PropertyÍíÍôÂÂÂMªIdentifierÍíÍğ£colS§LiteralÍòÍô¢16¤init£letT³ExpressionStatementÍ
+Í1U®CallExpressionÍ
+Í0Z°MemberExpressionÍ
+Í MªIdentifierÍ
+Í¨jsDialogMªIdentifierÍÍ ­setControllerÂÂ‘Z°MemberExpressionÍ!Í/V®ThisExpressionÍ!Í%MªIdentifierÍ&Í/©tagDialogÂÂÂT³ExpressionStatementÍCÍ[U®CallExpressionÍCÍZZ°MemberExpressionÍCÍPMªIdentifierÍCÍI¦ViewPUMªIdentifierÍJÍP¦createÂÂ‘MªIdentifierÍQÍY¨jsDialogÂ]³VariableDeclarationÍmÍH‘^²VariableDeclaratorÍqÍGMªIdentifierÍqÍ}¬paramsLambdaP·ArrowFunctionExpressionÍ€ÍGÀÂÂÂN®BlockStatementÍ†ÍG‘\¯ReturnStatementÍÍ4_°ObjectExpressionÍ¤Í3‘`¨PropertyÍ¿ÍÂÂÂMªIdentifierÍ¿ÍÅ¦onSaveP·ArrowFunctionExpressionÍÇÍÀÂÂÂ’MªIdentifierÍÈÍÏ§tagTypeMªIdentifierÍÑÍÕ¤noteN®BlockStatementÍÚÍ’]³VariableDeclarationÍùÍ‘^²VariableDeclaratorÍÿÍMªIdentifierÍÿÍ¤snapU®CallExpressionÍÍZ°MemberExpressionÍÍMªIdentifierÍÍ	£recMªIdentifierÍ
+Í«getSnapshotÂÂÂ¥constT³ExpressionStatementÍ6ÍU®CallExpressionÍ6Í Z°MemberExpressionÍ6ÍˆU®CallExpressionÍ6Í`Z°MemberExpressionÍ6ÍİU®CallExpressionÍ6Í¶Z°MemberExpressionÍ6ÍJMªIdentifierÍ6Í;¥StoreMªIdentifierÍ<ÍJ®insertTrackTagÂÂ˜U®CallExpressionÍKÍ[Z°MemberExpressionÍKÍYMªIdentifierÍKÍN£recMªIdentifierÍOÍYªgetTrackIdÂÂÂU®CallExpressionÍ]ÍgZ°MemberExpressionÍ]ÍeMªIdentifierÍ]Ía¤DateMªIdentifierÍbÍe£nowÂÂÂMªIdentifierÍiÍp§tagTypeMªIdentifierÍrÍv¤noteZ°MemberExpressionÍxÍ…MªIdentifierÍxÍ|¤snapMªIdentifierÍ}Í…¨latitudeÂÂZ°MemberExpressionÍ‡Í•MªIdentifierÍ‡Í‹¤snapMªIdentifierÍŒÍ•©longitudeÂÂZ°MemberExpressionÍ—Í¤MªIdentifierÍ—Í›¤snapMªIdentifierÍœÍ¤¨altitudeÂÂZ°MemberExpressionÍ¦ÍµMªIdentifierÍ¦Íª¤snapMªIdentifierÍ«ÍµªheadingDegÂÂÂMªIdentifierÍÙÍİ¤thenÂÂ‘P·ArrowFunctionExpressionÍŞÍ_ÀÂÂÂN®BlockStatementÍäÍ_‘T³ExpressionStatementÍÍ@U®CallExpressionÍÍ?Z°MemberExpressionÍÍMªIdentifierÍÍ¬promptActionMªIdentifierÍÍ©showToastÂÂ‘_°ObjectExpressionÍÍ>‘`¨PropertyÍ Í<ÂÂÂMªIdentifierÍ Í'§messagea¯TemplateLiteralÍ)Í<‘MªIdentifierÍ0Í7§tagType’b¯TemplateElementÍ*Í.c¬å·²è®°å½•ã€Œ¬å·²è®°å½•ã€ŒÂb¯TemplateElementÍ8Í;c©ã€æ ‡ç­¾©ã€æ ‡ç­¾Ã¤initÂÂMªIdentifierÍƒÍˆ¥catchÂÂ‘P·ArrowFunctionExpressionÍ‰ÍÿÀÂÂÂN®BlockStatementÍÍÿ‘T³ExpressionStatementÍ²ÍàU®CallExpressionÍ²ÍßZ°MemberExpressionÍ²ÍÈMªIdentifierÍ²Í¾¬promptActionMªIdentifierÍ¿ÍÈ©showToastÂÂ‘_°ObjectExpressionÍÉÍŞ‘`¨PropertyÍËÍÜÂÂÂMªIdentifierÍËÍÒ§messageS§LiteralÍÔÍÜ²æ ‡ç­¾ä¿å­˜å¤±è´¥´'æ ‡ç­¾ä¿å­˜å¤±è´¥'¤initÂÂ¤init£letT³ExpressionStatementÍZÍƒY´AssignmentExpressionÍZÍ‚¡=Z°MemberExpressionÍZÍsMªIdentifierÍZÍb¨jsDialogMªIdentifierÍcÍs°paramsGenerator_ÂÂMªIdentifierÍvÍ‚¬paramsLambda¤init`¨PropertyÍ¡Í³ÂÂÂMªIdentifierÍ¡Í¬«customStyleS§LiteralÍ®Í³Â¥false¤initV®ThisExpressionÍÀÍÄT³ExpressionStatementÍĞÍæU®CallExpressionÍĞÍåZ°MemberExpressionÍĞÍãZ°MemberExpressionÍĞÍŞV®ThisExpressionÍĞÍÔMªIdentifierÍÕÍŞ©tagDialogÂÂMªIdentifierÍßÍã¤openÂÂÂO°MethodDefinitionÍóÍ?ÂÂMªIdentifierÍóÍü©takePhoto¦methodP²FunctionExpressionÍüÍ?ÀÂÂÂN®BlockStatementÍÿÍ?”]³VariableDeclarationÍ
+Í*‘^²VariableDeclaratorÍÍ)MªIdentifierÍÍ£recU®CallExpressionÍÍ)Z°MemberExpressionÍÍ'MªIdentifierÍÍ#­TrackRecorderMªIdentifierÍ$Í'£getÂÂÂ¥constW«IfStatementÍ4Í«R¯UnaryExpressionÍ8ÍH¡!ÃU®CallExpressionÍ9ÍHZ°MemberExpressionÍ9ÍFMªIdentifierÍ9Í<£recMªIdentifierÍ=ÍF©isRunningÂÂÂN®BlockStatementÍJÍ«’T³ExpressionStatementÍYÍ‹U®CallExpressionÍYÍŠZ°MemberExpressionÍYÍoMªIdentifierÍYÍe¬promptActionMªIdentifierÍfÍo©showToastÂÂ‘_°ObjectExpressionÍpÍ‰‘`¨PropertyÍrÍ‡ÂÂÂMªIdentifierÍrÍy§messageS§LiteralÍ{Í‡¾å½“å‰æ²¡æœ‰è¿›è¡Œä¸­çš„è½¨è¿¹Ù 'å½“å‰æ²¡æœ‰è¿›è¡Œä¸­çš„è½¨è¿¹'¤initÂ\¯ReturnStatementÍ™Í ÀÀ]³VariableDeclarationÍµÍÖ‘^²VariableDeclaratorÍ»ÍÕMªIdentifierÍ»ÍÂ§trackIdU®CallExpressionÍÅÍÕZ°MemberExpressionÍÅÍÓMªIdentifierÍÅÍÈ£recMªIdentifierÍÉÍÓªgetTrackIdÂÂÂ¥constT³ExpressionStatementÍàÍ8U®CallExpressionÍàÍ7Z°MemberExpressionÍàÍèU®CallExpressionÍàÍâZ°MemberExpressionÍàÍÿU®CallExpressionÍàÍúMªIdentifierÍàÍñ±captureTrackPhoto‘MªIdentifierÍòÍù§trackIdÂMªIdentifierÍûÍÿ¤thenÂÂ‘P·ArrowFunctionExpressionÍ ÍáÀÂÂÂ‘MªIdentifierÍÍ£capN®BlockStatementÍ	Íá“W«IfStatementÍCÍX±LogicalExpressionÍGÍwR¯UnaryExpressionÍGÍW¡!ÃU®CallExpressionÍHÍWZ°MemberExpressionÍHÍUMªIdentifierÍHÍK£recMªIdentifierÍLÍU©isRunningÂÂÂ¢||X°BinaryExpressionÍ[ÍwU®CallExpressionÍ[ÍkZ°MemberExpressionÍ[ÍiMªIdentifierÍ[Í^£recMªIdentifierÍ_ÍiªgetTrackIdÂÂÂ£!==MªIdentifierÍpÍw§trackIdN®BlockStatementÍyÍ“T³ExpressionStatementÍŒÍ©U®CallExpressionÍŒÍ¨MªIdentifierÍŒÍ›¯deletePhotoFile‘Z°MemberExpressionÍœÍ§MªIdentifierÍœÍŸ£capMªIdentifierÍ Í§§absPathÂÂÂT³ExpressionStatementÍ»ÍîU®CallExpressionÍ»ÍíZ°MemberExpressionÍ»ÍÑMªIdentifierÍ»ÍÇ¬promptActionMªIdentifierÍÈÍÑ©showToastÂÂ‘_°ObjectExpressionÍÒÍì‘`¨PropertyÍÔÍêÂÂÂMªIdentifierÍÔÍÛ§messageS§LiteralÍİÍêÙ!è½¨è¿¹å·²åœæ­¢ï¼Œç…§ç‰‡å·²ä¸¢å¼ƒÙ#'è½¨è¿¹å·²åœæ­¢ï¼Œç…§ç‰‡å·²ä¸¢å¼ƒ'¤initÂ\¯ReturnStatementÍ ÍÀÀT³ExpressionStatementÍ$Í°Y´AssignmentExpressionÍ$Í¯¡=Z°MemberExpressionÍ$Í4V®ThisExpressionÍ$Í(MªIdentifierÍ)Í4«photoDialogÂÂ[­NewExpressionÍ7Í¯MªIdentifierÍ;ÍQ¶CustomDialogController’_°ObjectExpressionÍRÍ¨’`¨PropertyÍeÍtÂÂÂMªIdentifierÍeÍl§builderP·ArrowFunctionExpressionÍnÍtÀÂÂÂN®BlockStatementÍtÍt•]³VariableDeclarationÍ‹Í”‘^²VariableDeclaratorÍÍ“MªIdentifierÍÍ—¨jsDialog[­NewExpressionÍšÍ“MªIdentifierÍÍ­¯PhotoNoteDialog–V®ThisExpressionÍ®Í²_°ObjectExpressionÍ´Í+“`¨PropertyÍÏÍãÂÂÂMªIdentifierÍÏÍÖ§absPathZ°MemberExpressionÍØÍãMªIdentifierÍØÍÛ£capMªIdentifierÍÜÍã§absPathÂÂ¤init`¨PropertyÍşÍFÂÂÂMªIdentifierÍşÍ¦onSaveP·ArrowFunctionExpressionÍÍFÀÂÂÂ‘MªIdentifierÍÍ¤noteN®BlockStatementÍÍF’]³VariableDeclarationÍ/ÍN‘^²VariableDeclaratorÍ5ÍMMªIdentifierÍ5Í9¤snapU®CallExpressionÍ<ÍMZ°MemberExpressionÍ<ÍKMªIdentifierÍ<Í?£recMªIdentifierÍ@ÍK«getSnapshotÂÂÂ¥constT³ExpressionStatementÍlÍ+U®CallExpressionÍlÍ*Z°MemberExpressionÍlÍ²U®CallExpressionÍlÍŠZ°MemberExpressionÍlÍU®CallExpressionÍlÍéZ°MemberExpressionÍlÍ‚MªIdentifierÍlÍq¥StoreMªIdentifierÍrÍ‚°insertTrackPhotoÂÂ˜MªIdentifierÍƒÍŠ§trackIdZ°MemberExpressionÍŒÍ–MªIdentifierÍŒÍ£capMªIdentifierÍÍ–¦timeMsÂÂZ°MemberExpressionÍ˜Í£MªIdentifierÍ˜Í›£capMªIdentifierÍœÍ£§relPathÂÂMªIdentifierÍ¥Í©¤noteZ°MemberExpressionÍ«Í¸MªIdentifierÍ«Í¯¤snapMªIdentifierÍ°Í¸¨latitudeÂÂZ°MemberExpressionÍºÍÈMªIdentifierÍºÍ¾¤snapMªIdentifierÍ¿ÍÈ©longitudeÂÂZ°MemberExpressionÍÊÍ×MªIdentifierÍÊÍÎ¤snapMªIdentifierÍÏÍ×¨altitudeÂÂZ°MemberExpressionÍÙÍèMªIdentifierÍÙÍİ¤snapMªIdentifierÍŞÍèªheadingDegÂÂÂMªIdentifierÍÍ¤thenÂÂ‘P·ArrowFunctionExpressionÍÍ‰ÀÂÂÂN®BlockStatementÍÍ‰‘T³ExpressionStatementÍ:ÍjU®CallExpressionÍ:ÍiZ°MemberExpressionÍ:ÍPMªIdentifierÍ:ÍF¬promptActionMªIdentifierÍGÍP©showToastÂÂ‘_°ObjectExpressionÍQÍh‘`¨PropertyÍSÍfÂÂÂMªIdentifierÍSÍZ§messageS§LiteralÍ\Íf¸ç…§ç‰‡å·²å…³è”åˆ°è½¨è¿¹º'ç…§ç‰‡å·²å…³è”åˆ°è½¨è¿¹'¤initÂÂMªIdentifierÍ­Í²¥catchÂÂ‘P·ArrowFunctionExpressionÍ³Í)ÀÂÂÂN®BlockStatementÍ¹Í)‘T³ExpressionStatementÍÜÍ
+U®CallExpressionÍÜÍ	Z°MemberExpressionÍÜÍòMªIdentifierÍÜÍè¬promptActionMªIdentifierÍéÍò©showToastÂÂ‘_°ObjectExpressionÍóÍ‘`¨PropertyÍõÍÂÂÂMªIdentifierÍõÍü§messageS§LiteralÍşÍ²ç…§ç‰‡ä¿å­˜å¤±è´¥´'ç…§ç‰‡ä¿å­˜å¤±è´¥'¤initÂÂ¤init`¨PropertyÍaÍÂÂÂMªIdentifierÍaÍj©onDiscardP·ArrowFunctionExpressionÍlÍÀÂÂÂN®BlockStatementÍrÍ’T³ExpressionStatementÍ‘Í®U®CallExpressionÍ‘Í­MªIdentifierÍ‘Í ¯deletePhotoFile‘Z°MemberExpressionÍ¡Í¬MªIdentifierÍ¡Í¤£capMªIdentifierÍ¥Í¬§absPathÂÂÂT³ExpressionStatementÍÌÍùU®CallExpressionÍÌÍøZ°MemberExpressionÍÌÍâMªIdentifierÍÌÍØ¬promptActionMªIdentifierÍÙÍâ©showToastÂÂ‘_°ObjectExpressionÍãÍ÷‘`¨PropertyÍåÍõÂÂÂMªIdentifierÍåÍì§messageS§LiteralÍîÍõ¯ç…§ç‰‡å·²ä¸¢å¼ƒ±'ç…§ç‰‡å·²ä¸¢å¼ƒ'¤initÂ¤initMªIdentifierÍ-Í6©undefinedR¯UnaryExpressionÍ8Í:¡-ÃS§LiteralÍ9Í:¡1P·ArrowFunctionExpressionÍ<ÍEÀÂÂÂN®BlockStatementÍBÍE_°ObjectExpressionÍGÍ’“`¨PropertyÍIÍ}ÂÂÂMªIdentifierÍIÍM¤pageS§LiteralÍOÍ}Ù,entry/src/main/ets/pages/RecordingBanner.etsÙ."entry/src/main/ets/pages/RecordingBanner.ets"¤init`¨PropertyÍÍ‡ÂÂÂMªIdentifierÍÍƒ¤lineS§LiteralÍ…Í‡ÌJ¢74¤init`¨PropertyÍ‰ÍÂÂÂMªIdentifierÍ‰ÍŒ£colS§LiteralÍÍ¢18¤init£letT³ExpressionStatementÍªÍÓU®CallExpressionÍªÍÒZ°MemberExpressionÍªÍÀMªIdentifierÍªÍ²¨jsDialogMªIdentifierÍ³ÍÀ­setControllerÂÂ‘Z°MemberExpressionÍÁÍÑV®ThisExpressionÍÁÍÅMªIdentifierÍÆÍÑ«photoDialogÂÂÂT³ExpressionStatementÍéÍU®CallExpressionÍéÍ Z°MemberExpressionÍéÍöMªIdentifierÍéÍï¦ViewPUMªIdentifierÍğÍö¦createÂÂ‘MªIdentifierÍ÷Íÿ¨jsDialogÂ]³VariableDeclarationÍÍ"‘^²VariableDeclaratorÍÍ!MªIdentifierÍÍ'¬paramsLambdaP·ArrowFunctionExpressionÍ*Í!ÀÂÂÂN®BlockStatementÍ0Í!‘\¯ReturnStatementÍKÍ
+_°ObjectExpressionÍRÍ	“`¨PropertyÍqÍ…ÂÂÂMªIdentifierÍqÍx§absPathZ°MemberExpressionÍzÍ…MªIdentifierÍzÍ}£capMªIdentifierÍ~Í…§absPathÂÂ¤init`¨PropertyÍ¤ÍÂÂÂMªIdentifierÍ¤Íª¦onSaveP·ArrowFunctionExpressionÍ¬ÍÀÂÂÂ‘MªIdentifierÍ­Í±¤noteN®BlockStatementÍ¶Í’]³VariableDeclarationÍÙÍø‘^²VariableDeclaratorÍßÍ÷MªIdentifierÍßÍã¤snapU®CallExpressionÍæÍ÷Z°MemberExpressionÍæÍõMªIdentifierÍæÍé£recMªIdentifierÍêÍõ«getSnapshotÂÂÂ¥constT³ExpressionStatementÍÍñU®CallExpressionÍÍğZ°MemberExpressionÍÍpU®CallExpressionÍÍDZ°MemberExpressionÍÍÂU®CallExpressionÍÍ—Z°MemberExpressionÍÍ0MªIdentifierÍÍ¥StoreMªIdentifierÍ Í0°insertTrackPhotoÂÂ˜MªIdentifierÍ1Í8§trackIdZ°MemberExpressionÍ:ÍDMªIdentifierÍ:Í=£capMªIdentifierÍ>ÍD¦timeMsÂÂZ°MemberExpressionÍFÍQMªIdentifierÍFÍI£capMªIdentifierÍJÍQ§relPathÂÂMªIdentifierÍSÍW¤noteZ°MemberExpressionÍYÍfMªIdentifierÍYÍ]¤snapMªIdentifierÍ^Íf¨latitudeÂÂZ°MemberExpressionÍhÍvMªIdentifierÍhÍl¤snapMªIdentifierÍmÍv©longitudeÂÂZ°MemberExpressionÍxÍ…MªIdentifierÍxÍ|¤snapMªIdentifierÍ}Í…¨altitudeÂÂZ°MemberExpressionÍ‡Í–MªIdentifierÍ‡Í‹¤snapMªIdentifierÍŒÍ–ªheadingDegÂÂÂMªIdentifierÍ¾ÍÂ¤thenÂÂ‘P·ArrowFunctionExpressionÍÃÍCÀÂÂÂN®BlockStatementÍÉÍC‘T³ExpressionStatementÍğÍ U®CallExpressionÍğÍZ°MemberExpressionÍğÍMªIdentifierÍğÍü¬promptActionMªIdentifierÍıÍ©showToastÂÂ‘_°ObjectExpressionÍÍ‘`¨PropertyÍ	ÍÂÂÂMªIdentifierÍ	Í§messageS§LiteralÍÍ¸ç…§ç‰‡å·²å…³è”åˆ°è½¨è¿¹º'ç…§ç‰‡å·²å…³è”åˆ°è½¨è¿¹'¤initÂÂMªIdentifierÍkÍp¥catchÂÂ‘P·ArrowFunctionExpressionÍqÍïÀÂÂÂN®BlockStatementÍwÍï‘T³ExpressionStatementÍÍÌU®CallExpressionÍÍËZ°MemberExpressionÍÍ´MªIdentifierÍÍª¬promptActionMªIdentifierÍ«Í´©showToastÂÂ‘_°ObjectExpressionÍµÍÊ‘`¨PropertyÍ·ÍÈÂÂÂMªIdentifierÍ·Í¾§messageS§LiteralÍÀÍÈ²ç…§ç‰‡ä¿å­˜å¤±è´¥´'ç…§ç‰‡ä¿å­˜å¤±è´¥'¤initÂÂ¤init`¨PropertyÍ/ÍîÂÂÂMªIdentifierÍ/Í8©onDiscardP·ArrowFunctionExpressionÍ:ÍîÀÂÂÂN®BlockStatementÍ@Íî’T³ExpressionStatementÍcÍ€U®CallExpressionÍcÍMªIdentifierÍcÍr¯deletePhotoFile‘Z°MemberExpressionÍsÍ~MªIdentifierÍsÍv£capMªIdentifierÍwÍ~§absPathÂÂÂT³ExpressionStatementÍ¢ÍÏU®CallExpressionÍ¢ÍÎZ°MemberExpressionÍ¢Í¸MªIdentifierÍ¢Í®¬promptActionMªIdentifierÍ¯Í¸©showToastÂÂ‘_°ObjectExpressionÍ¹ÍÍ‘`¨PropertyÍ»ÍËÂÂÂMªIdentifierÍ»ÍÂ§messageS§LiteralÍÄÍË¯ç…§ç‰‡å·²ä¸¢å¼ƒ±'ç…§ç‰‡å·²ä¸¢å¼ƒ'¤initÂ¤init£letT³ExpressionStatementÍ8ÍaY´AssignmentExpressionÍ8Í`¡=Z°MemberExpressionÍ8ÍQMªIdentifierÍ8Í@¨jsDialogMªIdentifierÍAÍQ°paramsGenerator_ÂÂMªIdentifierÍTÍ`¬paramsLambda¤init`¨PropertyÍ‡Í™ÂÂÂMªIdentifierÍ‡Í’«customStyleS§LiteralÍ”Í™Â¥false¤initV®ThisExpressionÍªÍ®T³ExpressionStatementÍ¾ÍÖU®CallExpressionÍ¾ÍÕZ°MemberExpressionÍ¾ÍÓZ°MemberExpressionÍ¾ÍÎV®ThisExpressionÍ¾ÍÂMªIdentifierÍÃÍÎ«photoDialogÂÂMªIdentifierÍÏÍÓ¤openÂÂÂÂMªIdentifierÍãÍè¥catchÂÂ‘P·ArrowFunctionExpressionÍéÍ6ÀÂÂÂN®BlockStatementÍïÍ6‘T³ExpressionStatementÍşÍ+U®CallExpressionÍşÍ*Z°MemberExpressionÍşÍMªIdentifierÍşÍ
+¬promptActionMªIdentifierÍÍ©showToastÂÂ‘_°ObjectExpressionÍÍ)‘`¨PropertyÍÍ'ÂÂÂMªIdentifierÍÍ§messageS§LiteralÍ Í'¯æ‹ç…§æœªå®Œæˆ±'æ‹ç…§æœªå®Œæˆ'¤initÂÂO°MethodDefinitionÍEÍğÂÂMªIdentifierÍEÍR­stopRecording¦methodP²FunctionExpressionÍRÍğÀÂÂÂN®BlockStatementÍUÍğ‘T³ExpressionStatementÍ`ÍéU®CallExpressionÍ`ÍèZ°MemberExpressionÍ`ÍÔU®CallExpressionÍ`ÍÎZ°MemberExpressionÍ`ÍU®CallExpressionÍ`ÍzZ°MemberExpressionÍ`ÍxU®CallExpressionÍ`ÍsZ°MemberExpressionÍ`ÍqMªIdentifierÍ`Ím­TrackRecorderMªIdentifierÍnÍq£getÂÂÂMªIdentifierÍtÍx¤stopÂÂÂMªIdentifierÍ{Í¤thenÂÂ‘P·ArrowFunctionExpressionÍ€ÍÍÀÂÂÂN®BlockStatementÍ†ÍÍ‘T³ExpressionStatementÍ•ÍÂU®CallExpressionÍ•ÍÁZ°MemberExpressionÍ•Í«MªIdentifierÍ•Í¡¬promptActionMªIdentifierÍ¢Í«©showToastÂÂ‘_°ObjectExpressionÍ¬ÍÀ‘`¨PropertyÍ®Í¾ÂÂÂMªIdentifierÍ®Íµ§messageS§LiteralÍ·Í¾¯è½¨è¿¹å·²ä¿å­˜±'è½¨è¿¹å·²ä¿å­˜'¤initÂÂMªIdentifierÍÏÍÔ¥catchÂÂ‘P·ArrowFunctionExpressionÍÕÍçÀÂÂÂN®BlockStatementÍÛÍçÂO°MethodDefinitionÍöÍ,¿ÂÂMªIdentifierÍöÍ­initialRender¦methodP²FunctionExpressionÍÍ,¿ÀÂÂÂN®BlockStatementÍÍ,¿’T³ExpressionStatementÍÍ,¥U®CallExpressionÍÍ,¤Z°MemberExpressionÍÍ/V®ThisExpressionÍÍMªIdentifierÍÍ/¹observeComponentCreation2ÂÂ’P·ArrowFunctionExpressionÍ0Í,ŸÀÂÂÂ’MªIdentifierÍ1Í7¦elmtIdMªIdentifierÍ9ÍH¯isInitialRenderN®BlockStatementÍMÍ,Ÿ’T³ExpressionStatementÍ\ÍhU®CallExpressionÍ\ÍgZ°MemberExpressionÍ\ÍeMªIdentifierÍ\Í^¢IfMªIdentifierÍ_Íe¦createÂÂÂW«IfStatementÍvÍ,”U®CallExpressionÍzÍ˜Z°MemberExpressionÍzÍˆMªIdentifierÍzÍ„ªAppStorageMªIdentifierÍ…Íˆ£getÂÂ‘S§LiteralÍ‰Í—¬rm_recording®'rm_recording'ÂN®BlockStatementÍšÍ, ‘T³ExpressionStatementÍ­Í,U®CallExpressionÍ­Í,Z°MemberExpressionÍ­ÍÌV®ThisExpressionÍ­Í±MªIdentifierÍ²ÍÌºifElseBranchUpdateFunctionÂÂ’S§LiteralÍÍÍÎ ¡0P·ArrowFunctionExpressionÍĞÍ,ÀÂÂÂN®BlockStatementÍÖÍ,’T³ExpressionStatementÍíÍ+ØU®CallExpressionÍíÍ+×Z°MemberExpressionÍíÍV®ThisExpressionÍíÍñMªIdentifierÍòÍ¹observeComponentCreation2ÂÂ’P·ArrowFunctionExpressionÍÍ+ÍÀÂÂÂ’MªIdentifierÍÍ¦elmtIdMªIdentifierÍÍ$¯isInitialRenderN®BlockStatementÍ)Í+Í“T³ExpressionStatementÍDÍUU®CallExpressionÍDÍTZ°MemberExpressionÍDÍRMªIdentifierÍDÍK§ForEachMªIdentifierÍLÍR¦createÂÂÂ]³VariableDeclarationÍoÍ+2‘^²VariableDeclaratorÍuÍ+1MªIdentifierÍuÍ‹¶forEachItemGenFunctionP·ArrowFunctionExpressionÍÍ+1ÀÂÂÂ‘MªIdentifierÍÍ“¥_itemN®BlockStatementÍ—Í+1]³VariableDeclarationÍ¶ÍÆ‘^²VariableDeclaratorÍ¼ÍÅMªIdentifierÍ¼Í½¡hMªIdentifierÍÀÍÅ¥_item¥constT³ExpressionStatementÍäÍ!:U®CallExpressionÍäÍ!9Z°MemberExpressionÍäÍ V®ThisExpressionÍäÍèMªIdentifierÍéÍ ¹observeComponentCreation2ÂÂ’P·ArrowFunctionExpressionÍ Í!0ÀÂÂÂ’MªIdentifierÍ Í 
+¦elmtIdMªIdentifierÍ Í ¯isInitialRenderN®BlockStatementÍ  Í!0”T³ExpressionStatementÍ CÍ _U®CallExpressionÍ CÍ ^Z°MemberExpressionÍ CÍ PMªIdentifierÍ CÍ I¦ColumnMªIdentifierÍ JÍ P¦createÂÂ‘_°ObjectExpressionÍ QÍ ]‘`¨PropertyÍ SÍ [ÂÂÂMªIdentifierÍ SÍ X¥spaceS§LiteralÍ ZÍ [¡8¤initÂT³ExpressionStatementÍ Í –U®CallExpressionÍ Í •Z°MemberExpressionÍ Í MªIdentifierÍ Í ‡¦ColumnMªIdentifierÍ ˆÍ ¥widthÂÂ‘S§LiteralÍ Í ”¤100%¦'100%'ÂT³ExpressionStatementÍ ¸Í ËU®CallExpressionÍ ¸Í ÊZ°MemberExpressionÍ ¸Í ÆMªIdentifierÍ ¸Í ¾¦ColumnMªIdentifierÍ ¿Í Æ§paddingÂÂ‘S§LiteralÍ ÇÍ É¢12ÂT³ExpressionStatementÍ íÍ!U®CallExpressionÍ íÍ!Z°MemberExpressionÍ íÍ!MªIdentifierÍ íÍ ó¦ColumnMªIdentifierÍ ôÍ!¯backgroundColorÂÂ‘S§LiteralÍ!Í!©#330A59F7«'#330A59F7'ÂMªIdentifierÍ!2Í!8¦ColumnÂT³ExpressionStatementÍ!XÍ#GU®CallExpressionÍ!XÍ#FZ°MemberExpressionÍ!XÍ!vV®ThisExpressionÍ!XÍ!\MªIdentifierÍ!]Í!v¹observeComponentCreation2ÂÂ’P·ArrowFunctionExpressionÍ!wÍ#?ÀÂÂÂ’MªIdentifierÍ!xÍ!~¦elmtIdMªIdentifierÍ!€Í!¯isInitialRenderN®BlockStatementÍ!”Í#?•T³ExpressionStatementÍ!·Í"+U®CallExpressionÍ!·Í"*Z°MemberExpressionÍ!·Í!ÂMªIdentifierÍ!·Í!»¤TextMªIdentifierÍ!¼Í!Â¦createÂÂ‘a¯TemplateLiteralÍ!ÃÍ")’U®CallExpressionÍ!ÍÍ!ğZ°MemberExpressionÍ!ÍÍ!ÛMªIdentifierÍ!ÍÍ!×ªAppStorageMªIdentifierÍ!ØÍ!Û£getÂÂ‘S§LiteralÍ!ÜÍ!ï±rm_rec_track_name³'rm_rec_track_name'ÂU®CallExpressionÍ!öÍ"MªIdentifierÍ!öÍ"«fmtDuration‘U®CallExpressionÍ"Í"Z°MemberExpressionÍ"Í"MªIdentifierÍ"Í"ªAppStorageMªIdentifierÍ"Í"£getÂÂ‘S§LiteralÍ"Í"ªrm_elapsed¬'rm_elapsed'ÂÂ“b¯TemplateElementÍ!ÄÍ!Ëc³â— æ­£åœ¨è®°å½•ã€Œ³â— æ­£åœ¨è®°å½•ã€ŒÂb¯TemplateElementÍ!ñÍ!ôc¥ã€  ¥ã€  Âb¯TemplateElementÍ" Í"(c¸ï¼ˆåˆ‡é¡µé¢ä¸ä¸­æ–­ï¼‰¸ï¼ˆåˆ‡é¡µé¢ä¸ä¸­æ–­ï¼‰ÃÂT³ExpressionStatementÍ"MÍ"_U®CallExpressionÍ"MÍ"^Z°MemberExpressionÍ"MÍ"ZMªIdentifierÍ"MÍ"Q¤TextMªIdentifierÍ"RÍ"Z¨fontSizeÂÂ‘S§LiteralÍ"[Í"]¢14ÂT³ExpressionStatementÍ"Í"”U®CallExpressionÍ"Í"“Z°MemberExpressionÍ"Í"‹MªIdentifierÍ"Í"…¤TextMªIdentifierÍ"†Í"‹¥widthÂÂ‘S§LiteralÍ"ŒÍ"’¤100%¦'100%'ÂT³ExpressionStatementÍ"¶Í"ÇU®CallExpressionÍ"¶Í"ÆZ°MemberExpressionÍ"¶Í"ÃMªIdentifierÍ"¶Í"º¤TextMªIdentifierÍ"»Í"Ã¨maxLinesÂÂ‘S§LiteralÍ"ÄÍ"Å¡1ÂT³ExpressionStatementÍ"éÍ# U®CallExpressionÍ"éÍ#Z°MemberExpressionÍ"éÍ"úMªIdentifierÍ"éÍ"í¤TextMªIdentifierÍ"îÍ"ú¬textOverflowÂÂ‘_°ObjectExpressionÍ"ûÍ#‘`¨PropertyÍ"ıÍ#ÂÂÂMªIdentifierÍ"ıÍ#¨overflowZ°MemberExpressionÍ#Í#MªIdentifierÍ#Í#¬TextOverflowMªIdentifierÍ#Í#¨EllipsisÂÂ¤initÂMªIdentifierÍ#AÍ#E¤TextÂT³ExpressionStatementÍ#eÍ#pU®CallExpressionÍ#eÍ#oZ°MemberExpressionÍ#eÍ#mMªIdentifierÍ#eÍ#i¤TextMªIdentifierÍ#jÍ#m£popÂÂÂT³ExpressionStatementÍ#Í$aU®CallExpressionÍ#Í$`Z°MemberExpressionÍ#Í#¬V®ThisExpressionÍ#Í#’MªIdentifierÍ#“Í#¬¹observeComponentCreation2ÂÂ’P·ArrowFunctionExpressionÍ#­Í$ZÀÂÂÂ’MªIdentifierÍ#®Í#´¦elmtIdMªIdentifierÍ#¶Í#Å¯isInitialRenderN®BlockStatementÍ#ÊÍ$Z’T³ExpressionStatementÍ#íÍ$U®CallExpressionÍ#íÍ$Z°MemberExpressionÍ#íÍ#÷MªIdentifierÍ#íÍ#ğ£RowMªIdentifierÍ#ñÍ#÷¦createÂÂ‘_°ObjectExpressionÍ#øÍ$‘`¨PropertyÍ#úÍ$ÂÂÂMªIdentifierÍ#úÍ#ÿ¥spaceS§LiteralÍ$Í$
+¢10¤initÂT³ExpressionStatementÍ$)Í$;U®CallExpressionÍ$)Í$:Z°MemberExpressionÍ$)Í$2MªIdentifierÍ$)Í$,£RowMªIdentifierÍ$-Í$2¥widthÂÂ‘S§LiteralÍ$3Í$9¤100%¦'100%'ÂMªIdentifierÍ$\Í$_£RowÂT³ExpressionStatementÍ$Í&'U®CallExpressionÍ$Í&&Z°MemberExpressionÍ$Í$V®ThisExpressionÍ$Í$ƒMªIdentifierÍ$„Í$¹observeComponentCreation2ÂÂ’P·ArrowFunctionExpressionÍ$Í&ÀÂÂÂ’MªIdentifierÍ$ŸÍ$¥¦elmtIdMªIdentifierÍ$§Í$¶¯isInitialRenderN®BlockStatementÍ$»Í&”T³ExpressionStatementÍ$ŞÍ$ûU®CallExpressionÍ$ŞÍ$úZ°MemberExpressionÍ$ŞÍ$ôMªIdentifierÍ$ŞÍ$ä¦ButtonMªIdentifierÍ$åÍ$ô¯createWithLabelÂÂ‘S§LiteralÍ$õÍ$ù¦æ‹ç…§¨'æ‹ç…§'ÂT³ExpressionStatementÍ%Í%1U®CallExpressionÍ%Í%0Z°MemberExpressionÍ%Í%,MªIdentifierÍ%Í%#¦ButtonMªIdentifierÍ%$Í%,¨fontSizeÂÂ‘S§LiteralÍ%-Í%/¢13ÂT³ExpressionStatementÍ%SÍ%jU®CallExpressionÍ%SÍ%iZ°MemberExpressionÍ%SÍ%fMªIdentifierÍ%SÍ%Y¦ButtonMªIdentifierÍ%ZÍ%f¬layoutWeightÂÂ‘S§LiteralÍ%gÍ%h¡1ÂT³ExpressionStatementÍ%ŒÍ%şU®CallExpressionÍ%ŒÍ%ıZ°MemberExpressionÍ%ŒÍ%šMªIdentifierÍ%ŒÍ%’¦ButtonMªIdentifierÍ%“Í%š§onClickÂÂ‘P·ArrowFunctionExpressionÍ%›Í%üÀÂÂÂN®BlockStatementÍ%¡Í%ü‘T³ExpressionStatementÍ%ÈÍ%ÙU®CallExpressionÍ%ÈÍ%ØZ°MemberExpressionÍ%ÈÍ%ÖV®ThisExpressionÍ%ÈÍ%ÌMªIdentifierÍ%ÍÍ%Ö©takePhotoÂÂÂÂMªIdentifierÍ&Í&%¦ButtonÂT³ExpressionStatementÍ&EÍ&RU®CallExpressionÍ&EÍ&QZ°MemberExpressionÍ&EÍ&OMªIdentifierÍ&EÍ&K¦ButtonMªIdentifierÍ&LÍ&O£popÂÂÂT³ExpressionStatementÍ&pÍ(U®CallExpressionÍ&pÍ(Z°MemberExpressionÍ&pÍ&V®ThisExpressionÍ&pÍ&tMªIdentifierÍ&uÍ&¹observeComponentCreation2ÂÂ’P·ArrowFunctionExpressionÍ&Í(ÀÂÂÂ’MªIdentifierÍ&Í&–¦elmtIdMªIdentifierÍ&˜Í&§¯isInitialRenderN®BlockStatementÍ&¬Í(”T³ExpressionStatementÍ&ÏÍ&íU®CallExpressionÍ&ÏÍ&ìZ°MemberExpressionÍ&ÏÍ&åMªIdentifierÍ&ÏÍ&Õ¦ButtonMªIdentifierÍ&ÖÍ&å¯createWithLabelÂÂ‘S§LiteralÍ&æÍ&ë©æ‰“æ ‡ç­¾«'æ‰“æ ‡ç­¾'ÂT³ExpressionStatementÍ'Í'#U®CallExpressionÍ'Í'"Z°MemberExpressionÍ'Í'MªIdentifierÍ'Í'¦ButtonMªIdentifierÍ'Í'¨fontSizeÂÂ‘S§LiteralÍ'Í'!¢13ÂT³ExpressionStatementÍ'EÍ'\U®CallExpressionÍ'EÍ'[Z°MemberExpressionÍ'EÍ'XMªIdentifierÍ'EÍ'K¦ButtonMªIdentifierÍ'LÍ'X¬layoutWeightÂÂ‘S§LiteralÍ'YÍ'Z¡1ÂT³ExpressionStatementÍ'~Í'ôU®CallExpressionÍ'~Í'óZ°MemberExpressionÍ'~Í'ŒMªIdentifierÍ'~Í'„¦ButtonMªIdentifierÍ'…Í'Œ§onClickÂÂ‘P·ArrowFunctionExpressionÍ'Í'òÀÂÂÂN®BlockStatementÍ'“Í'ò‘T³ExpressionStatementÍ'ºÍ'ÏU®CallExpressionÍ'ºÍ'ÎZ°MemberExpressionÍ'ºÍ'ÌV®ThisExpressionÍ'ºÍ'¾MªIdentifierÍ'¿Í'Ì­openTagDialogÂÂÂÂMªIdentifierÍ(Í(¦ButtonÂT³ExpressionStatementÍ(;Í(HU®CallExpressionÍ(;Í(GZ°MemberExpressionÍ(;Í(EMªIdentifierÍ(;Í(A¦ButtonMªIdentifierÍ(BÍ(E£popÂÂÂT³ExpressionStatementÍ(fÍ*˜U®CallExpressionÍ(fÍ*—Z°MemberExpressionÍ(fÍ(„V®ThisExpressionÍ(fÍ(jMªIdentifierÍ(kÍ(„¹observeComponentCreation2ÂÂ’P·ArrowFunctionExpressionÍ(…Í*ÀÂÂÂ’MªIdentifierÍ(†Í(Œ¦elmtIdMªIdentifierÍ(Í(¯isInitialRenderN®BlockStatementÍ(¢Í*–T³ExpressionStatementÍ(ÅÍ(äU®CallExpressionÍ(ÅÍ(ãZ°MemberExpressionÍ(ÅÍ(ÛMªIdentifierÍ(ÅÍ(Ë¦ButtonMªIdentifierÍ(ÌÍ(Û¯createWithLabelÂÂ‘S§LiteralÍ(ÜÍ(âªâ–  åœæ­¢¬'â–  åœæ­¢'ÂT³ExpressionStatementÍ)Í)U®CallExpressionÍ)Í)Z°MemberExpressionÍ)Í)MªIdentifierÍ)Í)¦ButtonMªIdentifierÍ)Í)¨fontSizeÂÂ‘S§LiteralÍ)Í)¢13ÂT³ExpressionStatementÍ)<Í)SU®CallExpressionÍ)<Í)RZ°MemberExpressionÍ)<Í)OMªIdentifierÍ)<Í)B¦ButtonMªIdentifierÍ)CÍ)O¬layoutWeightÂÂ‘S§LiteralÍ)PÍ)Q¡1ÂT³ExpressionStatementÍ)uÍ)“U®CallExpressionÍ)uÍ)’Z°MemberExpressionÍ)uÍ)…MªIdentifierÍ)uÍ){¦ButtonMªIdentifierÍ)|Í)…©fontColorÂÂ‘Z°MemberExpressionÍ)†Í)‘MªIdentifierÍ)†Í)‹¥ColorMªIdentifierÍ)ŒÍ)‘¥WhiteÂÂÂT³ExpressionStatementÍ)µÍ)×U®CallExpressionÍ)µÍ)ÖZ°MemberExpressionÍ)µÍ)ËMªIdentifierÍ)µÍ)»¦ButtonMªIdentifierÍ)¼Í)Ë¯backgroundColorÂÂ‘S§LiteralÍ)ÌÍ)Õ§#E84026©'#E84026'ÂT³ExpressionStatementÍ)ùÍ*oU®CallExpressionÍ)ùÍ*nZ°MemberExpressionÍ)ùÍ*MªIdentifierÍ)ùÍ)ÿ¦ButtonMªIdentifierÍ* Í*§onClickÂÂ‘P·ArrowFunctionExpressionÍ*Í*mÀÂÂÂN®BlockStatementÍ*Í*m‘T³ExpressionStatementÍ*5Í*JU®CallExpressionÍ*5Í*IZ°MemberExpressionÍ*5Í*GV®ThisExpressionÍ*5Í*9MªIdentifierÍ*:Í*G­stopRecordingÂÂÂÂMªIdentifierÍ*Í*–¦ButtonÂT³ExpressionStatementÍ*¶Í*ÃU®CallExpressionÍ*¶Í*ÂZ°MemberExpressionÍ*¶Í*ÀMªIdentifierÍ*¶Í*¼¦ButtonMªIdentifierÍ*½Í*À£popÂÂÂT³ExpressionStatementÍ*áÍ*ëU®CallExpressionÍ*áÍ*êZ°MemberExpressionÍ*áÍ*èMªIdentifierÍ*áÍ*ä£RowMªIdentifierÍ*åÍ*è£popÂÂÂT³ExpressionStatementÍ+	Í+U®CallExpressionÍ+	Í+Z°MemberExpressionÍ+	Í+MªIdentifierÍ+	Í+¦ColumnMªIdentifierÍ+Í+£popÂÂÂ¥constT³ExpressionStatementÍ+LÍ+¶U®CallExpressionÍ+LÍ+µZ°MemberExpressionÍ+LÍ+fV®ThisExpressionÍ+LÍ+PMªIdentifierÍ+QÍ+fµforEachUpdateFunctionÂÂ–MªIdentifierÍ+gÍ+m¦elmtIdÔrd”¤type¥start£end¨elements¯ArrayExpressionÍ+oÍ+‘Z°MemberExpressionÍ+pÍ+~V®ThisExpressionÍ+pÍ+tMªIdentifierÍ+uÍ+~©heartbeatÂÂMªIdentifierÍ+Í+—¶forEachItemGenFunctionP·ArrowFunctionExpressionÍ+™Í+¦ÀÃÂÂ‘MªIdentifierÍ+šÍ+›¡hX°BinaryExpressionÍ+ Í+¦MªIdentifierÍ+ Í+¡¡h¡+S§LiteralÍ+¤Í+¦ ¢''S§LiteralÍ+¨Í+­Â¥falseS§LiteralÍ+¯Í+´Â¥falseÂMªIdentifierÍ+ÏÍ+Ö§ForEachÂT³ExpressionStatementÍ+îÍ+üU®CallExpressionÍ+îÍ+ûZ°MemberExpressionÍ+îÍ+ùMªIdentifierÍ+îÍ+õ§ForEachMªIdentifierÍ+öÍ+ù£popÂÂÂÂN®BlockStatementÍ,3Í,”‘T³ExpressionStatementÍ,FÍ,…U®CallExpressionÍ,FÍ,„Z°MemberExpressionÍ,FÍ,eV®ThisExpressionÍ,FÍ,JMªIdentifierÍ,KÍ,eºifElseBranchUpdateFunctionÂÂ’S§LiteralÍ,fÍ,g¡1P·ArrowFunctionExpressionÍ,iÍ,ƒÀÂÂÂN®BlockStatementÍ,oÍ,ƒÂMªIdentifierÍ,¡Í,£¢IfÂT³ExpressionStatementÍ,¯Í,¸U®CallExpressionÍ,¯Í,·Z°MemberExpressionÍ,¯Í,µMªIdentifierÍ,¯Í,±¢IfMªIdentifierÍ,²Í,µ£popÂÂÂO°MethodDefinitionÍ,ÅÍ,ıÂÂMªIdentifierÍ,ÅÍ,Í¨rerender¦methodP²FunctionExpressionÍ,ÍÍ,ıÀÂÂÂN®BlockStatementÍ,ĞÍ,ı‘T³ExpressionStatementÍ,ÛÍ,öU®CallExpressionÍ,ÛÍ,õZ°MemberExpressionÍ,ÛÍ,óV®ThisExpressionÍ,ÛÍ,ßMªIdentifierÍ,àÍ,ó³updateDirtyElementsÂÂÂÀ–Ôre•¤type¥start£endªspecifiers¦source±ImportDeclarationÌ€Ì®‘Ôrf”¤type¥start£end¥local¶ImportDefaultSpecifierÌ‡Ì“MªIdentifierÌ‡Ì“¬promptActionS§LiteralÌ™Ì­²@ohos.promptAction´"@ohos.promptAction"e±ImportDeclarationÌ°ÌÖ‘Ôrg•¤type¥start£end¨imported¥local¯ImportSpecifierÌ¹Ì¾MªIdentifierÌ¹Ì¾¥StoreMªIdentifierÌ¹Ì¾¥StoreS§LiteralÌÆÌÕ­../data/Store¯'../data/Store'e±ImportDeclarationÌØÍ‘g¯ImportSpecifierÌáÌîMªIdentifierÌáÌî­TrackRecorderMªIdentifierÌáÌî­TrackRecorderS§LiteralÌöÍ¸../sensors/TrackRecorderº'../sensors/TrackRecorder'e±ImportDeclarationÍÍ^’g¯ImportSpecifierÍÍ-MªIdentifierÍÍ-±captureTrackPhotoMªIdentifierÍÍ-±captureTrackPhotog¯ImportSpecifierÍ/Í>MªIdentifierÍ/Í>¯deletePhotoFileMªIdentifierÍ/Í>¯deletePhotoFileS§LiteralÍFÍ]µ../sensors/TrackMedia·'../sensors/TrackMedia'e±ImportDeclarationÍ`Í‘g¯ImportSpecifierÍiÍtMªIdentifierÍiÍt«fmtDurationMªIdentifierÍiÍt«fmtDurationS§LiteralÍ|Í¯../common/Utils±'../common/Utils'e±ImportDeclarationÍÍÓ’g¯ImportSpecifierÍ™Í¨MªIdentifierÍ™Í¨¯PhotoNoteDialogMªIdentifierÍ™Í¨¯PhotoNoteDialogg¯ImportSpecifierÍªÍ¸MªIdentifierÍªÍ¸®TrackTagDialogMªIdentifierÍªÍ¸®TrackTagDialogS§LiteralÍÀÍÒ°./CaptureDialogs²'./CaptureDialogs'
