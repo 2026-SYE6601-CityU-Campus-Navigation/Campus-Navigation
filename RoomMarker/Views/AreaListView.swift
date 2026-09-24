@@ -75,6 +75,22 @@ struct AreaListView: View {
             .navigationTitle("RoomMarker")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        NavigationLink {
+                            LiveSensorsView()
+                        } label: {
+                            Label("实时传感器", systemImage: "waveform.path.ecg")
+                        }
+                        NavigationLink {
+                            SensorSnapshotView()
+                        } label: {
+                            Label("传感器快照", systemImage: "camera.metering.center.weighted")
+                        }
+                    } label: {
+                        Label("传感器", systemImage: "sensor.tag.radiowaves.forward")
+                    }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
                     Button(action: presentNewArea) {
                         Label("新建区域", systemImage: "plus")
                     }
