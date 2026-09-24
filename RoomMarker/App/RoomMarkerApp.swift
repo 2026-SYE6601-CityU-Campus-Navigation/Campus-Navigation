@@ -15,7 +15,7 @@ struct RoomMarkerApp: App {
 
     var body: some Scene {
         WindowGroup {
-            FoundationReadyView()
+            AreaListView()
         }
         .modelContainer(modelContainer)
     }
