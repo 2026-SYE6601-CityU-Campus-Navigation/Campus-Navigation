@@ -14,6 +14,7 @@ struct AreaListView: View {
 
     let sensorHub: SensorHub
     let recordingCoordinator: RecordingCoordinator
+    let cameraService: any CameraServicing
 
     private var unassignedRooms: [Room] {
         rooms.filter { $0.area == nil }
@@ -130,7 +131,10 @@ struct AreaListView: View {
         }
         .safeAreaInset(edge: .bottom) {
             if recordingCoordinator.state != .idle {
-                RecordingStatusBanner(coordinator: recordingCoordinator)
+                RecordingStatusBanner(
+                    coordinator: recordingCoordinator,
+                    cameraService: cameraService
+                )
             }
         }
     }

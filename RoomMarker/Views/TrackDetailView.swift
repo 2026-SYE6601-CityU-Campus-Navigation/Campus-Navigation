@@ -6,10 +6,21 @@ struct TrackDetailView: View {
     let coordinator: RecordingCoordinator
 
     @State private var isConfirmingDeletion = false
+    @State private var tagPendingDeletion: TrackTag?
+    @State private var photoPendingDeletion: TrackPhoto?
+    @State private var previewPhoto: TrackPhoto?
     @State private var errorMessage: String?
 
     private var points: [TrackPoint] {
         track.points.sorted { $0.timeMs < $1.timeMs }
+    }
+
+    private var tags: [TrackTag] {
+        track.tags.sorted { $0.timeMs < $1.timeMs }
+    }
+
+    private var photos: [TrackPhoto] {
+        track.photos.sorted { $0.timeMs < $1.timeMs }
     }
 
     var body: some View {
@@ -20,6 +31,43 @@ struct TrackDetailView: View {
                 LabeledContent("开始", value: formatDate(track.startedAt))
                 LabeledContent("结束", value: track.endedAt.map(formatDate) ?? "未完整结束")
                 LabeledContent("采样点", value: "\(track.pointCount)")
+                LabeledContent("标签", value: "\(tags.count)")
+                LabeledContent("照片", value: "\(photos.count)")
+            }
+
+            Section("标签") {
+                ForEach(tags, id: \.id) { tag in
+                    tagRow(tag)
+                        .swipeActions {
+                            Button("删除", role: .destructive) {
+                                tagPendingDeletion = tag
+                            }
+                        }
+                }
+                if tags.isEmpty {
+                    Text("还没有标签。")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Section("照片") {
+                ForEach(photos, id: \.id) { photo in
+                    Button {
+                        previewPhoto = photo
+                    } label: {
+                        photoRow(photo)
+                    }
+                    .buttonStyle(.plain)
+                    .swipeActions {
+                        Button("删除", role: .destructive) {
+                            photoPendingDeletion = photo
+                        }
+                    }
+                }
+                if photos.isEmpty {
+                    Text("还没有照片。")
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Section("采样点") {
@@ -50,7 +98,39 @@ struct TrackDetailView: View {
             Button("删除轨迹及其数据", role: .destructive, action: deleteTrack)
             Button("取消", role: .cancel) {}
         } message: {
-            Text("该轨迹的采样点、标签和照片元数据会级联删除。")
+            Text("采样点、标签、照片元数据和 RoomMarker 拥有的照片文件都会删除。")
+        }
+        .confirmationDialog(
+            "删除标签“\(tagPendingDeletion?.tagTypeRawValue ?? "")”？",
+            isPresented: Binding(
+                get: { tagPendingDeletion != nil },
+                set: { if !$0 { tagPendingDeletion = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("删除标签", role: .destructive, action: deletePendingTag)
+            Button("取消", role: .cancel) { tagPendingDeletion = nil }
+        }
+        .confirmationDialog(
+            "删除这张照片？",
+            isPresented: Binding(
+                get: { photoPendingDeletion != nil },
+                set: { if !$0 { photoPendingDeletion = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("删除照片及文件", role: .destructive, action: deletePendingPhoto)
+            Button("取消", role: .cancel) { photoPendingDeletion = nil }
+        } message: {
+            Text("照片记录和 RoomMarker 应用存储中的图像文件都会删除。")
+        }
+        .sheet(isPresented: Binding(
+            get: { previewPhoto != nil },
+            set: { if !$0 { previewPhoto = nil } }
+        )) {
+            if let previewPhoto {
+                TrackPhotoPreviewView(photo: previewPhoto, coordinator: coordinator)
+            }
         }
         .alert("无法删除轨迹", isPresented: Binding(
             get: { errorMessage != nil },
@@ -60,6 +140,36 @@ struct TrackDetailView: View {
         } message: {
             Text(errorMessage ?? "未知错误")
         }
+    }
+
+    @ViewBuilder
+    private func tagRow(_ tag: TrackTag) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(tag.tagTypeRawValue).font(.headline)
+            if !tag.note.isEmpty { Text(tag.note) }
+            Text(formatDate(tag.timeMs)).foregroundStyle(.secondary)
+            locationLine(latitude: tag.latitude, longitude: tag.longitude)
+            optionalLine("海拔", value: tag.altitude, unit: "m")
+            optionalLine("朝向", value: tag.headingDeg, unit: "°")
+        }
+        .font(.caption)
+        .padding(.vertical, 3)
+    }
+
+    @ViewBuilder
+    private func photoRow(_ photo: TrackPhoto) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            TrackPhotoThumbnailView(photo: photo, coordinator: coordinator)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(formatDate(photo.timeMs)).font(.subheadline)
+                if !photo.note.isEmpty { Text(photo.note) }
+                locationLine(latitude: photo.latitude, longitude: photo.longitude)
+                optionalLine("海拔", value: photo.altitude, unit: "m")
+                optionalLine("朝向", value: photo.headingDeg, unit: "°")
+            }
+            .font(.caption)
+        }
+        .padding(.vertical, 3)
     }
 
     @ViewBuilder
@@ -89,6 +199,13 @@ struct TrackDetailView: View {
     private func optionalLine(_ label: String, value: Double?, unit: String) -> some View {
         if let value {
             Text("\(label) \(format(value)) \(unit)")
+        }
+    }
+
+    @ViewBuilder
+    private func locationLine(latitude: Double?, longitude: Double?) -> some View {
+        if let latitude, let longitude {
+            Text("位置 \(latitude.formatted(.number.precision(.fractionLength(6)))), \(longitude.formatted(.number.precision(.fractionLength(6))))")
         }
     }
 
@@ -122,6 +239,26 @@ struct TrackDetailView: View {
         do {
             try coordinator.delete(track)
             dismiss()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func deletePendingTag() {
+        guard let tagPendingDeletion else { return }
+        do {
+            try coordinator.deleteTag(tagPendingDeletion)
+            self.tagPendingDeletion = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func deletePendingPhoto() {
+        guard let photoPendingDeletion else { return }
+        do {
+            try coordinator.deletePhoto(photoPendingDeletion)
+            self.photoPendingDeletion = nil
         } catch {
             errorMessage = error.localizedDescription
         }

@@ -9,7 +9,7 @@ protocol RecordingPersisting: AnyObject {
 }
 
 @MainActor
-final class SwiftDataRecordingStore: RecordingPersisting {
+final class SwiftDataRecordingStore: RecordingPersisting, TrackMediaPersisting {
     private let context: ModelContext
 
     init(context: ModelContext) {
@@ -57,5 +57,69 @@ final class SwiftDataRecordingStore: RecordingPersisting {
     func delete(_ track: Track) throws {
         context.delete(track)
         try context.save()
+    }
+
+    func createTag(_ draft: TrackTagDraft, for track: Track) throws -> TrackTag {
+        let tag = TrackTag(
+            track: track,
+            timeMs: draft.timeMs,
+            tagType: draft.tagType,
+            note: draft.note,
+            latitude: draft.metadata.latitude,
+            longitude: draft.metadata.longitude,
+            altitude: draft.metadata.altitude,
+            headingDeg: draft.metadata.headingDeg,
+            createdAt: draft.createdAt
+        )
+        context.insert(tag)
+        do {
+            try context.save()
+            return tag
+        } catch {
+            context.rollback()
+            throw error
+        }
+    }
+
+    func createPhoto(_ draft: TrackPhotoDraft, for track: Track) throws -> TrackPhoto {
+        let photo = TrackPhoto(
+            track: track,
+            timeMs: draft.timeMs,
+            filePath: draft.filePath,
+            note: draft.note,
+            latitude: draft.metadata.latitude,
+            longitude: draft.metadata.longitude,
+            altitude: draft.metadata.altitude,
+            headingDeg: draft.metadata.headingDeg,
+            createdAt: draft.createdAt
+        )
+        context.insert(photo)
+        do {
+            try context.save()
+            return photo
+        } catch {
+            context.rollback()
+            throw error
+        }
+    }
+
+    func deleteTag(_ tag: TrackTag) throws {
+        context.delete(tag)
+        do {
+            try context.save()
+        } catch {
+            context.rollback()
+            throw error
+        }
+    }
+
+    func deletePhoto(_ photo: TrackPhoto) throws {
+        context.delete(photo)
+        do {
+            try context.save()
+        } catch {
+            context.rollback()
+            throw error
+        }
     }
 }

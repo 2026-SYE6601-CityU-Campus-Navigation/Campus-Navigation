@@ -71,7 +71,7 @@ struct TrackListView: View {
             }
             Button("取消", role: .cancel) { trackPendingDeletion = nil }
         } message: {
-            Text("采样点、标签和照片元数据会级联删除。此操作无法撤销。")
+            Text("采样点、标签、照片元数据和 RoomMarker 拥有的照片文件都会删除。此操作无法撤销。")
         }
         .alert("操作失败", isPresented: Binding(
             get: { errorMessage != nil },

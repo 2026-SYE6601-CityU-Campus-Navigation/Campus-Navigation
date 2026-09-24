@@ -325,6 +325,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = RoomMarker;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_NSCameraUsageDescription = "RoomMarker 使用相机拍摄并保存轨迹现场照片。";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "RoomMarker 仅在您使用传感器功能时读取位置，用于显示和采集室内导航数据。";
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = edu.cityu.sye6601.RoomMarker;
@@ -347,6 +348,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = RoomMarker;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_NSCameraUsageDescription = "RoomMarker 使用相机拍摄并保存轨迹现场照片。";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "RoomMarker 仅在您使用传感器功能时读取位置，用于显示和采集室内导航数据。";
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = edu.cityu.sye6601.RoomMarker;

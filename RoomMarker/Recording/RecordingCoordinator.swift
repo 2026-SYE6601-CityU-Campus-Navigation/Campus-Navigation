@@ -13,6 +13,9 @@ final class RecordingCoordinator {
     @ObservationIgnored private let ticker: any RecordingTicking
     @ObservationIgnored private let persistence: any RecordingPersisting
     @ObservationIgnored private let assembler: SampleAssembler
+    @ObservationIgnored private let metadataAssembler: TrackCaptureMetadataAssembler
+    @ObservationIgnored private let mediaPersistence: (any TrackMediaPersisting)?
+    @ObservationIgnored private let photoStorage: (any PhotoFileStoring)?
     @ObservationIgnored private let nowMilliseconds: @MainActor @Sendable () -> Int64
     @ObservationIgnored private var pending: [TrackPointDraft] = []
     @ObservationIgnored private var lastAcceptedTickMs: Int64?
@@ -22,6 +25,9 @@ final class RecordingCoordinator {
         ticker: any RecordingTicking = ForegroundRecordingTicker(),
         persistence: any RecordingPersisting,
         assembler: SampleAssembler = SampleAssembler(),
+        metadataAssembler: TrackCaptureMetadataAssembler = TrackCaptureMetadataAssembler(),
+        mediaPersistence: (any TrackMediaPersisting)? = nil,
+        photoStorage: (any PhotoFileStoring)? = nil,
         nowMilliseconds: @escaping @MainActor @Sendable () -> Int64 = {
             Int64(Date().timeIntervalSince1970 * 1_000)
         }
@@ -30,6 +36,9 @@ final class RecordingCoordinator {
         self.ticker = ticker
         self.persistence = persistence
         self.assembler = assembler
+        self.metadataAssembler = metadataAssembler
+        self.mediaPersistence = mediaPersistence
+        self.photoStorage = photoStorage
         self.nowMilliseconds = nowMilliseconds
     }
 
@@ -108,6 +117,62 @@ final class RecordingCoordinator {
             throw RecordingError.activeTrackCannotBeDeleted
         }
         try persistence.delete(track)
+        try photoStorage?.deleteTrackDirectory(trackID: track.id)
+    }
+
+    @discardableResult
+    func addTag(type: TrackTagType, note: String) throws -> TrackTag {
+        let track = try requireActiveTrack()
+        guard let mediaPersistence else { throw TrackMediaError.servicesUnavailable }
+        let timeMs = nowMilliseconds()
+        let draft = TrackTagDraft(
+            timeMs: timeMs,
+            tagType: type,
+            note: note.trimmingCharacters(in: .whitespacesAndNewlines),
+            metadata: metadataAssembler.assemble(from: hub.state),
+            createdAt: timeMs
+        )
+        return try mediaPersistence.createTag(draft, for: track)
+    }
+
+    @discardableResult
+    func handlePhotoCapture(
+        _ outcome: CameraCaptureOutcome,
+        note: String = ""
+    ) throws -> TrackPhoto? {
+        switch outcome {
+        case .cancelled, .unavailable:
+            return nil
+        case let .failed(message):
+            throw TrackMediaError.captureFailed(message)
+        case let .success(jpegData, capturedAt):
+            return try saveCapturedPhoto(
+                jpegData: jpegData,
+                capturedAt: capturedAt,
+                note: note
+            )
+        }
+    }
+
+    func deleteTag(_ tag: TrackTag) throws {
+        guard let mediaPersistence else { throw TrackMediaError.servicesUnavailable }
+        try mediaPersistence.deleteTag(tag)
+    }
+
+    func deletePhoto(_ photo: TrackPhoto) throws {
+        guard let mediaPersistence, let photoStorage else {
+            throw TrackMediaError.servicesUnavailable
+        }
+        try photoStorage.validate(relativePath: photo.filePath)
+        try mediaPersistence.deletePhoto(photo)
+        try photoStorage.delete(relativePath: photo.filePath)
+    }
+
+    func loadPhotoContent(_ photo: TrackPhoto) -> PhotoContent {
+        guard let photoStorage else {
+            return PhotoContent(status: .missing, data: nil, image: nil)
+        }
+        return PhotoContentLoader(storage: photoStorage).load(relativePath: photo.filePath)
     }
 
     func isActive(_ track: Track) -> Bool {
@@ -144,6 +209,48 @@ final class RecordingCoordinator {
         let batch = pending
         try persistence.append(batch, to: track)
         pending.removeAll(keepingCapacity: true)
+    }
+
+    private func requireActiveTrack() throws -> Track {
+        guard case let .recording(trackID) = state,
+              let track = activeTrack,
+              track.id == trackID,
+              track.endedAt == nil else {
+            throw TrackMediaError.noActiveTrack
+        }
+        return track
+    }
+
+    private func saveCapturedPhoto(
+        jpegData: Data,
+        capturedAt: Int64,
+        note: String
+    ) throws -> TrackPhoto {
+        guard !jpegData.isEmpty else { throw TrackMediaError.emptyImageData }
+        let track = try requireActiveTrack()
+        guard let mediaPersistence, let photoStorage else {
+            throw TrackMediaError.servicesUnavailable
+        }
+
+        let relativePath = try photoStorage.storeJPEG(
+            jpegData,
+            trackID: track.id,
+            timeMs: capturedAt
+        )
+        let draft = TrackPhotoDraft(
+            timeMs: capturedAt,
+            filePath: relativePath,
+            note: note.trimmingCharacters(in: .whitespacesAndNewlines),
+            metadata: metadataAssembler.assemble(from: hub.state),
+            createdAt: nowMilliseconds()
+        )
+
+        do {
+            return try mediaPersistence.createPhoto(draft, for: track)
+        } catch {
+            try? photoStorage.delete(relativePath: relativePath)
+            throw error
+        }
     }
 
     private func clearSession() {
