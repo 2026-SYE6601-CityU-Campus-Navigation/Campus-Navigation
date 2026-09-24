@@ -109,4 +109,5 @@ struct SensorSnapshot: Equatable, Sendable {
 enum SensorConsumer: Hashable, Sendable {
     case liveSensors
     case snapshot
+    case recording
 }

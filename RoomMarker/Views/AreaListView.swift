@@ -12,6 +12,9 @@ struct AreaListView: View {
     @State private var areaPendingDeletion: Area?
     @State private var errorMessage: String?
 
+    let sensorHub: SensorHub
+    let recordingCoordinator: RecordingCoordinator
+
     private var unassignedRooms: [Room] {
         rooms.filter { $0.area == nil }
     }
@@ -77,17 +80,24 @@ struct AreaListView: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         NavigationLink {
-                            LiveSensorsView()
+                            LiveSensorsView(hub: sensorHub)
                         } label: {
                             Label("实时传感器", systemImage: "waveform.path.ecg")
                         }
                         NavigationLink {
-                            SensorSnapshotView()
+                            SensorSnapshotView(hub: sensorHub)
                         } label: {
                             Label("传感器快照", systemImage: "camera.metering.center.weighted")
                         }
                     } label: {
                         Label("传感器", systemImage: "sensor.tag.radiowaves.forward")
+                    }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    NavigationLink {
+                        TrackListView(coordinator: recordingCoordinator)
+                    } label: {
+                        Label("轨迹", systemImage: "point.topleft.down.to.point.bottomright.curvepath")
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
@@ -117,6 +127,11 @@ struct AreaListView: View {
                 Text("区域本身会被删除；其中的房间和轨迹会保留并移到“未分区”。")
             }
             .persistenceErrorAlert($errorMessage)
+        }
+        .safeAreaInset(edge: .bottom) {
+            if recordingCoordinator.state != .idle {
+                RecordingStatusBanner(coordinator: recordingCoordinator)
+            }
         }
     }
 
@@ -148,9 +163,4 @@ struct AreaListView: View {
             errorMessage = error.localizedDescription
         }
     }
-}
-
-#Preview {
-    AreaListView()
-        .modelContainer(for: RoomMarkerSchemaV1.models, inMemory: true)
 }
