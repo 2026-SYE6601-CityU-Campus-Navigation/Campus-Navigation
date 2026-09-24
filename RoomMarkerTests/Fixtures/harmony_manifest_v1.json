@@ -1,0 +1,17 @@
+{
+  "app": "RoomMarker",
+  "exportedAt": 1700000010000,
+  "area": {
+    "id": 1,
+    "name": "Synthetic Area"
+  },
+  "trackCount": 1,
+  "tracks": [
+    {
+      "file": "track_1_Synthetic_Harmony_Track.json",
+      "name": "Synthetic Harmony Track",
+      "startedAt": 1700000000000,
+      "pointCount": 1
+    }
+  ]
+}

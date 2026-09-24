@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "sourcePlatform": "ios",
+  "capabilities": {
+    "nearbyWifiFingerprint": "unsupported"
+  },
+  "name": "Interrupted Synthetic Track",
+  "area": "Synthetic Area",
+  "startedAt": 1700000200000,
+  "pointCount": 0,
+  "points": [],
+  "tags": [],
+  "photos": []
+}
