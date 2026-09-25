@@ -1,0 +1,15 @@
+# 模型与运行时产物（体积大/可再生，不入库）
+LocalAI/models/
+LocalAI/knowledge_store.json
+LocalAI/active_model.txt
+
+# 安装包与二进制
+*.exe
+*.msi
+
+# 原始轨迹文件（含个人住所信息，不入库；如需示例数据请另行脱敏提供）
+TrajectoryData/**/track_*.json
+
+# Python
+__pycache__/
+*.pyc
