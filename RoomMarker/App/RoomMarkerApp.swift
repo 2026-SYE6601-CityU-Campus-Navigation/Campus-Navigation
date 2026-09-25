@@ -12,7 +12,11 @@ struct RoomMarkerApp: App {
     init() {
         do {
             let container = try RoomMarkerModelContainer.make()
-            let hub = SensorHub()
+            let locationService = CoreLocationSensorService()
+            let hub = SensorHub(locationService: locationService)
+            let backgroundSession = CoreLocationBackgroundSession(
+                locationService: locationService
+            )
             let recordingStore = SwiftDataRecordingStore(context: container.mainContext)
             let photoStorage = try LocalPhotoFileStore()
             try? ExportTemporaryCleaner().removeStaleOwnedExports()
@@ -24,7 +28,8 @@ struct RoomMarkerApp: App {
                 hub: hub,
                 persistence: recordingStore,
                 mediaPersistence: recordingStore,
-                photoStorage: photoStorage
+                photoStorage: photoStorage,
+                backgroundSession: backgroundSession
             ))
         } catch {
             fatalError("Unable to create RoomMarker data store: \(error)")

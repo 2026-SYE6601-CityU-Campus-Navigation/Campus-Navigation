@@ -3,6 +3,7 @@ import SwiftUI
 
 struct AreaListView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.scenePhase) private var scenePhase
     @Query(sort: \Area.createdAt) private var areas: [Area]
     @Query(sort: \Room.createdAt) private var rooms: [Room]
     @Query(sort: \Track.startedAt) private var tracks: [Track]
@@ -137,6 +138,15 @@ struct AreaListView: View {
                     cameraService: cameraService
                 )
             }
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            let recordingPhase: RecordingLifecyclePhase = switch newPhase {
+            case .active: .active
+            case .inactive: .inactive
+            case .background: .background
+            @unknown default: .inactive
+            }
+            recordingCoordinator.handleLifecycleTransition(recordingPhase)
         }
     }
 

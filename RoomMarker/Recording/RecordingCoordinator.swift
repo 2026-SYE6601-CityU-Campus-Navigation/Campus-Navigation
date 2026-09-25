@@ -8,6 +8,7 @@ final class RecordingCoordinator {
     private(set) var activeTrack: Track?
     private(set) var currentSampleCount = 0
     private(set) var transitionHistory: [RecordingPhase] = [.idle]
+    private(set) var backgroundStatus: BackgroundLocationSessionStatus = .inactive
 
     @ObservationIgnored private let hub: any SensorHubProtocol
     @ObservationIgnored private let ticker: any RecordingTicking
@@ -16,6 +17,7 @@ final class RecordingCoordinator {
     @ObservationIgnored private let metadataAssembler: TrackCaptureMetadataAssembler
     @ObservationIgnored private let mediaPersistence: (any TrackMediaPersisting)?
     @ObservationIgnored private let photoStorage: (any PhotoFileStoring)?
+    @ObservationIgnored private let backgroundSession: any BackgroundLocationSession
     @ObservationIgnored private let nowMilliseconds: @MainActor @Sendable () -> Int64
     @ObservationIgnored private var pending: [TrackPointDraft] = []
     @ObservationIgnored private var lastAcceptedTickMs: Int64?
@@ -28,6 +30,7 @@ final class RecordingCoordinator {
         metadataAssembler: TrackCaptureMetadataAssembler = TrackCaptureMetadataAssembler(),
         mediaPersistence: (any TrackMediaPersisting)? = nil,
         photoStorage: (any PhotoFileStoring)? = nil,
+        backgroundSession: any BackgroundLocationSession = ForegroundOnlyBackgroundLocationSession(),
         nowMilliseconds: @escaping @MainActor @Sendable () -> Int64 = {
             Int64(Date().timeIntervalSince1970 * 1_000)
         }
@@ -39,6 +42,7 @@ final class RecordingCoordinator {
         self.metadataAssembler = metadataAssembler
         self.mediaPersistence = mediaPersistence
         self.photoStorage = photoStorage
+        self.backgroundSession = backgroundSession
         self.nowMilliseconds = nowMilliseconds
     }
 
@@ -70,12 +74,16 @@ final class RecordingCoordinator {
             lastAcceptedTickMs = nil
 
             hub.start(consumer: .recording, requestLocationAuthorization: true)
+            backgroundStatus = backgroundSession.acquire()
             ticker.start { [weak self] timeMs in
                 guard let self else { return false }
                 return self.acceptTick(timeMs)
             }
             transition(to: .recording(trackID: track.id))
         } catch {
+            backgroundSession.release()
+            backgroundStatus = .inactive
+            hub.stop(consumer: .recording)
             transition(to: .failed(message: error.localizedDescription, trackID: nil))
             throw error
         }
@@ -94,10 +102,14 @@ final class RecordingCoordinator {
         do {
             try flushPending(to: track)
             try persistence.finalize(track, endedAt: nowMilliseconds())
+            backgroundSession.release()
+            backgroundStatus = .inactive
             hub.stop(consumer: .recording)
             clearSession()
             transition(to: .idle)
         } catch {
+            backgroundSession.release()
+            backgroundStatus = .inactive
             hub.stop(consumer: .recording)
             transition(to: .failed(message: error.localizedDescription, trackID: track.id))
             throw error
@@ -107,6 +119,8 @@ final class RecordingCoordinator {
     func resetFailure() async {
         guard case .failed = state else { return }
         await ticker.stop()
+        backgroundSession.release()
+        backgroundStatus = .inactive
         hub.stop(consumer: .recording)
         clearSession()
         transition(to: .idle)
@@ -118,6 +132,45 @@ final class RecordingCoordinator {
         }
         try persistence.delete(track)
         try photoStorage?.deleteTrackDirectory(trackID: track.id)
+    }
+
+    func finalizeInterrupted(_ track: Track, at finalizedAt: Int64? = nil) throws {
+        guard track.endedAt == nil, !isActive(track) else {
+            throw RecordingError.trackIsNotIncomplete
+        }
+        try persistence.finalize(
+            track,
+            endedAt: max(track.startedAt, finalizedAt ?? nowMilliseconds())
+        )
+    }
+
+    func handleLifecycleTransition(_ phase: RecordingLifecyclePhase) {
+        guard case let .recording(trackID) = state,
+              let track = activeTrack,
+              track.id == trackID else {
+            return
+        }
+
+        let observedBackgroundStatus = backgroundSession.status(for: hub.state.permission)
+        if observedBackgroundStatus != .inactive || backgroundStatus == .active {
+            backgroundStatus = observedBackgroundStatus
+        }
+        if case let .unavailable(reason) = observedBackgroundStatus,
+           reason == .authorizationDenied || reason == .authorizationRestricted {
+            backgroundSession.release()
+        }
+        guard phase == .background else { return }
+
+        do {
+            // Protect an in-memory tail before suspension. Normal five-point
+            // batching resumes with one shared buffer when execution continues.
+            try flushPending(to: track)
+        } catch {
+            backgroundSession.release()
+            backgroundStatus = .inactive
+            hub.stop(consumer: .recording)
+            transition(to: .failed(message: error.localizedDescription, trackID: track.id))
+        }
     }
 
     @discardableResult
@@ -198,6 +251,8 @@ final class RecordingCoordinator {
             try flushPending(to: track)
             return true
         } catch {
+            backgroundSession.release()
+            backgroundStatus = .inactive
             hub.stop(consumer: .recording)
             transition(to: .failed(message: error.localizedDescription, trackID: track.id))
             return false
@@ -258,6 +313,7 @@ final class RecordingCoordinator {
         currentSampleCount = 0
         pending.removeAll(keepingCapacity: false)
         lastAcceptedTickMs = nil
+        backgroundStatus = .inactive
     }
 
     private func transition(to newState: RecordingState) {

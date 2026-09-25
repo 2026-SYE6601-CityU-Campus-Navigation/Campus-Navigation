@@ -21,11 +21,14 @@ struct RecordingStatusBanner: View {
                 VStack(spacing: 10) {
                     HStack(spacing: 12) {
                         VStack(alignment: .leading, spacing: 3) {
-                            Label("正在前台记录", systemImage: "record.circle.fill")
+                            Label(backgroundTitle, systemImage: "location.fill")
                                 .font(.headline)
                                 .foregroundStyle(.red)
                             Text(recordingSummary(at: context.date))
                                 .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text(backgroundExplanation)
+                                .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
@@ -116,8 +119,29 @@ struct RecordingStatusBanner: View {
     private func recordingSummary(at date: Date) -> String {
         guard let track = coordinator.activeTrack else { return "" }
         let nowMs = Int64(date.timeIntervalSince1970 * 1_000)
-        let elapsed = max(0, (nowMs - track.startedAt) / 1_000)
+        let elapsed = RecordingElapsedTime.seconds(startedAt: track.startedAt, now: nowMs)
         return "\(track.name) · \(formatDuration(elapsed)) · \(coordinator.currentSampleCount) 个采样"
+    }
+
+    private var backgroundTitle: String {
+        coordinator.backgroundStatus == .active ? "正在记录 · 后台定位已启用" : "正在记录 · 仅前台"
+    }
+
+    private var backgroundExplanation: String {
+        switch coordinator.backgroundStatus {
+        case .active:
+            "退到后台后，iOS 允许时会继续定位；系统会显示定位指示，耗电可能增加。停止轨迹即停止后台定位。"
+        case .unavailable(.authorizationPending):
+            "等待前台定位授权；在授权生效前不会声称后台记录可用。"
+        case .unavailable(.authorizationDenied):
+            "定位权限已拒绝；轨迹仍可记录时间点，但后台定位不可用。"
+        case .unavailable(.authorizationRestricted):
+            "系统限制了定位；后台定位不可用。"
+        case .unavailable(.backgroundModeMissing):
+            "后台定位能力不可用；轨迹仅在应用可执行时采样。"
+        case .inactive:
+            "后台定位未启用。"
+        }
     }
 
     private func formatDuration(_ seconds: Int64) -> String {

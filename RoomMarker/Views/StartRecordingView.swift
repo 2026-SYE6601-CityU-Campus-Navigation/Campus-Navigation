@@ -32,7 +32,10 @@ struct StartRecordingView: View {
                 }
 
                 Section {
-                    Text("前台运行时约每秒采集一次；每 5 个点保存一批。iOS 不扫描附近 Wi‑Fi，也不会补造延迟期间的历史点。")
+                    Text("由您在前台开始后，后台定位会在 iOS 允许时继续。后台不保证精确每秒执行，可能出现真实时间间隔；停止轨迹会停止后台定位。持续定位会增加电量消耗。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("iOS 不扫描附近 Wi‑Fi，也不会补造延迟或暂停期间的历史采样点。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

@@ -6,6 +6,7 @@ struct TrackDetailView: View {
     let coordinator: RecordingCoordinator
 
     @State private var isConfirmingDeletion = false
+    @State private var isConfirmingRecoveryFinalization = false
     @State private var tagPendingDeletion: TrackTag?
     @State private var photoPendingDeletion: TrackPhoto?
     @State private var previewPhoto: TrackPhoto?
@@ -33,6 +34,11 @@ struct TrackDetailView: View {
                 LabeledContent("采样点", value: "\(track.pointCount)")
                 LabeledContent("标签", value: "\(tags.count)")
                 LabeledContent("照片", value: "\(photos.count)")
+                if canFinalizeInterrupted {
+                    Button("结束中断轨迹") {
+                        isConfirmingRecoveryFinalization = true
+                    }
+                }
             }
 
             Section("标签") {
@@ -89,6 +95,16 @@ struct TrackDetailView: View {
                 }
                 .disabled(coordinator.isActive(track))
             }
+        }
+        .confirmationDialog(
+            "结束这条中断轨迹？",
+            isPresented: $isConfirmingRecoveryFinalization,
+            titleVisibility: .visible
+        ) {
+            Button("以当前时间结束", action: finalizeInterruptedTrack)
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("只有您确认后才会写入明确的结束时间；应用不会补造中断期间的采样点。")
         }
         .confirmationDialog(
             "删除轨迹“\(track.name)”？",
@@ -210,8 +226,16 @@ struct TrackDetailView: View {
     }
 
     private var statusText: String {
-        if coordinator.isActive(track) { return "进行中（仅前台）" }
+        if coordinator.isActive(track) {
+            return coordinator.backgroundStatus == .active
+                ? "进行中（后台定位由 iOS 调度）"
+                : "进行中（后台定位不可用）"
+        }
         return track.endedAt == nil ? "未完整结束" : "已结束"
+    }
+
+    private var canFinalizeInterrupted: Bool {
+        track.endedAt == nil && !coordinator.isActive(track)
     }
 
     private func hasNoHardwareReading(_ point: TrackPoint) -> Bool {
@@ -239,6 +263,14 @@ struct TrackDetailView: View {
         do {
             try coordinator.delete(track)
             dismiss()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func finalizeInterruptedTrack() {
+        do {
+            try coordinator.finalizeInterrupted(track)
         } catch {
             errorMessage = error.localizedDescription
         }

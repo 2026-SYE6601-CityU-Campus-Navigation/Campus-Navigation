@@ -64,7 +64,7 @@ struct AreaDetailView: View {
 
             Section("轨迹") {
                 Label("\(area.tracks.count) 条轨迹", systemImage: "point.topleft.down.to.point.bottomright.curvepath")
-                Text("可从首页工具栏的“轨迹”入口查看或开始前台记录。")
+                Text("可从首页工具栏的“轨迹”入口查看，或在前台明确开始记录。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }

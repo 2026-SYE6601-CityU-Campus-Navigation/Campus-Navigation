@@ -58,6 +58,14 @@ final class CoreLocationSensorService: NSObject, LocationSensorServicing {
         headingStaleTask = nil
     }
 
+    func setBackgroundRecordingEnabled(_ enabled: Bool) {
+        manager.allowsBackgroundLocationUpdates = enabled
+        manager.pausesLocationUpdatesAutomatically = !enabled
+        if enabled {
+            manager.showsBackgroundLocationIndicator = true
+        }
+    }
+
     static func permissionState(for status: CLAuthorizationStatus) -> LocationPermissionState {
         switch status {
         case .notDetermined:
@@ -138,6 +146,8 @@ final class CoreLocationSensorService: NSObject, LocationSensorServicing {
         }
     }
 }
+
+extension CoreLocationSensorService: BackgroundLocationConfiguring {}
 
 extension CoreLocationSensorService: CLLocationManagerDelegate {
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {

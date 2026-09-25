@@ -21,9 +21,22 @@
 		A10000000000000000000011 /* RoomMarkerTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RoomMarkerTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		A10000000000000000000012 /* Exceptions for "RoomMarker" folder in "RoomMarker" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = A10000000000000000000040 /* RoomMarker */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		A10000000000000000000050 /* RoomMarker */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				A10000000000000000000012 /* Exceptions for "RoomMarker" folder in "RoomMarker" target */,
+			);
 			path = RoomMarker;
 			sourceTree = "<group>";
 		};
@@ -322,11 +335,8 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = RoomMarker;
-				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
-				INFOPLIST_KEY_NSCameraUsageDescription = "RoomMarker 使用相机拍摄并保存轨迹现场照片。";
-				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "RoomMarker 仅在您使用传感器功能时读取位置，用于显示和采集室内导航数据。";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = RoomMarker/Info.plist;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = edu.cityu.sye6601.RoomMarker;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -345,11 +355,8 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = RoomMarker;
-				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
-				INFOPLIST_KEY_NSCameraUsageDescription = "RoomMarker 使用相机拍摄并保存轨迹现场照片。";
-				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "RoomMarker 仅在您使用传感器功能时读取位置，用于显示和采集室内导航数据。";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = RoomMarker/Info.plist;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = edu.cityu.sye6601.RoomMarker;
 				PRODUCT_NAME = "$(TARGET_NAME)";

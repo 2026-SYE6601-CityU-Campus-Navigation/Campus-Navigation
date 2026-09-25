@@ -33,6 +33,7 @@ enum RecordingError: LocalizedError, Equatable {
     case notRecording
     case activeTrackCannotBeDeleted
     case finalizedTrack
+    case trackIsNotIncomplete
 
     var errorDescription: String? {
         switch self {
@@ -48,6 +49,8 @@ enum RecordingError: LocalizedError, Equatable {
             "正在记录的轨迹不能删除；请先停止记录。"
         case .finalizedTrack:
             "已结束的轨迹不能再追加采样点。"
+        case .trackIsNotIncomplete:
+            "只有未完整结束且当前未在记录的轨迹可以手动结束。"
         }
     }
 }

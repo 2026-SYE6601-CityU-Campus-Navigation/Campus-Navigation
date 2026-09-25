@@ -18,6 +18,8 @@ struct TrackListView: View {
 
     var body: some View {
         List {
+            interruptedSection
+
             Section("轨迹") {
                 ForEach(filteredTracks, id: \.id) { track in
                     NavigationLink {
@@ -37,7 +39,7 @@ struct TrackListView: View {
                     ContentUnavailableView(
                         "还没有轨迹",
                         systemImage: "point.topleft.down.to.point.bottomright.curvepath",
-                        description: Text("创建一个区域后，即可开始前台轨迹记录。")
+                        description: Text("创建一个区域后，可在前台明确开始轨迹记录。")
                     )
                     .listRowBackground(Color.clear)
                 }
@@ -86,6 +88,40 @@ struct TrackListView: View {
     private var filteredTracks: [Track] {
         guard let initialArea else { return tracks }
         return tracks.filter { $0.area?.id == initialArea.id }
+    }
+
+    private var interruptedTracks: [Track] {
+        IncompleteTrackRecovery.detected(
+            in: filteredTracks,
+            activeTrackID: coordinator.activeTrackID
+        )
+    }
+
+    @ViewBuilder
+    private var interruptedSection: some View {
+        if !interruptedTracks.isEmpty {
+            Section {
+                ForEach(interruptedTracks, id: \.id) { track in
+                    interruptedTrackLink(track)
+                }
+            } header: {
+                Text("需要处理")
+            } footer: {
+                Text("应用不会自动恢复或伪造结束时间。请打开轨迹检查后手动结束或删除。")
+            }
+        }
+    }
+
+    private func interruptedTrackLink(_ track: Track) -> some View {
+        NavigationLink {
+            TrackDetailView(track: track, coordinator: coordinator)
+        } label: {
+            Label {
+                Text(track.name)
+            } icon: {
+                Image(systemName: "exclamationmark.triangle")
+            }
+        }
     }
 
     @ViewBuilder
