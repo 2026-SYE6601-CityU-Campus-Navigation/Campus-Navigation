@@ -60,6 +60,7 @@ struct ExportedTagDTO: Codable, Equatable, Sendable {
     let longitude: Double?
     let altitude: Double?
     let headingDeg: Double?
+    let createdAt: Int64?
 }
 
 struct ExportedPhotoDTO: Codable, Equatable, Sendable {
@@ -70,6 +71,7 @@ struct ExportedPhotoDTO: Codable, Equatable, Sendable {
     let longitude: Double?
     let altitude: Double?
     let headingDeg: Double?
+    let createdAt: Int64?
     let fileMissing: Bool?
 }
 
@@ -90,6 +92,13 @@ struct ExportedTrackDTO: Codable, Equatable, Sendable {
 struct ManifestAreaDTO: Codable, Equatable, Sendable {
     let id: Int64?
     let name: String
+    let sourceId: String?
+
+    init(id: Int64?, name: String, sourceId: String? = nil) {
+        self.id = id
+        self.name = name
+        self.sourceId = sourceId
+    }
 }
 
 struct ManifestTrackDTO: Codable, Equatable, Sendable {

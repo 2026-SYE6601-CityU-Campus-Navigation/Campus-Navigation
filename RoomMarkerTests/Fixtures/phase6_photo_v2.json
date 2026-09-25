@@ -1,0 +1,20 @@
+{
+  "version": 2,
+  "sourcePlatform": "ios",
+  "capabilities": { "nearbyWifiFingerprint": "unsupported" },
+  "name": "Synthetic Photo Track",
+  "area": "Synthetic Area",
+  "startedAt": 1700000300000,
+  "endedAt": 1700000305000,
+  "pointCount": 0,
+  "points": [],
+  "tags": [],
+  "photos": [
+    {
+      "timeMs": 1700000301000,
+      "file": "photos/00000000-0000-0000-0000-000000000031/image.jpg",
+      "note": "Synthetic metadata only",
+      "createdAt": 1700000301100
+    }
+  ]
+}

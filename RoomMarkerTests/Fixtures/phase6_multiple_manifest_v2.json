@@ -1,0 +1,26 @@
+{
+  "version": 2,
+  "app": "RoomMarker",
+  "sourcePlatform": "ios",
+  "capabilities": { "nearbyWifiFingerprint": "unsupported" },
+  "exportedAt": 1700000500000,
+  "area": {
+    "name": "Synthetic Area",
+    "sourceId": "00000000-0000-0000-0000-000000000050"
+  },
+  "trackCount": 2,
+  "tracks": [
+    {
+      "file": "tracks/00000000-0000-0000-0000-000000000051.json",
+      "name": "Earlier Synthetic Track",
+      "startedAt": 1700000480000,
+      "pointCount": 1
+    },
+    {
+      "file": "tracks/00000000-0000-0000-0000-000000000052.json",
+      "name": "Later Synthetic Track",
+      "startedAt": 1700000490000,
+      "pointCount": 2
+    }
+  ]
+}

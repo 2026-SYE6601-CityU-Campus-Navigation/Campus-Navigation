@@ -1,0 +1,26 @@
+{
+  "version": 2,
+  "sourcePlatform": "ios",
+  "capabilities": { "nearbyWifiFingerprint": "unsupported" },
+  "name": "Synthetic Full Sensor Track",
+  "area": "Synthetic Area",
+  "startedAt": 1700000600000,
+  "endedAt": 1700000605000,
+  "pointCount": 1,
+  "points": [
+    {
+      "timeMs": 1700000601000,
+      "latitude": 22.3,
+      "longitude": 114.2,
+      "altitude": 18.0,
+      "accuracy": 3.0,
+      "pressureHpa": 1008.0,
+      "magneticX": 1.0,
+      "magneticY": 2.0,
+      "magneticZ": 3.0,
+      "headingDeg": 90.0
+    }
+  ],
+  "tags": [],
+  "photos": []
+}

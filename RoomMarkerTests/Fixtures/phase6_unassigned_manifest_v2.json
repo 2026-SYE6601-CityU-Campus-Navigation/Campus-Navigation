@@ -1,0 +1,17 @@
+{
+  "version": 2,
+  "app": "RoomMarker",
+  "sourcePlatform": "ios",
+  "capabilities": { "nearbyWifiFingerprint": "unsupported" },
+  "exportedAt": 1700000400000,
+  "area": { "name": "未分区" },
+  "trackCount": 1,
+  "tracks": [
+    {
+      "file": "tracks/00000000-0000-0000-0000-000000000041.json",
+      "name": "Synthetic Unassigned Track",
+      "startedAt": 1700000390000,
+      "pointCount": 0
+    }
+  ]
+}
