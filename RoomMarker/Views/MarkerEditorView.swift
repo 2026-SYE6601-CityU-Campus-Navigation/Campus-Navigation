@@ -7,13 +7,21 @@ struct MarkerEditorView: View {
 
     private let room: Room
     private let marker: Marker?
+    private let snapshotService: any SensorSnapshotCapturing
     @State private var name: String
     @State private var markerType: MarkerType
     @State private var errorMessage: String?
+    @State private var saveTask: Task<Void, Never>?
+    @State private var isSaving = false
 
-    init(room: Room, marker: Marker? = nil) {
+    init(
+        room: Room,
+        marker: Marker? = nil,
+        snapshotService: any SensorSnapshotCapturing
+    ) {
         self.room = room
         self.marker = marker
+        self.snapshotService = snapshotService
         _name = State(initialValue: marker?.name ?? "")
         _markerType = State(initialValue: marker?.markerType ?? .frontDoor)
     }
@@ -33,9 +41,15 @@ struct MarkerEditorView: View {
                 }
 
                 Section {
-                    Label("本阶段仅手动保存名称与类型", systemImage: "hand.tap")
+                    if marker == nil {
+                        Label("保存时采集一次传感器快照", systemImage: "sensor.tag.radiowaves.forward")
+                    } else {
+                        Label("编辑只更新名称与类型", systemImage: "pencil")
+                    }
                 } footer: {
-                    Text("不会采集或填充定位、气压、地磁等传感器值。")
+                    Text(marker == nil
+                        ? "最多等待 4 秒；位置、精度、气压或地磁不可用时仍会创建标记，缺失字段保持为空。"
+                        : "已有定位、精度、气压和地磁值会原样保留；修改名称不会自动重新采集。")
                 }
 
                 if let errorMessage {
@@ -52,25 +66,68 @@ struct MarkerEditorView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("取消") { dismiss() }
+                        .disabled(isSaving)
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("保存", action: save)
+                    Button(marker == nil ? "采集并保存" : "保存", action: save)
+                        .disabled(isSaving)
                 }
+            }
+            .overlay {
+                if isSaving {
+                    ProgressView("正在采集传感器快照…")
+                        .padding()
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                }
+            }
+            .onDisappear {
+                saveTask?.cancel()
+                saveTask = nil
             }
         }
     }
 
     private func save() {
-        do {
-            let store = Phase2DataStore(context: modelContext)
-            if let marker {
+        errorMessage = nil
+        let store = Phase2DataStore(context: modelContext)
+
+        if let marker {
+            do {
                 try store.updateMarker(marker, name: name, markerType: markerType)
-            } else {
-                try store.createMarker(room: room, name: name, markerType: markerType)
+                dismiss()
+            } catch {
+                errorMessage = error.localizedDescription
             }
-            dismiss()
-        } catch {
-            errorMessage = error.localizedDescription
+            return
+        }
+
+        guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            errorMessage = Phase2ValidationError.emptyName.localizedDescription
+            return
+        }
+
+        saveTask?.cancel()
+        isSaving = true
+        saveTask = Task {
+            defer {
+                isSaving = false
+                saveTask = nil
+            }
+            do {
+                try await RoomMarkerSnapshotWorkflow(
+                    snapshotService: snapshotService
+                ).captureAndCreateMarker(
+                    in: room,
+                    name: name,
+                    markerType: markerType,
+                    using: store
+                )
+                dismiss()
+            } catch is CancellationError {
+                // Cancelling the sheet deliberately cancels capture and releases the sensor lease.
+            } catch {
+                errorMessage = error.localizedDescription
+            }
         }
     }
 }

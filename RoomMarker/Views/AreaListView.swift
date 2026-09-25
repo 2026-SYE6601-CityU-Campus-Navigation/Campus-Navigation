@@ -17,6 +17,7 @@ struct AreaListView: View {
     let recordingCoordinator: RecordingCoordinator
     let cameraService: any CameraServicing
     let photoStorage: any PhotoFileStoring
+    let snapshotService: any SensorSnapshotCapturing
 
     private var unassignedRooms: [Room] {
         rooms.filter { $0.area == nil }
@@ -32,7 +33,10 @@ struct AreaListView: View {
                 if !unassignedRooms.isEmpty || !unassignedTracks.isEmpty {
                     Section {
                         NavigationLink {
-                            UnassignedRoomsView(photoStorage: photoStorage)
+                            UnassignedRoomsView(
+                                photoStorage: photoStorage,
+                                snapshotService: snapshotService
+                            )
                         } label: {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("未分区")
@@ -50,7 +54,11 @@ struct AreaListView: View {
                 Section("区域") {
                     ForEach(areas, id: \.id) { area in
                         NavigationLink {
-                            AreaDetailView(area: area, photoStorage: photoStorage)
+                            AreaDetailView(
+                                area: area,
+                                photoStorage: photoStorage,
+                                snapshotService: snapshotService
+                            )
                         } label: {
                             areaRow(area)
                         }

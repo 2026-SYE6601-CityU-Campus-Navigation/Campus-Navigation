@@ -1,7 +1,12 @@
 import Foundation
 
 @MainActor
-final class SensorSnapshotService {
+protocol SensorSnapshotCapturing: AnyObject {
+    func capture() async throws -> SensorSnapshot
+}
+
+@MainActor
+final class SensorSnapshotService: SensorSnapshotCapturing {
     static let defaultTimeout: Duration = .seconds(4)
 
     private let hub: any SensorHubProtocol

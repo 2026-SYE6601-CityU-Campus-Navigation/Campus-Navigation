@@ -104,6 +104,15 @@ struct SensorSnapshot: Equatable, Sendable {
     let magneticZ: Double?
     let headingDeg: Double?
     let outcomes: SensorSnapshotOutcomes
+
+    var hasRoomReferenceValues: Bool {
+        latitude != nil || longitude != nil || altitude != nil || pressureHpa != nil
+    }
+
+    var hasMarkerValues: Bool {
+        hasRoomReferenceValues || accuracy != nil
+            || magneticX != nil || magneticY != nil || magneticZ != nil
+    }
 }
 
 enum SensorConsumer: Hashable, Sendable {

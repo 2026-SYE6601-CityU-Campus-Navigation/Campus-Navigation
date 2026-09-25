@@ -11,8 +11,13 @@ struct UnassignedRoomsView: View {
     @State private var roomPendingDeletion: Room?
     @State private var errorMessage: String?
     @State private var exportCoordinator: AreaExportCoordinator
+    private let snapshotService: any SensorSnapshotCapturing
 
-    init(photoStorage: any PhotoFileStoring) {
+    init(
+        photoStorage: any PhotoFileStoring,
+        snapshotService: any SensorSnapshotCapturing
+    ) {
+        self.snapshotService = snapshotService
         _exportCoordinator = State(initialValue: AreaExportCoordinator(photoStorage: photoStorage))
     }
 
@@ -29,7 +34,7 @@ struct UnassignedRoomsView: View {
             Section {
                 ForEach(rooms, id: \.id) { room in
                     NavigationLink {
-                        RoomDetailView(room: room)
+                        RoomDetailView(room: room, snapshotService: snapshotService)
                     } label: {
                         RoomSummaryRow(room: room)
                     }

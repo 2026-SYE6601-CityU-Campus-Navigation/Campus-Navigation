@@ -5,6 +5,7 @@ struct RoomDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
     @Bindable var room: Room
+    private let snapshotService: any SensorSnapshotCapturing
 
     @State private var isShowingRoomEditor = false
     @State private var editingMarker: Marker?
@@ -12,6 +13,14 @@ struct RoomDetailView: View {
     @State private var markerPendingDeletion: Marker?
     @State private var isConfirmingRoomDeletion = false
     @State private var errorMessage: String?
+    @State private var roomCaptureTask: Task<Void, Never>?
+    @State private var isCapturingRoomReference = false
+    @State private var roomCaptureMessage: String?
+
+    init(room: Room, snapshotService: any SensorSnapshotCapturing) {
+        self.room = room
+        self.snapshotService = snapshotService
+    }
 
     private var sortedMarkers: [Marker] {
         room.markers.sorted { $0.createdAt < $1.createdAt }
@@ -33,7 +42,7 @@ struct RoomDetailView: View {
                 }
             }
 
-            Section("已有传感器数据") {
+            Section {
                 if hasRoomSensorData {
                     if let latitude = room.latitude, let longitude = room.longitude {
                         LabeledContent("位置", value: String(format: "%.6f, %.6f", latitude, longitude))
@@ -45,9 +54,33 @@ struct RoomDetailView: View {
                         LabeledContent("气压", value: String(format: "%.1f hPa", pressure))
                     }
                 } else {
-                    Label("未采集；Phase 2 不提供传感器采集", systemImage: "sensor.tag.radiowaves.forward.slash")
+                    Label("尚未采集到可用的房间参考点", systemImage: "sensor.tag.radiowaves.forward.slash")
                         .foregroundStyle(.secondary)
                 }
+
+                Button(action: captureRoomReference) {
+                    HStack {
+                        Label(
+                            hasRoomSensorData ? "更新参考点" : "采集房间参考点",
+                            systemImage: "scope"
+                        )
+                        Spacer()
+                        if isCapturingRoomReference {
+                            ProgressView()
+                        }
+                    }
+                }
+                .disabled(isCapturingRoomReference)
+
+                if let roomCaptureMessage {
+                    Text(roomCaptureMessage)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            } header: {
+                Text("房间参考点")
+            } footer: {
+                Text("每次操作使用一个最多等待 4 秒的传感器快照，并完整替换旧参考点；本次缺失的值会保持为空，不会与旧读数混合或替换为 0。")
             }
 
             Section("标记（\(sortedMarkers.count)）") {
@@ -82,6 +115,10 @@ struct RoomDetailView: View {
                 }
             }
         }
+        .onDisappear {
+            roomCaptureTask?.cancel()
+            roomCaptureTask = nil
+        }
         .navigationTitle(room.name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -105,7 +142,11 @@ struct RoomDetailView: View {
             RoomEditorView(room: room)
         }
         .sheet(isPresented: $isShowingMarkerEditor) {
-            MarkerEditorView(room: room, marker: editingMarker)
+            MarkerEditorView(
+                room: room,
+                marker: editingMarker,
+                snapshotService: snapshotService
+            )
         }
         .confirmationDialog(
             "删除房间“\(room.name)”？",
@@ -153,7 +194,7 @@ struct RoomDetailView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             } else {
-                Text("手动创建 · 无传感器数据")
+                Text("当前没有可用的传感器数据")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -165,6 +206,35 @@ struct RoomDetailView: View {
     private func presentNewMarker() {
         editingMarker = nil
         isShowingMarkerEditor = true
+    }
+
+    private func captureRoomReference() {
+        roomCaptureTask?.cancel()
+        isCapturingRoomReference = true
+        roomCaptureMessage = nil
+        errorMessage = nil
+
+        roomCaptureTask = Task {
+            defer {
+                isCapturingRoomReference = false
+                roomCaptureTask = nil
+            }
+            do {
+                let snapshot = try await RoomMarkerSnapshotWorkflow(
+                    snapshotService: snapshotService
+                ).captureRoomReference(
+                    for: room,
+                    using: Phase2DataStore(context: modelContext)
+                )
+                roomCaptureMessage = snapshot.hasRoomReferenceValues
+                    ? "参考点已更新；只保存本次快照中实际可用的值。"
+                    : "快照已完成，但当前没有可用的房间参考数据。"
+            } catch is CancellationError {
+                // Leaving the screen deliberately cancels capture; the snapshot service releases its lease.
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
     }
 
     private func deleteRoom() {
@@ -196,6 +266,12 @@ struct RoomDetailView: View {
         var parts: [String] = []
         if let latitude = marker.latitude, let longitude = marker.longitude {
             parts.append(String(format: "%.6f, %.6f", latitude, longitude))
+        }
+        if let altitude = marker.altitude {
+            parts.append(String(format: "海拔 %.1f m", altitude))
+        }
+        if let accuracy = marker.accuracy {
+            parts.append(String(format: "精度 %.1f m", accuracy))
         }
         if let pressure = marker.pressureHpa {
             parts.append(String(format: "%.1f hPa", pressure))

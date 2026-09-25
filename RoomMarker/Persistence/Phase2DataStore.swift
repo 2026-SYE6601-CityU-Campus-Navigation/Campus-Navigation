@@ -64,11 +64,20 @@ final class Phase2DataStore {
         try repository.save()
     }
 
+    func replaceRoomReference(_ room: Room, with snapshot: SensorSnapshot) throws {
+        room.latitude = snapshot.latitude
+        room.longitude = snapshot.longitude
+        room.altitude = snapshot.altitude
+        room.pressureHpa = snapshot.pressureHpa
+        try repository.save()
+    }
+
     @discardableResult
     func createMarker(
         room: Room,
         name: String,
         markerType: MarkerType,
+        snapshot: SensorSnapshot? = nil,
         createdAt: Int64 = Phase2DataStore.nowMilliseconds()
     ) throws -> Marker {
         let input = try validated(name: name, note: "")
@@ -76,6 +85,14 @@ final class Phase2DataStore {
             room: room,
             name: input.name,
             markerType: markerType,
+            latitude: snapshot?.latitude,
+            longitude: snapshot?.longitude,
+            altitude: snapshot?.altitude,
+            accuracy: snapshot?.accuracy,
+            pressureHpa: snapshot?.pressureHpa,
+            magneticX: snapshot?.magneticX,
+            magneticY: snapshot?.magneticY,
+            magneticZ: snapshot?.magneticZ,
             createdAt: createdAt
         )
         context.insert(marker)

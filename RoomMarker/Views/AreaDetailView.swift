@@ -13,9 +13,15 @@ struct AreaDetailView: View {
     @State private var isConfirmingAreaDeletion = false
     @State private var errorMessage: String?
     @State private var exportCoordinator: AreaExportCoordinator
+    private let snapshotService: any SensorSnapshotCapturing
 
-    init(area: Area, photoStorage: any PhotoFileStoring) {
+    init(
+        area: Area,
+        photoStorage: any PhotoFileStoring,
+        snapshotService: any SensorSnapshotCapturing
+    ) {
         self.area = area
+        self.snapshotService = snapshotService
         _exportCoordinator = State(initialValue: AreaExportCoordinator(photoStorage: photoStorage))
     }
 
@@ -34,7 +40,7 @@ struct AreaDetailView: View {
             Section("房间（\(sortedRooms.count)）") {
                 ForEach(sortedRooms, id: \.id) { room in
                     NavigationLink {
-                        RoomDetailView(room: room)
+                        RoomDetailView(room: room, snapshotService: snapshotService)
                     } label: {
                         RoomSummaryRow(room: room)
                     }

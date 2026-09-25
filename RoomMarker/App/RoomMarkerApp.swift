@@ -6,6 +6,7 @@ struct RoomMarkerApp: App {
     private let modelContainer: ModelContainer
     private let cameraService: SystemCameraService
     private let photoStorage: LocalPhotoFileStore
+    private let snapshotService: SensorSnapshotService
     @State private var sensorHub: SensorHub
     @State private var recordingCoordinator: RecordingCoordinator
 
@@ -23,6 +24,7 @@ struct RoomMarkerApp: App {
             modelContainer = container
             cameraService = SystemCameraService()
             self.photoStorage = photoStorage
+            snapshotService = SensorSnapshotService(hub: hub)
             _sensorHub = State(initialValue: hub)
             _recordingCoordinator = State(initialValue: RecordingCoordinator(
                 hub: hub,
@@ -42,7 +44,8 @@ struct RoomMarkerApp: App {
                 sensorHub: sensorHub,
                 recordingCoordinator: recordingCoordinator,
                 cameraService: cameraService,
-                photoStorage: photoStorage
+                photoStorage: photoStorage,
+                snapshotService: snapshotService
             )
         }
         .modelContainer(modelContainer)
