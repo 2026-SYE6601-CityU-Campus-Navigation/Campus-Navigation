@@ -41,8 +41,7 @@ struct ExportStagingService {
     private let jsonEncoder: ExportJSONEncoder
 
     init(
-        baseDirectory: URL = FileManager.default.temporaryDirectory
-            .appending(path: "RoomMarkerExports", directoryHint: .isDirectory),
+        baseDirectory: URL = ExportTemporaryLocations.staging,
         fileSystem: any ExportStagingFileSystem = LocalExportStagingFileSystem(),
         mapper: ExportDTOMapper = ExportDTOMapper(),
         jsonEncoder: ExportJSONEncoder = ExportJSONEncoder()

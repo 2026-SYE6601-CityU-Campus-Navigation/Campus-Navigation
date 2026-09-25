@@ -10,6 +10,11 @@ struct UnassignedRoomsView: View {
     @State private var isShowingRoomEditor = false
     @State private var roomPendingDeletion: Room?
     @State private var errorMessage: String?
+    @State private var exportCoordinator: AreaExportCoordinator
+
+    init(photoStorage: any PhotoFileStoring) {
+        _exportCoordinator = State(initialValue: AreaExportCoordinator(photoStorage: photoStorage))
+    }
 
     private var rooms: [Room] {
         allRooms.filter { $0.area == nil }
@@ -53,8 +58,18 @@ struct UnassignedRoomsView: View {
             } header: {
                 Text("房间（\(rooms.count)）")
             } footer: {
-                Text("另有 \(unassignedTrackCount) 条未分区轨迹；轨迹界面将在后续阶段提供。")
+                Text("另有 \(unassignedTrackCount) 条未分区轨迹。")
             }
+
+            AreaExportSection(
+                coordinator: exportCoordinator,
+                areaName: "未分区",
+                startExport: {
+                    try exportCoordinator.startUnassigned(
+                        tracks: allTracks.filter { $0.area == nil }
+                    )
+                }
+            )
         }
         .navigationTitle("未分区")
         .navigationBarTitleDisplayMode(.inline)

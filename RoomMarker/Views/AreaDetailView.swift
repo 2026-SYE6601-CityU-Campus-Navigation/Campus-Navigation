@@ -12,6 +12,12 @@ struct AreaDetailView: View {
     @State private var roomPendingDeletion: Room?
     @State private var isConfirmingAreaDeletion = false
     @State private var errorMessage: String?
+    @State private var exportCoordinator: AreaExportCoordinator
+
+    init(area: Area, photoStorage: any PhotoFileStoring) {
+        self.area = area
+        _exportCoordinator = State(initialValue: AreaExportCoordinator(photoStorage: photoStorage))
+    }
 
     private var sortedRooms: [Room] {
         area.rooms.sorted { $0.createdAt < $1.createdAt }
@@ -62,6 +68,12 @@ struct AreaDetailView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
+
+            AreaExportSection(
+                coordinator: exportCoordinator,
+                areaName: area.name,
+                startExport: { try exportCoordinator.start(area: area) }
+            )
         }
         .navigationTitle(area.name)
         .navigationBarTitleDisplayMode(.inline)

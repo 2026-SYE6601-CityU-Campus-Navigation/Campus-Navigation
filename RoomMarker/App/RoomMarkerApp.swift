@@ -5,6 +5,7 @@ import SwiftUI
 struct RoomMarkerApp: App {
     private let modelContainer: ModelContainer
     private let cameraService: SystemCameraService
+    private let photoStorage: LocalPhotoFileStore
     @State private var sensorHub: SensorHub
     @State private var recordingCoordinator: RecordingCoordinator
 
@@ -14,8 +15,10 @@ struct RoomMarkerApp: App {
             let hub = SensorHub()
             let recordingStore = SwiftDataRecordingStore(context: container.mainContext)
             let photoStorage = try LocalPhotoFileStore()
+            try? ExportTemporaryCleaner().removeStaleOwnedExports()
             modelContainer = container
             cameraService = SystemCameraService()
+            self.photoStorage = photoStorage
             _sensorHub = State(initialValue: hub)
             _recordingCoordinator = State(initialValue: RecordingCoordinator(
                 hub: hub,
@@ -33,7 +36,8 @@ struct RoomMarkerApp: App {
             AreaListView(
                 sensorHub: sensorHub,
                 recordingCoordinator: recordingCoordinator,
-                cameraService: cameraService
+                cameraService: cameraService,
+                photoStorage: photoStorage
             )
         }
         .modelContainer(modelContainer)
