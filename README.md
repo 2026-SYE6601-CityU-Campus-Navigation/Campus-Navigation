@@ -37,6 +37,42 @@ This is an accepted course-project baseline, not a claim of universal production
 - Delete individual photos or cascade-delete a Track and its owned data.
 - Detect a Track left incomplete by process termination without fabricating an end time or automatically resuming it.
 
+## RoomMarker in action
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="docs/images/01-area-room-marker.png" alt="Area, Room, and sensor-backed Marker" width="360"><br>
+      <strong>Structured indoor-space capture</strong><br>
+      Area, Room, and sensor-backed Marker evidence.
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/images/02-live-sensors.png" alt="Live Sensors status screen" width="360"><br>
+      <strong>Native sensor collection</strong><br>
+      Honest authorization and hardware-availability states.
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <img src="docs/images/03-active-track.png" alt="Active Track recording" width="360"><br>
+      <strong>Active field recording</strong><br>
+      Elapsed state, sampling, tags, and photo capture.
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/images/04-track-detail.png" alt="Completed Track detail with evidence" width="360"><br>
+      <strong>Track evidence</strong><br>
+      Samples, tags, and an application-owned photo.
+    </td>
+  </tr>
+  <tr>
+    <td align="center" colspan="2">
+      <img src="docs/images/05-export-share.png" alt="RoomMarker ZIP in the native iOS Share Sheet" width="360"><br>
+      <strong>Secure ZIP export</strong><br>
+      One final archive shared through the native iOS Share Sheet.
+    </td>
+  </tr>
+</table>
+
 ## HarmonyOS and iOS feature map
 
 The implementations share product concepts and export semantics, but each uses its platform's native facilities.
@@ -202,5 +238,3 @@ Manifest references and photo paths are relative. Staging, archive sources, and 
 - [iOS implementation plan](IOS_IMPLEMENTATION_PLAN.md) — historical phased plan
 - [HarmonyOS parity closure](IOS_PHASE9_5_PARITY_NOTES.md) — Room/Marker sensor parity record
 - [Physical-device acceptance](IOS_PHASE9_DEVICE_ACCEPTANCE.md) — final Phase 9 evidence and limits
-
-Visual evidence is planned for a later Phase 10 step; this README intentionally contains no broken screenshot references.
