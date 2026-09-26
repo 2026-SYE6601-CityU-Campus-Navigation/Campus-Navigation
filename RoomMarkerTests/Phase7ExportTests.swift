@@ -466,6 +466,160 @@ struct Phase7ExportTests {
     }
 }
 
+@Suite("Phase 9 canonical export containment")
+struct Phase9CanonicalExportContainmentTests {
+    @Test("1. Canonical root accepts an existing canonical child")
+    func canonicalChildAccepted() throws {
+        try withTemporaryDirectory { root in
+            let child = root.appendingPathComponent("manifest.json")
+            try Data().write(to: child)
+            #expect(CanonicalPathContainment.isStrictDescendant(child, of: root))
+        }
+    }
+
+    @Test("2. Equivalent filesystem aliases accept a nonexistent child")
+    func filesystemAliasAccepted() throws {
+        try withTemporaryDirectory { parent in
+            let realParent = parent.appendingPathComponent("real")
+            let aliasParent = parent.appendingPathComponent("alias")
+            let root = realParent.appendingPathComponent("staging")
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            try FileManager.default.createSymbolicLink(
+                at: aliasParent,
+                withDestinationURL: realParent
+            )
+            let child = aliasParent
+                .appendingPathComponent("staging")
+                .appendingPathComponent("manifest.json")
+            #expect(!FileManager.default.fileExists(atPath: child.path))
+            #expect(CanonicalPathContainment.isStrictDescendant(child, of: root))
+        }
+    }
+
+    @Test("3. Nested manifest destination is accepted")
+    func manifestAccepted() throws {
+        try withTemporaryDirectory { root in
+            let child = CanonicalPathContainment.resolve(relativePath: "manifest.json", under: root)
+            #expect(child?.lastPathComponent == "manifest.json")
+        }
+    }
+
+    @Test("4. Nested Track JSON destination is accepted")
+    func trackJSONAccepted() throws {
+        try withTemporaryDirectory { root in
+            let child = CanonicalPathContainment.resolve(
+                relativePath: "tracks/track.json",
+                under: root
+            )
+            #expect(child?.path.hasSuffix("/tracks/track.json") == true)
+        }
+    }
+
+    @Test("5. Nested photo destination is accepted")
+    func photoAccepted() throws {
+        try withTemporaryDirectory { root in
+            let child = CanonicalPathContainment.resolve(
+                relativePath: "photos/track/photo.jpg",
+                under: root
+            )
+            #expect(child?.path.hasSuffix("/photos/track/photo.jpg") == true)
+        }
+    }
+
+    @Test("6. Sibling-prefix attack is rejected")
+    func siblingPrefixRejected() throws {
+        try withTemporaryDirectory { parent in
+            let root = parent.appendingPathComponent("staging")
+            let sibling = parent.appendingPathComponent("staging-evil/manifest.json")
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            #expect(!CanonicalPathContainment.isStrictDescendant(sibling, of: root))
+        }
+    }
+
+    @Test("7. Relative traversal is rejected")
+    func traversalRejected() throws {
+        try withTemporaryDirectory { root in
+            #expect(CanonicalPathContainment.resolve(
+                relativePath: "../outside.json",
+                under: root
+            ) == nil)
+        }
+    }
+
+    @Test("8. Absolute relative-path input is rejected")
+    func absolutePathRejected() throws {
+        try withTemporaryDirectory { root in
+            #expect(CanonicalPathContainment.resolve(
+                relativePath: "/tmp/outside.json",
+                under: root
+            ) == nil)
+        }
+    }
+
+    @Test("9. Symlink escape is rejected")
+    func symlinkEscapeRejected() throws {
+        try withTemporaryDirectory { parent in
+            let root = parent.appendingPathComponent("owned")
+            let outside = parent.appendingPathComponent("outside")
+            let link = root.appendingPathComponent("escape")
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+            try FileManager.default.createSymbolicLink(at: link, withDestinationURL: outside)
+            let escaped = link.appendingPathComponent("payload.json")
+            #expect(!CanonicalPathContainment.isStrictDescendant(escaped, of: root))
+        }
+    }
+
+    @Test("10. Nonexistent safe nested child is accepted")
+    func nonexistentSafeChildAccepted() throws {
+        try withTemporaryDirectory { root in
+            let child = root.appendingPathComponent("future/nested/manifest.json")
+            #expect(!FileManager.default.fileExists(atPath: child.path))
+            #expect(CanonicalPathContainment.isStrictDescendant(child, of: root))
+        }
+    }
+
+    @Test("11. Nonexistent outside child is rejected")
+    func nonexistentOutsideChildRejected() throws {
+        try withTemporaryDirectory { parent in
+            let root = parent.appendingPathComponent("owned")
+            let outside = parent.appendingPathComponent("outside/future.json")
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            #expect(!CanonicalPathContainment.isStrictDescendant(outside, of: root))
+        }
+    }
+
+    @Test("12. Cleanup removes owned stale data but preserves protected alias and outside data")
+    func cleanupScopePreserved() throws {
+        try withTemporaryDirectory { parent in
+            let owned = parent.appendingPathComponent("RoomMarkerExports")
+            let stale = owned.appendingPathComponent("stale")
+            let protected = owned.appendingPathComponent("protected")
+            let outside = parent.appendingPathComponent("outside.txt")
+            try FileManager.default.createDirectory(at: stale, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: protected, withIntermediateDirectories: true)
+            try Data("outside".utf8).write(to: outside)
+
+            try ExportTemporaryCleaner(ownedRoot: owned).removeStaleOwnedExports(
+                excluding: [protected]
+            )
+
+            #expect(!FileManager.default.fileExists(atPath: stale.path))
+            #expect(FileManager.default.fileExists(atPath: protected.path))
+            #expect(FileManager.default.fileExists(atPath: outside.path))
+        }
+    }
+
+    private func withTemporaryDirectory(_ body: (URL) throws -> Void) throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("RoomMarkerPhase9Path-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try body(root)
+    }
+
+}
+
 private struct ArchiveFixture {
     let staging: ExportStagingResult
     let archiveService: StoredZIPArchiveService

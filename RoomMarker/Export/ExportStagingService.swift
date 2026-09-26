@@ -113,30 +113,18 @@ struct ExportStagingService {
     }
 
     private func resolved(relativePath: String, in root: URL) throws -> URL {
-        guard isSafeRelativePath(relativePath) else {
+        guard let url = CanonicalPathContainment.resolve(
+            relativePath: relativePath,
+            under: root
+        ) else {
             throw ExportValidationError.unsafeStagingPath(relativePath)
         }
-        let url = root.appending(path: relativePath).standardizedFileURL
-        try validateChild(url, of: root)
         return url
     }
 
-    private func isSafeRelativePath(_ path: String) -> Bool {
-        guard !path.isEmpty,
-              !path.hasPrefix("/"),
-              !path.contains("\\") else {
-            return false
-        }
-        return path.split(separator: "/", omittingEmptySubsequences: false).allSatisfy {
-            !$0.isEmpty && $0 != "." && $0 != ".."
-        }
-    }
-
     private func validateChild(_ child: URL, of root: URL) throws {
-        let rootPath = root.standardizedFileURL.path
-        let childPath = child.standardizedFileURL.path
-        guard childPath.hasPrefix(rootPath + "/") else {
-            throw ExportValidationError.unsafeStagingPath(childPath)
+        guard CanonicalPathContainment.isStrictDescendant(child, of: root) else {
+            throw ExportValidationError.unsafeStagingPath(child.path)
         }
     }
 }

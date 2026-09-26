@@ -28,6 +28,10 @@
 	<string>RoomMarker 使用相机拍摄并保存轨迹现场照片。</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>RoomMarker 仅在您使用传感器功能时读取位置，用于显示和采集室内导航数据。</string>
+	<key>NSMotionUsageDescription</key>
+	<string>RoomMarker 使用设备运动与环境传感器读取磁场和气压，用于采集室内导航参考数据。</string>
+	<key>UILaunchScreen</key>
+	<dict/>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>location</string>

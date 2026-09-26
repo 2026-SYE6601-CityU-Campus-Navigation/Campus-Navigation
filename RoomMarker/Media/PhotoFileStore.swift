@@ -97,22 +97,15 @@ final class LocalPhotoFileStore: PhotoFileStoring {
             throw PhotoStorageError.unsafeRelativePath
         }
 
-        let candidate = rootURL.appendingPathComponent(relativePath).standardizedFileURL
-        let ownedRoot = photosURL.resolvingSymlinksInPath().standardizedFileURL
-        let comparisonURL: URL
-        if mustExist || fileManager.fileExists(atPath: candidate.path) {
-            comparisonURL = candidate.resolvingSymlinksInPath().standardizedFileURL
-        } else {
-            let resolvedParent = candidate.deletingLastPathComponent()
-                .resolvingSymlinksInPath()
-                .standardizedFileURL
-            comparisonURL = resolvedParent.appendingPathComponent(candidate.lastPathComponent)
-        }
-
-        let ownedPrefix = ownedRoot.path.hasSuffix("/") ? ownedRoot.path : ownedRoot.path + "/"
-        guard comparisonURL.path.hasPrefix(ownedPrefix) else {
+        let candidate = rootURL.appendingPathComponent(relativePath)
+        guard CanonicalPathContainment.isStrictDescendant(
+            candidate,
+            of: photosURL,
+            fileManager: fileManager
+        ) else {
             throw PhotoStorageError.unsafeRelativePath
         }
+        _ = mustExist
         return candidate
     }
 }

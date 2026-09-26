@@ -120,13 +120,14 @@ struct StoredZIPArchiveService: ZIPArchiveCreating {
     }
 
     private func relativePath(of source: URL, under root: URL) throws -> String {
-        let safeRoot = root.resolvingSymlinksInPath().standardizedFileURL
-        let safeSource = source.resolvingSymlinksInPath().standardizedFileURL
-        let prefix = safeRoot.path + "/"
-        guard safeSource.path.hasPrefix(prefix) else {
+        guard let path = CanonicalPathContainment.relativePath(
+            of: source,
+            under: root,
+            fileManager: fileManager
+        ) else {
             throw ZIPArchiveError.sourceOutsideStaging(source)
         }
-        return String(safeSource.path.dropFirst(prefix.count))
+        return path
     }
 
     private func collisionSafeURL(for filename: String) -> URL {
@@ -141,7 +142,11 @@ struct StoredZIPArchiveService: ZIPArchiveCreating {
     }
 
     private func validateChild(_ child: URL, of root: URL) throws {
-        guard child.path.hasPrefix(root.path + "/") else {
+        guard CanonicalPathContainment.isStrictDescendant(
+            child,
+            of: root,
+            fileManager: fileManager
+        ) else {
             throw ZIPArchiveError.unsafeEntryPath(child.path)
         }
     }
@@ -149,14 +154,7 @@ struct StoredZIPArchiveService: ZIPArchiveCreating {
 
 enum ArchivePathValidator {
     static func isSafe(_ path: String) -> Bool {
-        guard !path.isEmpty,
-              !path.hasPrefix("/"),
-              !path.contains("\\") else {
-            return false
-        }
-        return path.split(separator: "/", omittingEmptySubsequences: false).allSatisfy {
-            !$0.isEmpty && $0 != "." && $0 != ".."
-        }
+        CanonicalPathContainment.isSafeRelativePath(path)
     }
 }
 
