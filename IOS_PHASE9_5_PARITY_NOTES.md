@@ -1,5 +1,7 @@
 # RoomMarker iOS Phase 9.5 HarmonyOS Parity Notes
 
+> **Status update — parity-closure record.** This document records the Phase 9.5 Room/Marker sensor parity work. The physical-iPhone checks described as pending below were subsequently completed in Phase 9; see [IOS_PHASE9_DEVICE_ACCEPTANCE.md](IOS_PHASE9_DEVICE_ACCEPTANCE.md).
+
 ## Scope and boundary
 
 Phase 9.5 closes one narrowly defined parity gap: Room reference sensor snapshots and sensor-backed Marker creation. It reuses the Phase 3 sensor stack and does not begin Phase 10, change Track recording, add schema fields, or alter export formats.
@@ -117,4 +119,3 @@ No physical-device success claim is made in Phase 9.5.
 - Any schema migration or export-format change is deferred.
 - Wi-Fi scanning or synthetic Wi-Fi data is unsupported and will not be implemented.
 - Phase 10 work is not started.
-

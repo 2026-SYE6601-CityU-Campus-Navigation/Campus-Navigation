@@ -1,306 +1,299 @@
 # RoomMarker iOS Architecture
 
+## Status
+
+This document describes the as-built iOS application accepted at the end of Phase 9. It replaces the earlier proposed structure while preserving the design reasoning that shaped the implementation.
+
+The implementation uses native Apple frameworks, has one application target and one unit-test target, and has no third-party runtime dependency. The deployment target is iOS 17 or later.
+
 ## Architectural goals
 
-The iOS implementation should reproduce RoomMarker's data-collection workflow while respecting Apple's APIs and execution model. It should remain small enough for a student team, use native frameworks, keep platform services behind testable interfaces, and treat the export contract as separate from the local database schema.
+- Preserve the meaning of the HarmonyOS RoomMarker workflow without translating ArkTS line by line.
+- Keep missing or denied sensor data optional; never manufacture zeros or Wi-Fi observations.
+- Give one owner to each Apple framework manager and share readings through a testable sensor hub.
+- Separate SwiftData persistence models from versioned export DTOs.
+- Keep camera files under application ownership and coordinate metadata/file cleanup.
+- Export from an immutable snapshot so sharing cannot mutate live source data.
+- Validate every filesystem boundary used by photos, staging, archives, and cleanup.
+- Model recording and background ownership explicitly enough to recover an incomplete Track honestly.
 
-Recommended deployment target: **iOS 17 or later**. This permits SwiftUI plus SwiftData without a compatibility persistence layer. If the team later needs iOS 16 support, make that decision before creating models because it implies replacing SwiftData with Core Data or SQLite; do not maintain two stores.
+## Native technology stack
 
-## Native Apple technology stack
+| Concern | As-built implementation |
+| --- | --- |
+| Language and UI | Swift 6, SwiftUI, `NavigationStack`, Observation |
+| Persistence | SwiftData with explicit relationships and delete rules |
+| Location and heading | Core Location through one `CoreLocationSensorService` |
+| Magnetic field | Core Motion through `CoreMotionMagnetometerService` |
+| Pressure | `CMAltimeter` through `CoreMotionPressureService`, converted to hPa |
+| Background activity | Foreground-started Core Location updates and `CLBackgroundActivitySession` |
+| Camera | Minimal UIKit camera bridge behind `CameraServicing` |
+| Durable photos | Foundation file storage under Application Support |
+| JSON | Dedicated `Codable` v2 DTOs and configured Foundation encoding |
+| ZIP | In-project streaming STORED ZIP32 writer with CRC32 |
+| Sharing | UIKit Share Sheet presented from SwiftUI |
+| Tests | Deterministic app, persistence, sensor, recording, media, export, and parity tests |
 
-| Concern | Recommendation |
-|---|---|
-| Language and UI | Swift, SwiftUI, NavigationStack, Observation (`@Observable`) |
-| Persistence | SwiftData with explicit relationships/delete rules and a repository boundary |
-| Concurrency | Swift structured concurrency; `@MainActor` UI state; actor-isolated recording/export coordination |
-| Location and compass | Core Location (`CLLocationManager`) |
-| Motion and magnetic field | Core Motion (`CMMotionManager`, device motion, raw magnetometer) |
-| Pressure | Core Motion `CMAltimeter` with kPa-to-hPa conversion |
-| New photo capture | AVFoundation or a minimal UIKit system-camera bridge; store returned image data in the app sandbox |
-| Existing-photo selection, optional | PhotosUI `PhotosPicker`, without broad photo-library permission |
-| Files | Foundation `FileManager`; Application Support for durable app data, temporary directory for exports |
-| JSON | Dedicated `Codable` export DTOs and `JSONEncoder` with explicit millisecond integers |
-| ZIP | Small isolated ZIP `STORED`/CRC32 writer, reused conceptually from HarmonyOS but implemented and tested in Swift |
-| Save/share | SwiftUI `fileExporter` and a system share-sheet wrapper/Transferable as appropriate |
-| Logging | `Logger` from OSLog with privacy annotations; never log location/photo contents by default |
-| Tests | XCTest/Swift Testing as supported by the chosen Xcode; golden JSON fixtures and real-device checklists |
+## Composition root and dependency direction
 
-No third-party dependency is recommended for the MVP. Reconsider only after a measured gap, such as the ZIP writer failing compatibility or SwiftData proving unsuitable in a prototype.
+`RoomMarkerApp` is the composition root. At launch it:
 
-## Layers and dependency direction
+1. creates the SwiftData `ModelContainer`;
+2. creates one Core Location service and one shared `SensorHub`;
+3. creates the background-location session around the same location service;
+4. creates the SwiftData recording/media store;
+5. creates application-owned photo storage;
+6. removes stale owned export temporary files on a best-effort basis;
+7. injects the shared services into the root `AreaListView`.
+
+The main dependency direction is:
 
 ```text
-SwiftUI Features / Navigation
-          |
-Application coordinators and view models
-          |
-Domain models + repository/service protocols + export contract
-          |
-SwiftData repositories | Apple sensor adapters | media/files | exporter
+SwiftUI Views
+    -> workflow/data-store/coordinator APIs
+        -> SwiftData repositories
+        -> SensorHub and native sensor adapters
+        -> camera and photo-file storage
+        -> immutable export snapshot/staging/archive services
 ```
 
-Dependencies point inward. Views do not call Core Location, Core Motion, SwiftData, or FileManager directly. Export code reads immutable domain/export snapshots rather than holding live SwiftData objects while creating an archive.
+Views observe SwiftData and coordinator state, but hardware and file operations remain behind protocols or focused services. Export DTOs do not import or encode SwiftData models directly.
 
-### Presentation layer
-
-- SwiftUI screens and small feature-scoped view models.
-- A root `NavigationStack` with typed routes for area, room, track list, track detail, and live sensors.
-- One global recording banner driven by `RecordingCoordinator` state.
-- Capability/permission UI that distinguishes unavailable, not requested, denied, restricted, reduced, stale, and available.
-
-### Application layer
-
-- `RecordingCoordinator`: track state machine and orchestration.
-- `SnapshotService`: bounded best-effort one-shot capture for room baselines and markers.
-- `LiveSensorViewModel`: subscribes only while the live screen is visible.
-- `PhotoCaptureCoordinator`: permission, capture, durable copy, metadata association, and cleanup.
-- `ExportCoordinator`: creates immutable export snapshots, JSON, archive, and share/save result.
-
-### Domain layer
-
-- Plain value types/enums for sensor samples, capability states, and stable raw marker/tag values.
-- Protocols for repositories, clocks, sensors, photo storage, and archive writing.
-- Versioned `Codable` export DTOs independent of SwiftData annotations.
-
-### Infrastructure layer
-
-- SwiftData model/repository implementation.
-- Core Location/Core Motion adapters.
-- Application Support and temporary-file stores.
-- JSON and ZIP implementations.
-
-## Recommended project structure
-
-The Phase 1 Xcode project should use a single app target and one unit-test target. Add UI tests only for a few stable critical flows.
+## As-built project structure
 
 ```text
-RoomMarkerIOS/
+RoomMarker/
 ├── App/
-│   ├── RoomMarkerApp.swift
-│   ├── AppEnvironment.swift
-│   └── AppRoute.swift
-├── Domain/
-│   ├── Models/
-│   │   ├── Area.swift
-│   │   ├── Room.swift
-│   │   ├── Marker.swift
-│   │   ├── Track.swift
-│   │   ├── TrackPoint.swift
-│   │   ├── TrackTag.swift
-│   │   └── TrackPhoto.swift
-│   ├── MarkerType.swift
-│   ├── TrackTagType.swift
-│   ├── SensorSample.swift
-│   └── Protocols/
+│   └── RoomMarkerApp.swift
+├── Models/
+│   ├── Area.swift
+│   ├── Room.swift
+│   ├── Marker.swift
+│   ├── Track.swift
+│   ├── TrackPoint.swift
+│   ├── TrackTag.swift
+│   ├── TrackPhoto.swift
+│   └── stable marker/tag/Wi-Fi capability enums
 ├── Persistence/
 │   ├── RoomMarkerSchema.swift
+│   ├── RoomMarkerRepository.swift
 │   ├── SwiftDataRepository.swift
-│   └── PersistenceError.swift
+│   └── Phase2DataStore.swift
 ├── Sensors/
-│   ├── LocationService.swift
-│   ├── MotionService.swift
-│   ├── AltimeterService.swift
+│   ├── SensorTypes.swift
+│   ├── SensorServiceProtocols.swift
+│   ├── LocationSensorService.swift
+│   ├── MagnetometerSensorService.swift
+│   ├── PressureSensorService.swift
 │   ├── SensorHub.swift
-│   ├── SnapshotService.swift
-│   └── SensorCapability.swift
+│   ├── SensorSnapshotService.swift
+│   └── RoomMarkerSnapshotWorkflow.swift
 ├── Recording/
+│   ├── RecordingTypes.swift
 │   ├── RecordingCoordinator.swift
-│   ├── RecordingState.swift
-│   └── SampleAssembler.swift
+│   ├── RecordingTicker.swift
+│   ├── RecordingPersistence.swift
+│   ├── RecordingLifecycle.swift
+│   ├── BackgroundLocationSession.swift
+│   ├── SampleAssembler.swift
+│   └── TrackMediaSupport.swift
 ├── Media/
 │   ├── CameraCaptureView.swift
-│   ├── PhotoCaptureCoordinator.swift
+│   ├── CameraService.swift
 │   └── PhotoFileStore.swift
+├── DTOs/
+│   └── ExportDTOs.swift
 ├── Export/
-│   ├── ExportDTOs.swift
-│   ├── RoomMarkerExporter.swift
-│   ├── ZipArchiveWriter.swift
-│   └── ExportDocument.swift
-├── Features/
-│   ├── Areas/
-│   ├── Rooms/
-│   ├── Tracks/
-│   ├── LiveSensors/
-│   └── Shared/
-└── Resources/
+│   ├── AreaExportCoordinator.swift
+│   ├── AreaExportSnapshotBuilder.swift
+│   ├── ExportSnapshots.swift
+│   ├── ExportDTOMapper.swift
+│   ├── ExportJSONEncoder.swift
+│   ├── ExportStagingService.swift
+│   ├── StoredZIPArchive.swift
+│   └── ExportTemporaryCleanup.swift
+├── Views/
+│   └── Area, Room, Marker, sensor, recording, Track, media, and export views
+└── Info.plist
 
-RoomMarkerIOSTests/
+RoomMarkerTests/
 ├── Fixtures/
-│   ├── harmony_track_v1.json
-│   ├── harmony_manifest_v1.json
-│   └── ios_track_v2.json
-├── PersistenceTests.swift
-├── ExportCompatibilityTests.swift
-├── RecordingStateTests.swift
-└── ZipArchiveTests.swift
+│   ├── HarmonyOS v1 compatibility fixtures
+│   └── iOS v2 export fixtures
+└── persistence, sensor, recording, media, export, background, and parity suites
 ```
 
-Names can be adjusted to Xcode conventions, but boundaries should remain. Avoid a large generic `Utilities` directory.
+The folders reflect runtime responsibilities rather than an abstract framework hierarchy. Small workflow objects remain close to the models or infrastructure they coordinate.
 
-## HarmonyOS-to-iOS module mapping
+## Domain and persistence
 
-| HarmonyOS source | Responsibility understood | Proposed iOS equivalent |
-|---|---|---|
-| `README.md` | Product behaviour, environment, limitations | Root README section plus these iOS planning docs; later iOS run/demo guide |
-| `data/Entities.ets` | Seven entities and two stable type enums | `Domain/Models/*`, `MarkerType.swift`, `TrackTagType.swift`, plus separate export DTOs |
-| `data/Store.ets` | Schema/migration, CRUD, cascades, subscriptions, photo cleanup | SwiftData schema and `SwiftDataRepository`; SwiftUI observation replaces manual listeners; file cleanup remains explicit and transactional in application services |
-| `sensors/SensorSnapshotter.ets` | Timed one-shot location/pressure/magnetic snapshot | `SnapshotService` aggregating current values from `SensorHub` with freshness thresholds and timeout |
-| `sensors/LiveStream.ets` | Live location and many sensors, polling, Wi-Fi list | `SensorHub` with AsyncStreams and `LiveSensorViewModel`; only public iOS sensor APIs; no Wi-Fi card/list |
-| `sensors/TrackRecorder.ets` | Singleton, 1 Hz logical samples, five-point flush, current snapshot, background location | Actor-isolated `RecordingCoordinator`, `SampleAssembler`, repository batch saves, lifecycle recovery, Core Location background mode |
-| `sensors/TrackMedia.ets` | System photo capture and durable sandbox copy | `PhotoCaptureCoordinator`, camera UI bridge, `PhotoFileStore` |
-| `common/Exporter.ets` | DTO mapping, manifest, track JSON, photo collection, save picker | `RoomMarkerExporter`, versioned `ExportDTOs`, `ExportDocument`, share/save presentation |
-| `common/ZipWriter.ets` | ZIP STORED entries with CRC32 | Isolated Swift `ZipArchiveWriter` with conformance tests; do not translate ArkTS mechanically |
-| `common/Utils.ets` | Formatting, filename safety, heading math/context | `Formatters`, `SafeFilename`, Apple fused heading; no global application context singleton |
-| `pages/Index.ets` | Area list, unassigned entry, root navigation | `AreaListView` and typed `NavigationStack` routes |
-| `pages/AreaDetail.ets` | Area rooms/tracks, start/export/delete | `AreaDetailView` and feature view model |
-| `pages/RoomDetail.ets` | Baseline and marker capture/delete | `RoomDetailView`, `MarkerEditor`, `SnapshotService` |
-| `pages/TrackList.ets` | All tracks and area-required start dialog | `TrackListView`, `StartRecordingSheet` |
-| `pages/TrackDetail.ets` | Stats, path canvas, samples, tags/photos | `TrackDetailView`, SwiftUI Canvas/path preview, photo preview |
-| `pages/RecordingBanner.ets` | Global active-session controls | Root overlay bound to `RecordingCoordinator`; no heartbeat reconstruction workaround |
-| `pages/CaptureDialogs.ets` | Tag and photo-note dialogs | SwiftUI sheets/confirmation flows |
-| `pages/LiveSensors.ets` | Live cards and device sensor list | iOS-supported `LiveSensorsView`; no generic sensor inventory or nearby Wi-Fi list |
-| `module.json5` | Phone target, location/motion/Wi-Fi/background permissions | Xcode capabilities and Info.plist usage descriptions; omit Wi-Fi entitlements |
+The seven shared product entities remain recognisable across platforms:
 
-## Persistence design
+- `Area`
+- `Room`
+- `Marker`
+- `Track`
+- `TrackPoint`
+- `TrackTag`
+- `TrackPhoto`
 
-### SwiftData entities and relationships
+SwiftData uses UUID identity and `Int64` Unix-millisecond timestamps. Sensor fields are optional `Double` values. Stable Marker and Track-tag labels retain the established Chinese raw values used by the HarmonyOS export contract.
 
-- `Area` has optional-to-many rooms and tracks with cascade only when the user chooses permanent deletion.
-- A room/track may have a null area to represent unassigned data. Moving an area to unassigned must clear relationships before deleting the area.
-- `Room` owns markers with cascade deletion.
-- `Track` owns points, tags, and photo metadata with cascade deletion.
-- Photo bytes live under Application Support. Deleting metadata and files is a coordinated operation; failed file deletion is logged and retried/cleaned later rather than rolling the database into an invalid state.
-- Store UUID identity. Derived counts come from relationships/fetches. Store `startedAtMs`, `endedAtMs`, `timeMs`, and `createdAtMs` as `Int64` so export does not depend on floating-point `Date` conversion.
-- Store raw enum labels as strings to preserve unknown future values; expose safe enum wrappers in the domain/UI.
-- Make sensor fields optional `Double`. Wi-Fi fingerprint fields should not exist in the iOS persistence model unless a future supported data source is approved.
+Relationships implement the required ownership rules:
 
-### Repository boundary
+- an Area relates to Rooms and Tracks;
+- a null Area relation is presented as synthetic `未分区`, not stored as a real Area;
+- deleting an Area through the current iOS UI clears its child relations and preserves the Rooms and Tracks;
+- a Room owns Markers through cascade deletion;
+- a Track owns TrackPoints, TrackTags, and TrackPhoto metadata through cascade deletion;
+- photo bytes are outside SwiftData, so Track and photo deletion coordinate database changes with `PhotoFileStore` cleanup.
 
-Views receive domain snapshots and invoke repository operations. The repository provides scoped queries and atomic operations such as:
+`Phase2DataStore` contains Area/Room/Marker validation and mutations. `SwiftDataRecordingStore` implements recording and media persistence. Repository protocols and in-memory containers let tests exercise semantics without a physical device.
 
-- create/delete/move area;
-- create/delete room, capture baseline, create/delete marker;
-- create/append/finalise/recover/delete track;
-- create/delete tag and photo association;
-- materialise an immutable export snapshot.
+Counts such as `Track.pointCount` are derived from persisted relationships rather than trusted as a separate mutable counter.
 
-For 1 Hz points, persist batches of about five in one repository transaction. On stop, synchronously await the final buffer flush before setting the track's end time and final count. On launch, detect a track with no `endedAtMs` and present a recovered/interrupted state rather than claiming it completed normally.
+## Sensor services
 
-Use a versioned SwiftData schema and explicit migration plan from the first release, even if the first migration is empty. Add an in-memory container for tests.
+`SensorHub` is the shared observable sensor boundary. It owns no framework manager itself; instead, it combines three focused adapters:
 
-## Sensor architecture
+- `CoreLocationSensorService` owns `CLLocationManager`, When In Use authorization, location, heading, and background-update configuration.
+- `CoreMotionMagnetometerService` owns the magnetometer stream.
+- `CoreMotionPressureService` owns `CMAltimeter` and reports pressure in hPa.
 
-### Services
+Consumers are reference-counted by identity (`live`, `snapshot`, or `recording`). The first consumer starts the native services and the final consumer stops them. This prevents a Live Sensors screen, bounded snapshot, and active recording from creating competing framework managers.
 
-- `LocationService` owns one `CLLocationManager`, permission state, accuracy state, location updates, and device headings. It publishes timestamped readings and staleness.
-- `MotionService` owns the app's single `CMMotionManager`. It publishes raw magnetometer values and processed device motion/heading when available. Start only the streams required by an active consumer.
-- `AltimeterService` owns `CMAltimeter`, reports capability, converts pressure from kPa to hPa, and keeps relative altitude separate from Core Location altitude.
-- `SensorHub` combines the latest readings without rewriting their source timestamps. It reference-counts live view, snapshot, and recorder consumers so sensors stop when unused.
-- All services expose protocol-based streams so tests can inject deterministic readings and time.
+`LiveSensorState` represents each source as waiting, available, stale, denied, restricted, unavailable, or unsupported as appropriate. UI and recording code consume those states without changing an unavailable value into zero.
 
-### Snapshot semantics
+Nearby Wi-Fi scanning is not part of the iOS sensor layer. A normal iOS application cannot reproduce the HarmonyOS general nearby BSSID/RSSI scan, so the export capability is explicitly unsupported.
 
-`SnapshotService.capture(timeout:)` should begin required streams if needed, request a current location, wait up to the configured timeout, and return all fresh readings available. It should never require GPS success before returning pressure or magnetic data. Each reading should have a freshness threshold; do not attach an arbitrarily old recorder value to a new marker, tag, or photo.
+## Bounded snapshots and Room/Marker workflows
 
-### Units and frames
+`SensorSnapshotService` acquires the shared hub as a snapshot consumer, waits for individual sources to settle, and returns after at most four seconds. Its result contains optional readings plus a per-source outcome. Success can therefore be partial or fully unavailable without being dishonest.
 
-- Latitude/longitude: WGS-84 decimal degrees.
-- Location altitude/accuracy: metres.
-- Pressure: convert `CMAltitudeData.pressure` from kPa to hPa.
-- Magnetic components: µT, with the Apple device coordinate frame documented in code/tests.
-- Heading: `[0, 360)`, preferably magnetic north for parity with magnetic-field fusion. Store the heading source and accuracy internally if useful, but export the established `headingDeg` value only when valid.
-- Update heading orientation when device interface orientation changes. A portrait-only MVP is acceptable if declared and enforced; otherwise test all supported orientations.
+`RoomMarkerSnapshotWorkflow` maps one captured snapshot into persistence:
 
-No fake “latest” value should be generated for absent hardware or denied access.
+- Room reference capture stores latitude, longitude, altitude, and pressure.
+- A new Room snapshot fully replaces the previous values; absent new fields clear stale old values rather than blending captures.
+- Marker creation stores latitude, longitude, altitude, horizontal accuracy, pressure, and magnetic X/Y/Z.
+- Marker metadata editing changes only name and type and preserves the original sensor snapshot.
 
-## Track recording architecture
+The same sensor service also supports the standalone Sensor Snapshot screen. Task cancellation and `defer`-based lease release prevent an abandoned capture from keeping the native streams active.
 
-`RecordingCoordinator` is a single actor-backed state machine:
+## Track recording
+
+`RecordingCoordinator` is a single `@MainActor` observable state machine. Its important states are idle, preparing, recording, stopping, and failed. Only one Track can be active.
+
+Start performs these operations in order:
+
+1. validate a non-empty name and real Area;
+2. persist a Track with no end time;
+3. acquire the recording sensor consumer;
+4. acquire foreground-started background-location ownership;
+5. start the nominal one-second ticker.
+
+`SampleAssembler` takes the current optional sensor state and stamps the actual tick time. The coordinator rejects non-increasing tick times, buffers five points, and flushes them through the recording store. It also flushes the current tail before expected background suspension and again before finalisation.
+
+Stop waits for the ticker, persists the final tail, writes the real end time, releases background ownership, stops its sensor lease, and returns to idle. No point is interpolated after a scheduling gap and no synthetic catch-up sequence is generated.
+
+Elapsed UI time is derived from the Track start and current clock. The active recording banner is inserted at the root safe area so it remains available across navigation, tag entry, and camera presentation.
+
+## Background lifecycle and incomplete Tracks
+
+The app declares only the `location` background mode and asks for When In Use location authorization. `CoreLocationBackgroundSession` enables background location updates and owns a `CLBackgroundActivitySession` only for a user-started active recording.
+
+iOS determines real execution opportunities. The architecture does not treat a timer, pressure stream, or motion stream as an independent background guarantee and does not promise exact one-second delivery while backgrounded.
+
+If permission is denied or restricted, background status becomes unavailable and ownership is released. Foreground data entry and independent supported sensors continue to degrade gracefully.
+
+Force quitting terminates the in-memory coordinator. On the next launch, `IncompleteTrackRecovery` finds persisted Tracks with no end time that are not the current active Track. The Track list places them under `需要处理`; the user may inspect, manually finalise, or delete them. The app does not invent an end time or silently resume recording.
+
+## Tags, camera, and photo storage
+
+Tags and photos are accepted only for the active Track. Each action receives its own real timestamp and the currently available location, altitude, and heading metadata.
+
+Camera capture is user initiated through a UIKit bridge. Successful JPEG data is validated and written atomically under:
 
 ```text
-idle -> preparing -> recording -> stopping -> completed -> idle
-                       |             |
-                       +-> interrupted/error
+Application Support/RoomMarker/photos/{track-uuid}/{timestamp}-{uuid}.jpg
 ```
 
-Start validates a real area, creates the track record, starts required sensors/location in the foreground, and enables background location only for the active session. A monotonic clock triggers nominal 1 Hz logical samples while the process is scheduled. `SampleAssembler` snapshots the latest fresh readings and stamps actual wall-clock milliseconds. It must not duplicate or interpolate samples after a scheduling gap.
+Only the relative `photos/...` path is stored in SwiftData or exported. RoomMarker does not request Photos Library permission and does not automatically write to the system photo library.
 
-Five points are buffered and committed in one transaction. Flush on app backgrounding when time permits, stop, errors, and lifecycle transitions. The UI derives elapsed time from start/current clocks instead of depending on a one-second published counter.
+Photo metadata is created only after durable storage succeeds. If metadata persistence then fails, the newly written file is removed. Individual photo deletion removes metadata and the owned file; Track deletion additionally removes its owned photo directory.
 
-The coordinator retains the latest valid snapshot for tags/photos, including per-field age. Track tags and photos use the action timestamp, not the timestamp of the last location event.
+Track Detail loads owned data through `PhotoContentLoader`, distinguishes available/missing/corrupt content, and presents thumbnails and a larger orientation-correct preview.
 
-Prevent concurrent recordings. If the app relaunches with an unfinished track, mark it interrupted at the last persisted point time (or launch time with an explicit recovery flag) and let the user inspect it. Do not silently resume a session after process termination in the MVP.
+## Immutable export pipeline
 
-## Tags and photos
+Export is coordinated by `AreaExportCoordinator`, which exposes preparing, staging, archiving, ready-to-share, and failed states.
 
-Tags preserve the six HarmonyOS raw values and optional notes. Capture snapshot metadata when the user confirms the tag.
+The pipeline is:
 
-For photos:
+1. `AreaExportSnapshotBuilder` sorts and validates the requested Area, Tracks, points, tags, photos, and JPEG data.
+2. Immutable `AreaExportSnapshot` and `TrackExportSnapshot` values detach export work from live SwiftData models.
+3. `ExportDTOMapper` produces the v2 manifest and per-Track DTOs.
+4. `ExportJSONEncoder` creates deterministic JSON with Unix-millisecond timestamps and omitted unavailable readings.
+5. `ExportStagingService` writes `manifest.json`, `tracks/*.json`, and relative `photos/.../*.jpg` files into one owned session directory.
+6. `StoredZIPArchiveService` enumerates only that session's validated descendants.
+7. `StoredZIPWriter` streams files into one STORED ZIP32 archive with CRC32 records.
+8. `ExportSharePayload` exposes exactly the completed ZIP to the native Share Sheet.
+9. Staging and archive files are removed after completion, cancellation, view departure, or the next launch's stale-export cleanup.
 
-1. Check/request camera authorization only after the user chooses Take Photo.
-2. Present the native capture UI and receive encoded image data.
-3. Write first to a temporary file, then atomically move to `Application Support/RoomMarker/photos/{track-token}/{timeMs}.jpg`.
-4. Persist `TrackPhoto` only after the durable move succeeds.
-5. If the user discards or metadata persistence fails, delete the orphaned file.
-6. On deletion, remove metadata and enqueue best-effort file cleanup.
+The manifest declares `version: 2`, `sourcePlatform: ios`, and platform capabilities. The Wi-Fi capability remains `nearbyWifiFingerprint: unsupported`; iOS Track JSON contains no BSSID/RSSI, `wifiCount`, or `wifiTop` observations.
 
-Capture and store orientation-correct image data. Bound export memory by streaming files into the archive rather than reading every photo at once. The HarmonyOS implementation reads complete photos and the whole ZIP into memory; iOS should avoid carrying that limitation forward.
+Snapshot construction currently retains validated JPEG bytes in memory before staging. The archive writer then streams staged files, but unusually large datasets remain a documented scale boundary.
 
-## JSON and export architecture
+## Filesystem security boundary
 
-`ExportDTOs.swift` defines HarmonyOS v1 fixture types and the iOS v2 output described in `IOS_PROJECT_BRIEF.md`. It must not encode SwiftData objects directly.
+`CanonicalPathContainment` provides one containment policy shared by photo storage, export staging, ZIP source validation, and temporary cleanup.
 
-Export pipeline:
+It:
 
-1. Repository creates an immutable, chronologically sorted area snapshot.
-2. Validate counts, timestamps, finite numbers, stable raw labels, and relative photo paths.
-3. Encode each track using a configured `JSONEncoder`; timestamps are already `Int64` milliseconds and nil optional readings are omitted.
-4. Verify each photo exists. Add it under the referenced relative path or set `fileMissing: true`.
-5. Encode the manifest with platform/capability metadata.
-6. Write entries incrementally to a temporary ZIP using UTF-8 names, `STORED` records, CRC32, and duplicate/path-traversal checks.
-7. Validate the completed archive, then return an export document/URL to the save or share UI.
-8. Remove temporary output after completion or cancellation.
+- rejects empty, absolute, backslash, dot, and `..` relative paths;
+- canonicalises the nearest existing ancestor and resolves its symbolic links;
+- appends validated components for destinations that do not yet exist;
+- compares complete path components rather than string prefixes;
+- accepts equivalent filesystem aliases such as `/var` and `/private/var` after canonicalisation;
+- requires a strict descendant, so the root itself and sibling-prefix paths are rejected;
+- rejects a symbolic-link escape from an owned root.
 
-Use `/` as the ZIP path separator. Reject absolute paths and `..`. Sanitize visible filenames, add a stable collision suffix where needed, and keep manifest references authoritative.
+This boundary fixed a physical-device false rejection without disabling path validation. Archive paths are independently checked before writing and always use `/` separators.
 
-Compatibility tests should decode checked-in HarmonyOS v1 fixtures, encode/decode iOS v2, inspect archive entries, compare units/key spelling, and verify missing Wi-Fi fields plus explicit unsupported capability metadata.
+Temporary cleanup enumerates only children of the RoomMarker-owned export root. It never treats a shared system temporary directory as owned.
 
-## Background execution
+## Error and degradation principles
 
-Enable Background Modes > Location updates only if Phase 4 includes the background acceptance test. A recording must start in the foreground. Set background delivery only during an active session and stop it immediately when recording ends.
+- User-facing errors are actionable and avoid revealing private container paths.
+- Cancellation is distinct from failure for camera and export workflows.
+- Partial snapshots are valid results; unavailable values remain nil.
+- Persistence failure does not intentionally leave a partially created Marker, tag, or photo association.
+- The final recording tail is persisted before a Track is marked complete.
+- Destructive actions require explicit confirmation and avoid deleting an active Track.
+- Permission denial offers recovery through Settings without a prompt loop.
+- Export failure removes owned temporary output and leaves SwiftData and source photos unchanged.
+- No normal diagnostic persists coordinates, BSSIDs, Apple account data, signing data, or photo contents.
 
-When In Use location authorization can support a foreground-started active background location session; do not request Always merely because the option exists. The UI should explain the visible system location indicator and battery impact. If the team later needs the system to relaunch the app for location events, that is a separate scope and privacy review.
+## HarmonyOS compatibility boundary
 
-iOS may suspend or terminate the app, and indoor location events may be sparse. Timers, barometer, and motion delivery alone are not a durable background-execution guarantee. Therefore:
+The local databases are platform-specific. Compatibility occurs through versioned exports and stable domain meaning, not by sharing a SQLite or SwiftData store.
 
-- persist frequently and flush on lifecycle transitions;
-- tolerate timestamp gaps;
-- never promise exact 1 Hz background sampling;
-- record/derive an interrupted status;
-- test screen lock, app switching, reduced accuracy, low-power mode, and no-GPS indoor conditions on real hardware;
-- present foreground-only recording as a clear degraded mode if background prerequisites are not met.
+Checked-in HarmonyOS v1 fixtures verify legacy field names and optionality. iOS v2 adds platform and capability metadata so downstream readers can distinguish absent iOS Wi-Fi observations from a real empty HarmonyOS scan.
 
-## Error-handling principles
+The implementations deliberately differ where native platform behavior differs: SwiftData replaces HarmonyOS relational storage, SwiftUI observation replaces manual store listeners, Core Location owns iOS background behavior, and the Share Sheet replaces the HarmonyOS document-save flow.
 
-- Use typed domain errors with an actionable user message and a more detailed private log message.
-- Treat cancellation separately from failure for camera and export flows.
-- Never use empty catches for data writes, final flushes, archive creation, or file moves.
-- Treat partial sensor snapshots as successful degraded results; preserve which fields are absent.
-- Validate finite numeric values before persistence/export.
-- Make destructive actions explicit and idempotent. Reconcile orphaned photo files at launch or in a maintenance action.
-- Keep the last good persisted track readable if sampling later fails.
-- Surface permission recovery with a Settings link only after denial; do not repeatedly prompt.
-- Avoid logging coordinates, BSSIDs, notes, or photo paths at public log privacy levels.
-- Export to a new temporary URL and use atomic replacement; never overwrite the only durable photo/data copy.
+## Testability and accepted evidence
 
-## Architectural decision checkpoints
+Hardware, clocks, tickers, persistence, background ownership, camera outcomes, photo storage, ZIP creation, and export session identifiers have protocol or closure seams for deterministic tests.
 
-Before application implementation grows beyond Phase 1, validate these spikes/tests:
+The accepted Phase 9 baseline is 203 tests across 11 suites with no failures or skips. It includes persistence cascades, partial sensors, lease ownership, ordering and tail flush, background lifecycle, camera/media cleanup, v1/v2 compatibility, immutable snapshots, ZIP structure, canonical path containment, and incomplete-Track behavior.
 
-1. SwiftData relationship/delete and interrupted-track behaviour in an in-memory and disk store.
-2. HarmonyOS v1 fixture decoding and agreed iOS v2 Wi-Fi capability semantics.
-3. Pressure units and raw magnetic/heading frames on a physical iPhone.
-4. Ten-minute foreground recording and short lock/background recording with actual timestamps.
-5. ZIP output opened by macOS Archive Utility, command-line unzip, and the intended downstream parser.
+Physical acceptance on an iPhone 15 Pro / iOS 26.7 validated the sensor, camera, foreground, Home-background, lock-screen, Share Sheet, saved archive, cleanup, denied-location, and force-quit boundaries. See [IOS_PHASE9_DEVICE_ACCEPTANCE.md](IOS_PHASE9_DEVICE_ACCEPTANCE.md) for the bounded evidence and remaining risks.
 
-Failures at these checkpoints should change the design early rather than add workarounds in views.
+## Known architectural boundaries
+
+- Background execution remains controlled by iOS and is not guaranteed at exact one-second intervals.
+- The application does not request Always location authorization or system relaunch after termination.
+- General nearby Wi-Fi fingerprint scanning is intentionally unsupported on iOS.
+- The archive writer is STORED ZIP32 rather than a compression or ZIP64 implementation.
+- Export snapshot photo data has not been scale-tested for unusually large field collections.
+- The accepted physical matrix contains one iPhone and OS version; it is not a production device lab.

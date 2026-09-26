@@ -1,5 +1,7 @@
 # RoomMarker iOS Project Brief
 
+> **Historical status — Phase 0 record.** This brief captured the product and migration decisions before implementation. The iOS MVP has since been completed and physically validated; see [IOS_PHASE9_DEVICE_ACCEPTANCE.md](IOS_PHASE9_DEVICE_ACCEPTANCE.md) for the accepted result.
+
 ## Status and purpose
 
 This document is the Phase 0 brief for a native iOS version of RoomMarker, the campus indoor-navigation data collection application already implemented for HarmonyOS. Phase 0 produces architecture and migration documentation only. It does not create an Xcode project or application code.
