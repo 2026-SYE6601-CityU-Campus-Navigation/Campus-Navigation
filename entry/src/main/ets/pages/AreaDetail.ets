@@ -4,10 +4,15 @@ import { Store, UNASSIGNED_AREA_ID } from '../data/Store';
 import { TrackRecorder } from '../sensors/TrackRecorder';
 import { RecordingBanner } from './RecordingBanner';
 import { StartTrackDialog } from './TrackList';
-import { Exporter } from '../common/Exporter';
+import { Exporter, StagedUpload } from '../common/Exporter';
+import { UploadProgress, UploadResult, UploadTarget, Uploader } from '../common/Uploader';
 import { fmtDuration, fmtTime } from '../common/Utils';
 import { Theme } from '../common/Theme';
 import { PillButton, ThickButton } from '../common/Widgets';
+
+/** 上传设置存在 settings 表里的键名（换后端只改地址，App 代码不动） */
+const UPLOAD_URL_KEY = 'upload_url';
+const UPLOAD_TOKEN_KEY = 'upload_token';
 
 @CustomDialog
 struct AddRoomDialog {
@@ -73,6 +78,74 @@ struct AddRoomDialog {
 
 /** 区域详情：该区域的房间 + 轨迹，支持开始记录 / 勾选导出 / 删除区域 */
 @Component
+/**
+ * 云端上传设置：只填「地址」和（选填的）令牌。
+ * 刻意不绑定任何云厂商 —— 地址换成局域网自建服务 / Cloudflare Worker / 对象存储签名接口都能用，
+ * 后端返回什么就原样显示给用户（自建服务会返回保存路径与下载链接）。
+ */
+@CustomDialog
+struct UploadSettingsDialog {
+  controller?: CustomDialogController;
+  onSave?: (url: string, token: string) => void;
+  @State url: string = '';
+  @State token: string = '';
+  @State hint: string = '';
+
+  build() {
+    Column({ space: 12 }) {
+      Text('云端上传设置').fontSize(19).fontWeight(FontWeight.Bold).width('100%').fontColor(Theme.INK)
+      Text('填一个接收 POST 上传的地址。局域网自建服务、Cloudflare Worker、对象存储签名接口都可以，换后端不用改 App。')
+        .fontSize(Theme.F_META).fontColor(Theme.INK2).width('100%')
+      TextInput({ placeholder: 'http://192.168.1.5:8000/upload', text: this.url })
+        .fontSize(13.5)
+        .backgroundColor(Theme.CARD_SOFT)
+        .borderRadius(14)
+        .border({ width: 2, color: Theme.LINE })
+        .onChange((v: string) => {
+          this.url = v;
+        })
+      TextInput({ placeholder: '令牌（选填，会作为表单字段 token 一起发过去）', text: this.token })
+        .fontSize(13.5)
+        .backgroundColor(Theme.CARD_SOFT)
+        .borderRadius(14)
+        .border({ width: 2, color: Theme.LINE })
+        .onChange((v: string) => {
+          this.token = v;
+        })
+      if (this.hint.length > 0) {
+        Text(this.hint).fontSize(Theme.F_META).fontColor(Theme.DANGER).width('100%')
+      }
+      Row({ space: 10 }) {
+        PillButton({
+          label: '取消',
+          onTap: (): void => {
+            this.controller?.close();
+          }
+        })
+        PillButton({
+          label: '保存',
+          kind: 'solid',
+          onTap: (): void => {
+            this.save();
+          }
+        })
+      }.width('100%').justifyContent(FlexAlign.End)
+    }.padding(20).width('100%')
+  }
+
+  private save(): void {
+    const u: string = this.url.trim();
+    if (u.length > 0 && !u.startsWith('http://') && !u.startsWith('https://')) {
+      this.hint = '地址要以 http:// 或 https:// 开头';
+      return;
+    }
+    if (this.onSave) {
+      this.onSave(u, this.token.trim());
+    }
+    this.controller?.close();
+  }
+}
+
 export struct AreaDetailPage {
   areaId: number = UNASSIGNED_AREA_ID;
   onBack: () => void = () => {
@@ -88,7 +161,21 @@ export struct AreaDetailPage {
   /** 勾选导出模式：轨迹行显示复选框，可全选后只导出选中的几条 */
   @State selectMode: boolean = false;
   @State selectedIds: number[] = [];
+  /** 上传设置（存在库里的 settings 表） */
+  @State uploadUrl: string = '';
+  @State uploadToken: string = '';
+  @State uploading: boolean = false;
+  /** 上传进度百分比；-1 表示还没有进度事件 */
+  @State uploadPct: number = -1;
+  /** 上一次上传的结果或失败原因：toast 两秒就没了，这里留痕（沿用录制横幅那条经验） */
+  @State lastUploadMsg: string = '';
+  /** 上面那条消息是不是成功（决定用中性色还是警示色） */
+  @State lastUploadOk: boolean = true;
   private timer: number = -1;
+  /** 上传设置对话框与「保存后是否接着上传」的暂存（控制器按点击时机创建，避免 @Prop 时序问题） */
+  private settingsDialog: CustomDialogController | null = null;
+  private pendingUpload: boolean = false;
+  private pendingIds: number[] = [];
 
   private areaName(): string {
     if (this.areaId === UNASSIGNED_AREA_ID) {
@@ -128,6 +215,7 @@ export struct AreaDetailPage {
 
   aboutToAppear(): void {
     this.reload();
+    this.loadUploadSettings();
     Store.subscribe(this.reload);
     this.timer = setInterval(() => {
       this.heartbeat++;
@@ -234,6 +322,104 @@ export struct AreaDetailPage {
       this.exitSelect();
     }).catch((e: Error) => {
       promptAction.showToast({ message: e.message });
+    });
+  }
+
+  // ---------- 上传到云端 ----------
+
+  private loadUploadSettings(): void {
+    Store.getSetting(UPLOAD_URL_KEY, '').then((v: string) => {
+      this.uploadUrl = v;
+    });
+    Store.getSetting(UPLOAD_TOKEN_KEY, '').then((v: string) => {
+      this.uploadToken = v;
+    });
+  }
+
+  /** 「上传设置」入口：把当前值填进对话框；保存后若原本就想上传，则接着传 */
+  private openUploadSettings(thenUpload: boolean): void {
+    this.pendingUpload = thenUpload;
+    this.pendingIds = this.selectedIds.slice();
+    const dlg: CustomDialogController = new CustomDialogController({
+      builder: UploadSettingsDialog({
+        url: this.uploadUrl,
+        token: this.uploadToken,
+        onSave: (url: string, token: string): void => {
+          this.applyUploadSettings(url, token);
+        }
+      })
+    });
+    this.settingsDialog = dlg;
+    dlg.open();
+  }
+
+  private applyUploadSettings(url: string, token: string): void {
+    this.uploadUrl = url;
+    this.uploadToken = token;
+    Store.setSetting(UPLOAD_URL_KEY, url).catch(() => {
+    });
+    Store.setSetting(UPLOAD_TOKEN_KEY, token).catch(() => {
+    });
+    promptAction.showToast({ message: url.length > 0 ? '上传设置已保存' : '已清空上传地址' });
+    if (this.pendingUpload && url.length > 0 && this.pendingIds.length > 0) {
+      this.pendingUpload = false;
+      this.runUpload(this.pendingIds);
+    }
+  }
+
+  /** 上传所选的若干条轨迹（打包成与「导出」完全相同的 zip，只是不发到手机而是发到服务器） */
+  private uploadSelected(): void {
+    const ids: number[] = this.selectedIds.slice();
+    if (ids.length === 0) {
+      promptAction.showToast({ message: '请先勾选要上传的轨迹' });
+      return;
+    }
+    if (this.uploading) {
+      return;
+    }
+    if (this.uploadUrl.trim().length === 0) {
+      // 不做一个点了没反应的按钮：直接引导去填地址，填完自动接着传
+      this.openUploadSettings(true);
+      return;
+    }
+    this.runUpload(ids);
+  }
+
+  private runUpload(ids: number[]): void {
+    this.uploading = true;
+    this.uploadPct = -1;
+    this.lastUploadOk = true;
+    this.lastUploadMsg = '正在打包…';
+    const name: string = this.areaName();
+    let staged: StagedUpload | undefined = undefined;
+    Exporter.stageForUpload(ids, this.areaId, name).then((s: StagedUpload) => {
+      staged = s;
+      this.lastUploadMsg = `正在上传 ${s.name}…`;
+      const target: UploadTarget = {
+        url: this.uploadUrl,
+        token: this.uploadToken,
+        fieldName: Uploader.DEFAULT_FIELD
+      };
+      return Uploader.upload(s.name, target, (p: UploadProgress) => {
+        this.uploadPct = p.total > 0 ? Math.floor(p.uploaded * 100 / p.total) : -1;
+      });
+    }).then((r: UploadResult) => {
+      this.uploading = false;
+      this.uploadPct = -1;
+      this.lastUploadOk = r.ok;
+      const detail: string = r.body.length > 180 ? `${r.body.substring(0, 180)}…` : r.body;
+      this.lastUploadMsg = detail.length > 0 ? `${r.message}｜${detail}` : r.message;
+      promptAction.showToast({ message: this.lastUploadMsg });
+      if (r.ok && staged !== undefined) {
+        // 成功才清缓存；失败时留着，方便对着错误信息重试
+        Exporter.discardStaged(staged);
+      }
+    }).catch((e: Error) => {
+      this.uploading = false;
+      this.uploadPct = -1;
+      this.lastUploadOk = false;
+      this.lastUploadMsg = `打包失败：${e.message}`;
+      promptAction.showToast({ message: this.lastUploadMsg });
     });
   }
 
@@ -393,21 +579,57 @@ export struct AreaDetailPage {
               }.width('100%')
 
               if (this.selectMode) {
-                Text('勾选后导出，只打包选中的轨迹（含照片与 gallery.html 索引）')
+                Text('勾选后导出或上传，只处理选中的轨迹（含照片与 gallery.html 索引）')
                   .fontSize(Theme.F_META)
                   .fontColor(Theme.INK2)
                   .width('100%')
-                Column() {
-                  ThickButton({
-                    label: `导出所选（${this.selectedIds.length}）`,
-                    kind: 'accent',
-                    compact: true,
-                    disabled: this.selectedIds.length === 0,
+                Row({ space: 8 }) {
+                  Column() {
+                    ThickButton({
+                      label: `导出所选（${this.selectedIds.length}）`,
+                      kind: 'accent',
+                      compact: true,
+                      disabled: this.selectedIds.length === 0 || this.uploading,
+                      onTap: (): void => {
+                        this.exportSelected();
+                      }
+                    })
+                  }.layoutWeight(1)
+                  Column() {
+                    ThickButton({
+                      label: this.uploading
+                        ? (this.uploadPct >= 0 ? `上传中 ${this.uploadPct}%` : '上传中…')
+                        : `上传到云端（${this.selectedIds.length}）`,
+                      compact: true,
+                      disabled: this.selectedIds.length === 0 || this.uploading,
+                      onTap: (): void => {
+                        this.uploadSelected();
+                      }
+                    })
+                  }.layoutWeight(1)
+                }.width('100%')
+
+                Row({ space: 8 }) {
+                  PillButton({
+                    label: '上传设置',
                     onTap: (): void => {
-                      this.exportSelected();
+                      this.openUploadSettings(false);
                     }
                   })
-                }.width('100%')
+                  Text(this.uploadUrl.length > 0 ? `已配置：${this.uploadUrl}` : '还没配置上传地址（点左边填）')
+                    .fontSize(Theme.F_META)
+                    .fontColor(Theme.INK2)
+                    .layoutWeight(1)
+                    .maxLines(1)
+                    .textOverflow({ overflow: TextOverflow.Ellipsis })
+                }.width('100%').alignItems(VerticalAlign.Center)
+
+                if (this.lastUploadMsg.length > 0) {
+                  Text(this.lastUploadMsg)
+                    .fontSize(Theme.F_META)
+                    .fontColor(this.uploading || this.lastUploadOk ? Theme.INK2 : Theme.DANGER)
+                    .width('100%')
+                }
               }
 
               if (this.tracks.length === 0) {

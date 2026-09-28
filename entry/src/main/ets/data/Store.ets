@@ -127,6 +127,13 @@ export class Store {
           createdAt INTEGER NOT NULL
         )`
       );
+      // 2026-09-29：键值设置表（上传地址、令牌等本机配置；与业务数据分开，不进导出包）
+      await rdb.executeSql(
+        `CREATE TABLE IF NOT EXISTS settings (
+          k TEXT PRIMARY KEY,
+          v TEXT NOT NULL DEFAULT ''
+        )`
+      );
       // 旧库迁移：列已存在时 ALTER 会报错，忽略即可
       try {
         await rdb.executeSql('ALTER TABLE rooms ADD COLUMN areaId INTEGER');
@@ -190,6 +197,44 @@ export class Store {
         hilog.warn(0x0000, 'RoomMarker', 'Store listener failed: %{public}s', JSON.stringify(e));
       }
     }
+  }
+
+  // ---------- 设置（键值） ----------
+
+  /** 读设置项；不存在时返回默认值（上传地址这类本机配置都放这里） */
+  static async getSetting(key: string, def: string): Promise<string> {
+    await Store.ready;
+    if (!Store.rdb) {
+      return def;
+    }
+    const p: relationalStore.RdbPredicates = new relationalStore.RdbPredicates('settings');
+    p.equalTo('k', key);
+    const rs: relationalStore.ResultSet = await Store.rdb.query(p, ['v']);
+    let value: string = def;
+    if (rs.goToNextRow()) {
+      value = rs.getString(rs.getColumnIndex('v'));
+    }
+    rs.close();
+    return value;
+  }
+
+  /** 写设置项（先 update 再按需 insert，避免依赖 SQL 方言；写失败会抛给调用方） */
+  static async setSetting(key: string, value: string): Promise<void> {
+    await Store.ready;
+    if (!Store.rdb) {
+      throw new Error('数据库未就绪，请重启应用后再试');
+    }
+    const bucket: relationalStore.ValuesBucket = {
+      'k': key,
+      'v': value
+    };
+    const p: relationalStore.RdbPredicates = new relationalStore.RdbPredicates('settings');
+    p.equalTo('k', key);
+    const updated: number = await Store.rdb.update(bucket, p);
+    if (updated === 0) {
+      await Store.rdb.insert('settings', bucket);
+    }
+    Store.notify();
   }
 
   // ---------- 区域 ----------

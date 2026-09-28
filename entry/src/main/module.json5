@@ -93,6 +93,10 @@
       {
         "name": "ohos.permission.GYROSCOPE"
       },
+      // 上传轨迹包（system_grant：装完即可用，不会弹窗让用户授权）
+      {
+        "name": "ohos.permission.INTERNET"
+      },
       {
         "name": "ohos.permission.KEEP_BACKGROUND_RUNNING"
       }

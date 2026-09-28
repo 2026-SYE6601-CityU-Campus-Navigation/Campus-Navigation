@@ -27,3 +27,6 @@ Thumbs.db
 track_*.json
 /models/
 /knowledge_store.json
+
+# 本机上传服务的接收目录（里面是真实轨迹包与照片，绝不入库）
+/tools/uploads/

@@ -107,6 +107,18 @@ interface GalleryTrack {
  * AI 可直接读 JSON（含标签/照片元数据与相对路径）并对照照片原图；
  * 人工则可以解压后双击 gallery.html 逐张核对照片、位置、朝向与备注。
  */
+/** 打包结果：zip 字节 + 建议文件名（导出到手机与上传到云端共用） */
+export interface ExportPackage {
+  name: string;
+  data: ArrayBuffer;
+}
+
+/** 已经落进 cacheDir 的待上传包（uploadFile 只认 internal://cache/ 下的文件） */
+export interface StagedUpload {
+  name: string;
+  cachePath: string;
+}
+
 export class Exporter {
   /**
    * 导出整个区域的全部轨迹。
@@ -136,8 +148,9 @@ export class Exporter {
     return Exporter.pack(picked, areaId, areaName, `_所选${picked.length}条`);
   }
 
-  private static async pack(tracks: Track[], areaId: number, areaName: string,
-    nameTag: string): Promise<string> {
+  /** 打包成 zip 字节（不落盘、不弹对话框）：「存到手机」与「上传到云端」都从这里拿数据 */
+  private static async build(tracks: Track[], areaId: number, areaName: string,
+    nameTag: string): Promise<ExportPackage> {
     const ctx = Ctx.ui;
     if (!ctx) {
       throw new Error('应用未就绪，稍后再试');
@@ -299,16 +312,67 @@ export class Exporter {
     const stamp =
       `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}_${pad2(d.getHours())}${pad2(d.getMinutes())}`;
     const zipName = `${safeFileName(`${areaName}${nameTag}`)}_${stamp}.zip`;
+    return { name: zipName, data: zipBuffer } as ExportPackage;
+  }
+
+  /** 打包后走系统保存对话框存到手机（区域页「导出所选」用的就是这条） */
+  private static async pack(tracks: Track[], areaId: number, areaName: string,
+    nameTag: string): Promise<string> {
+    const ctx = Ctx.ui;
+    if (!ctx) {
+      throw new Error('应用未就绪，稍后再试');
+    }
+    const pkg: ExportPackage = await Exporter.build(tracks, areaId, areaName, nameTag);
 
     const docPicker = new picker.DocumentViewPicker(ctx);
     const opt = new picker.DocumentSaveOptions();
-    opt.newFileNames = [zipName];
+    opt.newFileNames = [pkg.name];
     const uris: string[] = await docPicker.save(opt);
     const uri = uris[0];
     const dst = fs.openSync(uri, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE);
-    fs.writeSync(dst.fd, zipBuffer);
+    fs.writeSync(dst.fd, pkg.data);
     fs.closeSync(dst);
-    return zipName;
+    return pkg.name;
+  }
+
+  /**
+   * 打包并写进应用缓存目录，供「上传到云端」使用。
+   *
+   * ⚠️ request.uploadFile 只接受 `internal://cache/<文件名>` 形式的 uri，
+   * 也就是文件必须**直接放在 cacheDir 下**（不能放子目录、也不能用 filesDir），
+   * 所以这里刻意不建子目录，直接用 cacheDir 根。
+   */
+  static async stageForUpload(trackIds: number[], areaId: number,
+    areaName: string): Promise<StagedUpload> {
+    if (trackIds.length === 0) {
+      throw new Error('请先勾选要上传的轨迹');
+    }
+    const all: Track[] = await Store.listTracksInArea(areaId);
+    const picked: Track[] = all.filter((t: Track) => {
+      return trackIds.indexOf(t.id) >= 0;
+    });
+    if (picked.length === 0) {
+      throw new Error('勾选的轨迹已不存在，请刷新后重试');
+    }
+    const ctx = Ctx.ui;
+    if (!ctx) {
+      throw new Error('应用未就绪，稍后再试');
+    }
+    const pkg: ExportPackage = await Exporter.build(picked, areaId, areaName,
+      `_所选${picked.length}条`);
+    const cachePath = `${ctx.cacheDir}/${pkg.name}`;
+    const f = fs.openSync(cachePath, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+    fs.writeSync(f.fd, pkg.data);
+    fs.closeSync(f);
+    return { name: pkg.name, cachePath: cachePath } as StagedUpload;
+  }
+
+  /** 上传结束后清掉缓存里的临时包（源数据还在库里，需要时可重新打包，不会丢东西） */
+  static discardStaged(staged: StagedUpload): void {
+    try {
+      fs.unlinkSync(staged.cachePath);
+    } catch (e) {
+    }
   }
 
   /** HTML 转义，避免备注/名称里的 < > & " 破坏索引页 */
