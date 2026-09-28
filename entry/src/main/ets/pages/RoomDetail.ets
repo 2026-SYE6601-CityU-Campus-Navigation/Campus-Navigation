@@ -3,6 +3,8 @@ import { Marker, Room, markerTypeOptions } from '../data/Entities';
 import { Store } from '../data/Store';
 import { captureSnapshot } from '../sensors/SensorSnapshotter';
 import { coordText } from '../common/Utils';
+import { Theme } from '../common/Theme';
+import { PillButton } from '../common/Widgets';
 
 @CustomDialog
 struct AddMarkerDialog {
@@ -26,7 +28,7 @@ struct AddMarkerDialog {
         .width('100%')
       Text('保存时将自动采集：定位 + 气压 + 地磁快照')
         .fontSize(12)
-        .fontColor('#99000000')
+        .fontColor(Theme.INK2)
         .width('100%')
       Row({ space: 12 }) {
         Button('取消').onClick(() => {
@@ -107,8 +109,8 @@ export struct RoomDetailPage {
       title: '删除房间',
       message: '将同时删除该房间的所有标记，确定删除？',
       buttons: [
-        { text: '取消', color: '#0A59F7' },
-        { text: '删除', color: '#E84026' }
+        { text: '取消', color: Theme.RED },
+        { text: '删除', color: Theme.DANGER }
       ]
     }).then((res: promptAction.ShowDialogSuccessResponse) => {
       if (res.index === 1) {
@@ -123,23 +125,34 @@ export struct RoomDetailPage {
   build() {
     Stack({ alignContent: Alignment.BottomEnd }) {
       Column() {
-        Row() {
-          Button('‹ 返回').fontSize(14).onClick(() => {
-            this.onBack();
+        Row({ space: 8 }) {
+          PillButton({
+            label: '‹ 返回',
+            onTap: (): void => {
+              this.onBack();
+            }
           })
           Text(this.room ? this.room.name : '房间')
-            .fontSize(18)
-            .fontWeight(FontWeight.Medium)
-            .margin({ left: 12 })
-          Blank()
-          Button('记基准点').fontSize(12).onClick(() => {
-            this.setBasePoint();
+            .fontSize(Theme.F_TITLE)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(Theme.INK)
+            .layoutWeight(1)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+          PillButton({
+            label: '记基准点',
+            onTap: (): void => {
+              this.setBasePoint();
+            }
           })
-          Button('删除').fontSize(12).fontColor('#E84026').margin({ left: 8 }).onClick(() => {
-            this.confirmDeleteRoom();
+          PillButton({
+            label: '删除',
+            kind: 'danger',
+            onTap: (): void => {
+              this.confirmDeleteRoom();
+            }
           })
-        }.width('100%').padding({ left: 8, right: 12, top: 10, bottom: 10 })
-        Divider()
+        }.width('100%').padding({ left: 14, right: 14, top: 12, bottom: 10 })
 
         List() {
           ListItem() {
@@ -153,13 +166,23 @@ export struct RoomDetailPage {
         }
         .width('100%')
         .layoutWeight(1)
-        .divider({ strokeWidth: 0.5, color: '#1A000000' })
+        .divider({ strokeWidth: 0.5, color: Theme.LINE })
       }.width('100%').height('100%')
-
-      Button('添加标记').margin(16).onClick(() => {
-        this.addDialog.open();
-      })
-    }.width('100%').height('100%')
+      Button('＋ 添加标记')
+        .fontSize(15)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(Theme.ON_RED)
+        .backgroundColor(Theme.RED)
+        .borderRadius(20)
+        .height(54)
+        .margin(Theme.PAD)
+        .onClick(() => {
+          this.addDialog.open();
+        })
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor(Theme.BG)
   }
 
   @Builder
@@ -172,7 +195,7 @@ export struct RoomDetailPage {
       Text(this.room && this.room.pressureHpa !== undefined
         ? `气压 ${this.room.pressureHpa.toFixed(1)} hPa` : '气压：未采集')
         .fontSize(12)
-        .fontColor('#99000000')
+        .fontColor(Theme.INK2)
         .width('100%')
     }.width('100%').padding(16)
   }
@@ -185,11 +208,11 @@ export struct RoomDetailPage {
         Blank()
         Text(m.pressureHpa !== undefined ? `${m.pressureHpa.toFixed(1)} hPa` : '')
           .fontSize(12)
-          .fontColor('#99000000')
+          .fontColor(Theme.INK2)
       }.width('100%')
       Text(`${m.markerType} · ${coordText(m.latitude, m.longitude)}`)
         .fontSize(13)
-        .fontColor('#99000000')
+        .fontColor(Theme.INK2)
         .width('100%')
     }
     .width('100%')

@@ -1,0 +1,29 @@
+# ---------- 构建产物与缓存（DevEco 生成，不进版本库）----------
+/.hvigor/
+/build/
+/entry/build/
+/entry/.preview/
+/entry/.cxx/
+/oh_modules/
+/entry/oh_modules/
+*.har
+*.hsp
+*.hap
+*.tsbuildinfo
+
+# ---------- IDE ----------
+/.idea/
+*.iml
+
+# ---------- 本机配置（DevEco 自动生成，含本机路径，官方明示不要入库）----------
+/local.properties
+/.vscode/
+
+# ---------- 系统杂项 ----------
+.DS_Store
+Thumbs.db
+
+# ---------- 采集数据与本地 AI 产物（隐私：原始轨迹/向量库/模型不进版本库）----------
+track_*.json
+/models/
+/knowledge_store.json

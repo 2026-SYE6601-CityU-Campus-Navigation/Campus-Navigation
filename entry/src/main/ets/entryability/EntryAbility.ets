@@ -20,6 +20,7 @@ export default class EntryAbility extends UIAbility {
       'ohos.permission.APPROXIMATELY_LOCATION',
       'ohos.permission.LOCATION_IN_BACKGROUND',
       'ohos.permission.ACCELEROMETER',
+      'ohos.permission.GYROSCOPE',
       'ohos.permission.ACTIVITY_MOTION'
     ]).then(() => {
       hilog.info(0x0000, 'RoomMarker', 'location permission granted');
