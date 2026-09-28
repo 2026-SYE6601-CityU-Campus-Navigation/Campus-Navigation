@@ -77,7 +77,6 @@ struct AddRoomDialog {
 }
 
 /** 区域详情：该区域的房间 + 轨迹，支持开始记录 / 勾选导出 / 删除区域 */
-@Component
 /**
  * 云端上传设置：只填「地址」和（选填的）令牌。
  * 刻意不绑定任何云厂商 —— 地址换成局域网自建服务 / Cloudflare Worker / 对象存储签名接口都能用，
@@ -146,6 +145,7 @@ struct UploadSettingsDialog {
   }
 }
 
+@Component
 export struct AreaDetailPage {
   areaId: number = UNASSIGNED_AREA_ID;
   onBack: () => void = () => {

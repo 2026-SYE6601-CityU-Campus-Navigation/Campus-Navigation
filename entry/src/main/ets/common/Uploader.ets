@@ -1,4 +1,4 @@
-import { BusinessError, request } from '@kit.BasicServicesKit';
+import { request } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { Ctx } from './Utils';
 
@@ -8,15 +8,21 @@ import { Ctx } from './Utils';
  * 设计取舍：
  *  - **只依赖一个地址**：换后端（局域网自建服务 / Cloudflare Worker / Supabase / 对象存储签名接口）
  *    只需要改设置里的 URL，App 代码不动。所以这里不绑定任何厂商 SDK。
- *  - **令牌走表单字段而不是请求头**：ArkTS 里 `header` 的声明类型是 Object，直接写对象字面量容易踩
- *    arkts-no-untyped-obj-literals；放进 multipart 的 data 字段既安全又够用（自建服务与 Worker 都好接）。
+ *  - **令牌同时给两种形式**：表单字段 `token`（自建服务最好接）+ `Authorization: Bearer`（Worker /
+ *    对象存储签名接口常用）。两种都发，服务端用哪种都行。
  *  - **文件必须在 cacheDir 根目录**：request.uploadFile 只认 `internal://cache/<文件名>`，
  *    子目录/其它沙箱目录都不行（打包见 Exporter.stageForUpload）。
+ *
+ * ⚠️ 关于事件签名（真机编译报错换来的经验，别再凭印象写）：
+ *    本 SDK 版本里 `on('complete' | 'fail', callback: (states: TaskState[]) => void)` ——
+ *    回调收到的是 **TaskState 数组**，不是 BusinessError；服务器的 HTTP 状态码与消息在
+ *    `states[0].responseCode` / `states[0].message` 里。为了既能编译过又拿得到诊断信息，
+ *    回调参数用 ESObject 声明（ArkTS 的逃生类型），再用 typeof 逐项取值。
  */
 export interface UploadTarget {
   /** 上传地址，例如 http://192.168.1.5:8000/upload 或 https://xxx.workers.dev/upload */
   url: string;
-  /** 可选令牌，非空时作为表单字段 token 一起发过去（后端自己校验） */
+  /** 可选令牌，非空时既作为表单字段 token，也作为 Authorization: Bearer 头 */
   token: string;
   /** 表单里文件字段的名字，空字符串则用 'file' */
   fieldName: string;
@@ -57,11 +63,19 @@ export class Uploader {
       ? target.fieldName.trim() : Uploader.DEFAULT_FIELD;
     const token: string = target.token.trim();
 
+    // header 在 UploadConfig 里是**必填**字段；用 Record 而不是对象字面量，
+    // 既不踩 arkts-no-untyped-obj-literals，也能按需塞令牌。
+    const header: Record<string, string> = {};
+    if (token.length > 0) {
+      header['Authorization'] = `Bearer ${token}`;
+    }
+
     let task: request.UploadTask;
     try {
       task = await request.uploadFile(ctx, {
         url: url,
         method: 'POST',
+        header: header,
         files: [
           {
             filename: cacheName,
@@ -95,22 +109,52 @@ export class Uploader {
           body = b as string;
         }
       });
-      task.on('complete', () => {
+      task.on('complete', (states: ESObject) => {
+        const info: string = Uploader.stateText(states);
         finish({
           ok: true,
           body: body,
-          message: body.length > 0 ? '上传完成' : '上传完成（服务器没有返回内容）'
+          message: info.length > 0 ? `上传完成（${info}）` : '上传完成'
         } as UploadResult);
       });
-      task.on('fail', (err: BusinessError) => {
-        hilog.error(0x0000, 'RoomMarker', 'upload failed: %{public}s', Uploader.why(err));
+      task.on('fail', (states: ESObject) => {
+        const info: string = Uploader.stateText(states);
+        hilog.error(0x0000, 'RoomMarker', 'upload failed: %{public}s', info);
         finish({
           ok: false,
           body: body,
-          message: `上传失败：${Uploader.why(err)}`
+          message: info.length > 0 ? `上传失败：${info}` : '上传失败：没有返回详细信息（检查地址/令牌/是否同一 WiFi）'
         } as UploadResult);
       });
     });
+  }
+
+  /**
+   * 把 complete/fail 回调里的 TaskState[] 压成一句人话。
+   * 本 SDK 版本里这个数组每项含 path / responseCode / message（HTTP 状态码就在里面）。
+   */
+  private static stateText(states: ESObject): string {
+    if (states === undefined || states === null) {
+      return '';
+    }
+    const count: ESObject = states.length;
+    if (typeof count !== 'number' || count <= 0) {
+      return '';
+    }
+    const s: ESObject = states[0];
+    if (s === undefined || s === null) {
+      return '';
+    }
+    const code: ESObject = s.responseCode;
+    const msg: ESObject = s.message;
+    let out: string = '';
+    if (typeof code === 'number' && code > 0) {
+      out = `HTTP ${code}`;
+    }
+    if (typeof msg === 'string' && msg.length > 0) {
+      out = out.length > 0 ? `${out}：${msg}` : msg;
+    }
+    return out;
   }
 
   private static fail(message: string): UploadResult {

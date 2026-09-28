@@ -191,9 +191,11 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if self.server.token:
+            # 令牌两种形式都接受：表单字段 token（App 默认发）或 Authorization: Bearer（Worker/签名接口常用）
             got = str(fields.get('token', ''))
-            if got != self.server.token:
-                print(f'  ✗ 令牌不匹配（收到 "{got}"）')
+            auth = self.headers.get('Authorization', '')
+            if got != self.server.token and auth != f'Bearer {self.server.token}':
+                print(f'  ✗ 令牌不匹配（表单 "{got}" / 头 "{auth}"）')
                 self._json(403, {'ok': False, 'error': 'bad token'})
                 return
             print('  ✓ 令牌校验通过')
