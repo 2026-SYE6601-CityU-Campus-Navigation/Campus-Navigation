@@ -1,0 +1,1322 @@
+Ôr@Ÿªassertions¤code´customTransformCache¬dependencies¢id¤meta±moduleSideEffects¬originalCode±originalSourcemap«resolvedIds®sourcemapChainµsyntheticNamedExportsµtransformDependencies®transformFiles¨cacheAstÔrAÚEïimport sensor from "@ohos.sensor";
+import geoLocationManager from "@ohos.geoLocationManager";
+import wifiManager from "@ohos.wifiManager";
+import hilog from "@ohos.hilog";
+import { fusedAzimuth } from '../common/Utils';
+const TAG = 'RoomMarker';
+function hasSensor(t) {
+    try {
+        sensor.getSingleSensorSync(t);
+        return true;
+    }
+    catch (e) {
+        return false;
+    }
+}
+function vec3(x, y, z) {
+    return { x: x, y: y, z: z, m: Math.sqrt(x * x + y * y + z * z) };
+}
+/**
+ * å®æ—¶ä¼ æ„Ÿå™¨æµï¼š
+ * æ•°æ®æºä¸º 500ms å®šæ—¶å™¨ + sensor.once è½®è¯¢ï¼ˆçœŸæœºéªŒè¯å¯é ï¼›æŒç»­è®¢é˜…åœ¨æœ¬ç¯å¢ƒæ— æ•ˆï¼‰ï¼›
+ * å…¨éƒ¨å†™å…¥ AppStorageï¼Œé¡µé¢é€šè¿‡å¿ƒè·³é‡å»ºæœºåˆ¶è¯»å–ï¼ˆè§ LiveSensors é¡µï¼‰ã€‚
+ */
+export class LiveStream {
+    constructor() {
+        this.started = false;
+        this.listener = null;
+        this.sensorTimer = -1;
+        this.locTimer = -1;
+        this.wifiTimer = -1;
+        this.wifiReadTimer = -1;
+        this.accel = [0, 0, 0];
+        this.mag = [0, 0, 0];
+        this.hasAccelData = false;
+        this.hasMagData = false;
+        // è®¾å¤‡ä¼ æ„Ÿå™¨å¯ç”¨æ ‡å¿—ï¼ˆstart æ—¶æ¢æµ‹ä¸€æ¬¡ï¼ŒonceRead æŒ‰éœ€è½®è¯¢ï¼‰
+        this.hasLinearAccel = false;
+        this.hasGravity = false;
+        this.hasGyro = false;
+        this.hasRotVec = false;
+        this.hasOrient = false;
+        this.hasLight = false;
+        this.hasProx = false;
+        this.hasHumidity = false;
+        this.hasAmbTemp = false;
+        this.hasHall = false;
+        this.hasPedometer = false;
+        this.handlePressure = (d) => {
+            const p = d.pressure;
+            const alt = 44330 * (1 - Math.pow(p / 1013.25, 0.1903));
+            const v = { hpa: p, alt: alt };
+            this.push('rm_live_pressure', v);
+            this.setVal('rm_live_pressure_ms', Date.now());
+            if (this.listener && this.listener.onPressure) {
+                this.listener.onPressure(v);
+            }
+        };
+        this.handleMag = (d) => {
+            this.mag = [d.x, d.y, d.z];
+            this.hasMagData = true;
+            this.publishMag();
+        };
+        this.handleAccel = (d) => {
+            this.accel = [d.x, d.y, d.z];
+            this.hasAccelData = true;
+            this.publishMag();
+            this.push('rm_live_accel', vec3(d.x, d.y, d.z));
+        };
+        this.handleLinear = (d) => {
+            this.push('rm_live_linear', vec3(d.x, d.y, d.z));
+        };
+        this.handleGravity = (d) => {
+            this.push('rm_live_gravity', vec3(d.x, d.y, d.z));
+        };
+        this.handleGyro = (d) => {
+            this.push('rm_live_gyro', vec3(d.x, d.y, d.z));
+        };
+        this.handleRotVec = (d) => {
+            this.push('rm_live_rotvec', { x: d.x, y: d.y, z: d.z, w: d.w });
+        };
+        this.handleOrient = (d) => {
+            this.push('rm_live_orient', { alpha: d.alpha, beta: d.beta, gamma: d.gamma });
+        };
+        this.handleLight = (d) => {
+            this.push('rm_live_light', d.intensity);
+        };
+        this.handleProx = (d) => {
+            this.push('rm_live_proximity', d.distance);
+        };
+        this.handleHumidity = (d) => {
+            this.push('rm_live_humidity', d.humidity);
+        };
+        this.handleAmbTemp = (d) => {
+            this.push('rm_live_ambtemp', d.temperature);
+        };
+        this.handleHall = (d) => {
+            this.push('rm_live_hall', d.status);
+        };
+        this.handlePedo = (d) => {
+            this.push('rm_live_pedometer', d.steps);
+        };
+        this.handleLoc = (loc) => {
+            const v = {
+                lat: loc.latitude, lng: loc.longitude, alt: loc.altitude,
+                acc: loc.accuracy, spd: loc.speed, brg: loc.direction,
+                timeMs: loc.timeStamp
+            };
+            this.push('rm_live_location', v);
+            if (this.listener && this.listener.onLoc) {
+                this.listener.onLoc(v);
+            }
+        };
+    }
+    static get() {
+        if (!LiveStream.inst) {
+            LiveStream.inst = new LiveStream();
+        }
+        return LiveStream.inst;
+    }
+    /** é¡µé¢è¿›å…¥æ—¶æ³¨å†Œã€ç¦»å¼€æ—¶æ³¨é”€ */
+    setListener(l) {
+        this.listener = l;
+    }
+    /** å†™ AppStorageï¼ˆsetOrCreate ä¸ WiFi è·¯å¾„åŒæ¬¾ï¼‰+ æ›´æ–°å…¨å±€æ—¶é—´æˆ³ */
+    push(key, v) {
+        try {
+            AppStorage.setOrCreate(key, v);
+        }
+        catch (e) {
+        }
+        const now = Date.now();
+        try {
+            AppStorage.setOrCreate('rm_live_tick_ms', now);
+        }
+        catch (e) {
+        }
+        if (this.listener && this.listener.onTick) {
+            this.listener.onTick(now);
+        }
+    }
+    setVal(key, v) {
+        try {
+            AppStorage.setOrCreate(key, v);
+        }
+        catch (e) {
+        }
+    }
+    publishMag() {
+        const x = this.mag[0], y = this.mag[1], z = this.mag[2];
+        const mag = Math.sqrt(x * x + y * y + z * z);
+        let az = undefined;
+        if (this.hasAccelData && this.hasMagData) {
+            az = fusedAzimuth(this.accel, this.mag);
+        }
+        const v = { x: x, y: y, z: z, mag: mag, az: az };
+        this.push('rm_live_magnetic', v);
+        this.setVal('rm_live_mag_ms', Date.now());
+        if (this.listener && this.listener.onMag) {
+            this.listener.onMag(v);
+        }
+    }
+    labelFor(id) {
+        if (id === sensor.SensorId.ACCELEROMETER) {
+            return 'åŠ é€Ÿåº¦è®¡';
+        }
+        if (id === sensor.SensorId.ACCELEROMETER_UNCALIBRATED) {
+            return 'åŠ é€Ÿåº¦è®¡Â·æœªæ ¡å‡†';
+        }
+        if (id === sensor.SensorId.LINEAR_ACCELEROMETER) {
+            return 'çº¿æ€§åŠ é€Ÿåº¦';
+        }
+        if (id === sensor.SensorId.GRAVITY) {
+            return 'é‡åŠ›';
+        }
+        if (id === sensor.SensorId.GYROSCOPE) {
+            return 'é™€èºä»ª';
+        }
+        if (id === sensor.SensorId.GYROSCOPE_UNCALIBRATED) {
+            return 'é™€èºä»ªÂ·æœªæ ¡å‡†';
+        }
+        if (id === sensor.SensorId.MAGNETIC_FIELD) {
+            return 'ç£åŠ›è®¡';
+        }
+        if (id === sensor.SensorId.MAGNETIC_FIELD_UNCALIBRATED) {
+            return 'ç£åŠ›è®¡Â·æœªæ ¡å‡†';
+        }
+        if (id === sensor.SensorId.BAROMETER) {
+            return 'æ°”å‹è®¡';
+        }
+        if (id === sensor.SensorId.ROTATION_VECTOR) {
+            return 'æ—‹è½¬çŸ¢é‡';
+        }
+        if (id === sensor.SensorId.ORIENTATION) {
+            return 'æ–¹å‘';
+        }
+        if (id === sensor.SensorId.AMBIENT_LIGHT) {
+            return 'ç¯å¢ƒå…‰';
+        }
+        if (id === sensor.SensorId.PROXIMITY) {
+            return 'æ¥è¿‘';
+        }
+        if (id === sensor.SensorId.HUMIDITY) {
+            return 'æ¹¿åº¦';
+        }
+        if (id === sensor.SensorId.AMBIENT_TEMPERATURE) {
+            return 'ç¯å¢ƒæ¸©åº¦';
+        }
+        if (id === sensor.SensorId.HALL) {
+            return 'éœå°”';
+        }
+        if (id === sensor.SensorId.PEDOMETER) {
+            return 'è®¡æ­¥å™¨';
+        }
+        if (id === sensor.SensorId.PEDOMETER_DETECTION) {
+            return 'è®¡æ­¥æ£€æµ‹';
+        }
+        if (id === sensor.SensorId.HEART_RATE) {
+            return 'å¿ƒç‡';
+        }
+        if (id === sensor.SensorId.SIGNIFICANT_MOTION) {
+            return 'å¤§å¹…è¿åŠ¨';
+        }
+        return `ä¼ æ„Ÿå™¨ #${id}`;
+    }
+    /** æšä¸¾è®¾å¤‡å…¨éƒ¨ä¼ æ„Ÿå™¨ï¼ˆä¾›ã€Œè®¾å¤‡ä¼ æ„Ÿå™¨æ¸…å•ã€å¡ç‰‡å±•ç¤ºï¼‰ */
+    scanSensorList() {
+        let out = [];
+        try {
+            const list = sensor.getSensorListSync();
+            out = list.map((s) => {
+                return {
+                    id: s.sensorId,
+                    label: this.labelFor(s.sensorId),
+                    name: s.sensorName,
+                    vendor: s.vendorName
+                };
+            });
+        }
+        catch (e) {
+        }
+        AppStorage.setOrCreate('rm_sensor_list', out);
+        if (this.listener && this.listener.onSensorList) {
+            this.listener.onSensorList(out);
+        }
+    }
+    /**
+     * å®šæ—¶è½®è¯¢ä¸€æ¬¡ä¼ æ„Ÿå™¨è¯»æ•°ï¼ˆsensor.onceï¼ŒæŒ‰è®¾å¤‡èƒ½åŠ›æŒ‰éœ€è°ƒç”¨ï¼‰ã€‚
+     * å¼€å¤´æ— æ¡ä»¶åˆ·æ–°æ—¶é—´æˆ³å¿ƒè·³ï¼šé¡µé¢ @State heartbeat ä¾èµ–å…¶èŠ‚å¥é‡å»ºå¡ç‰‡ï¼ˆè§ LiveSensors é¡µï¼‰ã€‚
+     */
+    onceRead() {
+        const now = Date.now();
+        try {
+            AppStorage.setOrCreate('rm_live_tick_ms', now);
+        }
+        catch (e) {
+        }
+        if (this.listener && this.listener.onTick) {
+            this.listener.onTick(now);
+        }
+        try {
+            sensor.once(sensor.SensorId.BAROMETER, this.handlePressure);
+        }
+        catch (e) {
+        }
+        try {
+            sensor.once(sensor.SensorId.MAGNETIC_FIELD, this.handleMag);
+        }
+        catch (e) {
+        }
+        try {
+            sensor.once(sensor.SensorId.ACCELEROMETER, this.handleAccel);
+        }
+        catch (e) {
+        }
+        if (this.hasLinearAccel) {
+            try {
+                sensor.once(sensor.SensorId.LINEAR_ACCELEROMETER, this.handleLinear);
+            }
+            catch (e) {
+            }
+        }
+        if (this.hasGravity) {
+            try {
+                sensor.once(sensor.SensorId.GRAVITY, this.handleGravity);
+            }
+            catch (e) {
+            }
+        }
+        if (this.hasGyro) {
+            try {
+                sensor.once(sensor.SensorId.GYROSCOPE, this.handleGyro);
+            }
+            catch (e) {
+            }
+        }
+        if (this.hasRotVec) {
+            try {
+                sensor.once(sensor.SensorId.ROTATION_VECTOR, this.handleRotVec);
+            }
+            catch (e) {
+            }
+        }
+        if (this.hasOrient) {
+            try {
+                sensor.once(sensor.SensorId.ORIENTATION, this.handleOrient);
+            }
+            catch (e) {
+            }
+        }
+        if (this.hasLight) {
+            try {
+                sensor.once(sensor.SensorId.AMBIENT_LIGHT, this.handleLight);
+            }
+            catch (e) {
+            }
+        }
+        if (this.hasProx) {
+            try {
+                sensor.once(sensor.SensorId.PROXIMITY, this.handleProx);
+            }
+            catch (e) {
+            }
+        }
+        if (this.hasHumidity) {
+            try {
+                sensor.once(sensor.SensorId.HUMIDITY, this.handleHumidity);
+            }
+            catch (e) {
+            }
+        }
+        if (this.hasAmbTemp) {
+            try {
+                sensor.once(sensor.SensorId.AMBIENT_TEMPERATURE, this.handleAmbTemp);
+            }
+            catch (e) {
+            }
+        }
+        if (this.hasHall) {
+            try {
+                sensor.once(sensor.SensorId.HALL, this.handleHall);
+            }
+            catch (e) {
+            }
+        }
+        if (this.hasPedometer) {
+            try {
+                sensor.once(sensor.SensorId.PEDOMETER, this.handlePedo);
+            }
+            catch (e) {
+            }
+        }
+    }
+    /** å®šä½å…œåº•è½®è¯¢ï¼šé™¤æŒç»­è®¢é˜…å¤–ï¼Œæ¯ 5 ç§’ä¸»åŠ¨è¯·æ±‚ä¸€æ¬¡å•æ¬¡å®šä½ */
+    pollLoc() {
+        try {
+            const oneShot = {
+                locatingPriority: geoLocationManager.LocatingPriority.PRIORITY_ACCURACY,
+                locatingTimeoutMs: 4000
+            };
+            geoLocationManager.getCurrentLocation(oneShot).then((l) => {
+                this.handleLoc(l);
+            }).catch(() => {
+            });
+        }
+        catch (e) {
+        }
+    }
+    start() {
+        if (this.started) {
+            return;
+        }
+        this.started = true;
+        AppStorage.setOrCreate('rm_live_tick_ms', 0);
+        AppStorage.setOrCreate('rm_live_pressure_ms', 0);
+        AppStorage.setOrCreate('rm_live_mag_ms', 0);
+        this.scanSensorList();
+        const hp = hasSensor(sensor.SensorId.BAROMETER);
+        const hm = hasSensor(sensor.SensorId.MAGNETIC_FIELD);
+        this.hasLinearAccel = hasSensor(sensor.SensorId.LINEAR_ACCELEROMETER);
+        this.hasGravity = hasSensor(sensor.SensorId.GRAVITY);
+        this.hasGyro = hasSensor(sensor.SensorId.GYROSCOPE);
+        this.hasRotVec = hasSensor(sensor.SensorId.ROTATION_VECTOR);
+        this.hasOrient = hasSensor(sensor.SensorId.ORIENTATION);
+        this.hasLight = hasSensor(sensor.SensorId.AMBIENT_LIGHT);
+        this.hasProx = hasSensor(sensor.SensorId.PROXIMITY);
+        this.hasHumidity = hasSensor(sensor.SensorId.HUMIDITY);
+        this.hasAmbTemp = hasSensor(sensor.SensorId.AMBIENT_TEMPERATURE);
+        this.hasHall = hasSensor(sensor.SensorId.HALL);
+        this.hasPedometer = hasSensor(sensor.SensorId.PEDOMETER);
+        AppStorage.setOrCreate('rm_live_has_pressure', hp);
+        AppStorage.setOrCreate('rm_live_has_magnetic', hm);
+        AppStorage.setOrCreate('rm_live_has_accel', hasSensor(sensor.SensorId.ACCELEROMETER));
+        AppStorage.setOrCreate('rm_live_has_linear', this.hasLinearAccel);
+        AppStorage.setOrCreate('rm_live_has_gravity', this.hasGravity);
+        AppStorage.setOrCreate('rm_live_has_gyro', this.hasGyro);
+        AppStorage.setOrCreate('rm_live_has_rotvec', this.hasRotVec);
+        AppStorage.setOrCreate('rm_live_has_orient', this.hasOrient);
+        AppStorage.setOrCreate('rm_live_has_light', this.hasLight);
+        AppStorage.setOrCreate('rm_live_has_proximity', this.hasProx);
+        AppStorage.setOrCreate('rm_live_has_humidity', this.hasHumidity);
+        AppStorage.setOrCreate('rm_live_has_ambtemp', this.hasAmbTemp);
+        AppStorage.setOrCreate('rm_live_has_hall', this.hasHall);
+        AppStorage.setOrCreate('rm_live_has_pedometer', this.hasPedometer);
+        if (this.listener && this.listener.onFlags) {
+            this.listener.onFlags(hp, hm);
+        }
+        AppStorage.setOrCreate('rm_live_location', null);
+        AppStorage.setOrCreate('rm_live_pressure', null);
+        AppStorage.setOrCreate('rm_live_magnetic', null);
+        AppStorage.setOrCreate('rm_live_wifi', []);
+        AppStorage.setOrCreate('rm_live_wifi_scan_ms', 0);
+        AppStorage.setOrCreate('rm_live_accel', null);
+        AppStorage.setOrCreate('rm_live_linear', null);
+        AppStorage.setOrCreate('rm_live_gravity', null);
+        AppStorage.setOrCreate('rm_live_gyro', null);
+        AppStorage.setOrCreate('rm_live_rotvec', null);
+        AppStorage.setOrCreate('rm_live_orient', null);
+        AppStorage.setOrCreate('rm_live_light', -1);
+        AppStorage.setOrCreate('rm_live_proximity', -1);
+        AppStorage.setOrCreate('rm_live_humidity', -1);
+        AppStorage.setOrCreate('rm_live_ambtemp', -999);
+        AppStorage.setOrCreate('rm_live_hall', -1);
+        AppStorage.setOrCreate('rm_live_pedometer', -1);
+        // ä¼ æ„Ÿå™¨ï¼š250ms å®šæ—¶å™¨ once è½®è¯¢ï¼ˆçœŸæœºæŒç»­è®¢é˜…ä¸å¯é ï¼Œå®šæ—¶å™¨æ¨¡å¼ä¸ WiFi ä¸€è‡´ã€å·²éªŒè¯ï¼›
+        // once å®Œæ•´å‘¨æœŸçº¦ 200msï¼Œé—´éš”ä½äº 250ms ä¼šé€ æˆè®¢é˜…é‡å ï¼‰
+        this.onceRead();
+        this.sensorTimer = setInterval(() => {
+            this.onceRead();
+        }, 250);
+        // å®šä½ï¼šæŒç»­è®¢é˜… + 5 ç§’è½®è¯¢å…œåº•
+        const req = {
+            interval: 1,
+            locationScenario: geoLocationManager.UserActivityScenario.NAVIGATION
+        };
+        try {
+            geoLocationManager.on('locationChange', req, this.handleLoc);
+        }
+        catch (e) {
+            hilog.error(0x0000, TAG, 'å®šä½è®¢é˜…å¤±è´¥: %{public}s', JSON.stringify(e));
+        }
+        this.pollLoc();
+        this.locTimer = setInterval(() => {
+            this.pollLoc();
+        }, 5000);
+        this.doWifiScan();
+        this.wifiTimer = setInterval(() => {
+            this.doWifiScan();
+        }, 30000);
+    }
+    stop() {
+        if (!this.started) {
+            return;
+        }
+        this.started = false;
+        if (this.sensorTimer >= 0) {
+            clearInterval(this.sensorTimer);
+            this.sensorTimer = -1;
+        }
+        if (this.locTimer >= 0) {
+            clearInterval(this.locTimer);
+            this.locTimer = -1;
+        }
+        if (this.wifiTimer >= 0) {
+            clearInterval(this.wifiTimer);
+            this.wifiTimer = -1;
+        }
+        if (this.wifiReadTimer >= 0) {
+            clearTimeout(this.wifiReadTimer);
+            this.wifiReadTimer = -1;
+        }
+        try {
+            geoLocationManager.off('locationChange', this.handleLoc);
+        }
+        catch (e) {
+        }
+    }
+    doWifiScan() {
+        try {
+            wifiManager.scan();
+        }
+        catch (e) {
+        }
+        // æ‰«æç»“æœå¼‚æ­¥è¿”å›ï¼Œ1.5s åè¯»å–ä¸€æ¬¡æœ€æ–°åˆ—è¡¨ï¼ˆå—ç³»ç»ŸèŠ‚æµé™åˆ¶ï¼‰
+        if (this.wifiReadTimer >= 0) {
+            clearTimeout(this.wifiReadTimer);
+        }
+        this.wifiReadTimer = setTimeout(() => {
+            this.readWifi();
+        }, 1500);
+    }
+    readWifi() {
+        try {
+            const list = wifiManager.getScanInfoList();
+            const out = list.map((i) => {
+                return { ssid: i.ssid, bssid: i.bssid, rssi: i.rssi, freq: i.frequency };
+            });
+            out.sort((a, b) => b.rssi - a.rssi);
+            AppStorage.setOrCreate('rm_live_wifi', out);
+            AppStorage.setOrCreate('rm_live_wifi_scan_ms', Date.now());
+            if (this.listener && this.listener.onWifi) {
+                this.listener.onWifi(out);
+            }
+        }
+        catch (e) {
+        }
+    }
+}
+LiveStream.inst = null;
+//# sourceMappingURL=LiveStream.js.mapÂ•ÙX hvigor_ignore_D:_DevEco_DevEco Studio_sdk_default_openharmony_ets_api_@ohos.sensor.d.tsÙd hvigor_ignore_D:_DevEco_DevEco Studio_sdk_default_openharmony_ets_api_@ohos.geoLocationManager.d.tsÙ] hvigor_ignore_D:_DevEco_DevEco Studio_sdk_default_openharmony_ets_api_@ohos.wifiManager.d.tsÙW hvigor_ignore_D:_DevEco_DevEco Studio_sdk_default_openharmony_ets_api_@ohos.hilog.d.tsÙVD:\CityUproject\CampusNavigation\RoomMarkerHarmony\entry\src\main\ets\common\Utils.etsÙ\D:\CityUproject\CampusNavigation\RoomMarkerHarmony\entry\src\main\ets\sensors\LiveStream.etsÔrBœªmoduleName±isLocalDependency¯isNodeEntryFile§pkgPath±belongProjectPath§pkgNameªpkgVersion±dependencyPkgInfo¯hostModulesInfo°belongModulePath§checker¬shouldEmitJs¥entryÃÂÙ8D:\CityUproject\CampusNavigation\RoomMarkerHarmony\entryÙ2D:\CityUproject\CampusNavigation\RoomMarkerHarmony¥entry¥1.0.0Ô  ‘ÔrC’²hostDependencyName®hostModuleNameµ../sensors/LiveStream¥entryÙ8D:\CityUproject\CampusNavigation\RoomMarkerHarmony\entryÔrDÜ ®¬getNodeCount²getIdentifierCount®getSymbolCount¬getTypeCountµgetInstantiationCountµgetRelationCacheSizes±isUndefinedSymbol±isArgumentsSymbol¯isUnknownSymbol¯getMergedSymbol®getDiagnostics´getGlobalDiagnostics´getRecursionIdentity¶getUnmatchedProperties¹getTypeOfSymbolAtLocation¯getTypeOfSymbolÙ(getSymbolsOfParameterPropertyDeclaration·getDeclaredTypeOfSymbol³getPropertiesOfType±getPropertyOfTypeÙ"getPrivateIdentifierPropertyOfType·getTypeOfPropertyOfType²getIndexInfoOfType³getIndexInfosOfTypeºgetIndexInfosOfIndexSymbol³getSignaturesOfType²getIndexTypeOfType¬getIndexType¬getBaseTypes¸getBaseTypeOfLiteralType®getWidenedType³getTypeFromTypeNode°getParameterTypeÙ$getParameterIdentifierNameAtPosition¸getPromisedTypeOfPromise®getAwaitedType¸getReturnTypeOfSignature®isNullableType¯getNullableType²getNonNullableType²getNonOptionalType°getTypeArguments®typeToTypeNodeÙ$indexInfoToIndexSignatureDeclaration¿signatureToSignatureDeclaration²symbolToEntityName²symbolToExpression¬symbolToNodeÙ!symbolToTypeParameterDeclarations¼symbolToParameterDeclarationºtypeParameterToDeclaration±getSymbolsInScope³getSymbolAtLocation·getIndexInfosAtLocationÙ!getShorthandAssignmentValueSymbolÙ#getExportSpecifierLocalTargetSymbol·getExportSymbolOfSymbol±getTypeAtLocationºgetTypeAtLocationForLinterÙ tryGetTypeAtLocationWithoutCheckºgetTypeOfAssignmentPatternÙ*getPropertySymbolOfDestructuringAssignment±signatureToString¬typeToString®symbolToStringµtypePredicateToString®writeSignature©writeType«writeSymbol²writeTypePredicate¼getAugmentedPropertiesOfType®getRootSymbols²getSymbolOfExpando±getContextualTypeÙ(getContextualTypeForObjectLiteralElementÙ#getContextualTypeForArgumentAtIndexÙ getContextualTypeForJsxAttribute²isContextSensitiveÙ!getTypeOfPropertyOfContextualTypeµgetFullyQualifiedNameÙ#tryGetResolvedSignatureWithoutCheck´getResolvedSignatureÙ/getResolvedSignatureForStringLiteralCompletionsÙ$getResolvedSignatureForSignatureHelpµgetExpandedParameters¹hasEffectiveRestParameterºcontainsArgumentsReference°getConstantValueµisValidPropertyAccessÙ#isValidPropertyAccessForCompletions»getSignatureFromDeclarationºisImplementationOfOverload¹getImmediateAliasedSymbol°getAliasedSymbol¯getEmitResolver²getExportsOfModule¿getExportsAndPropertiesOfModuleÙ forEachExportAndPropertyOfModule¯getSymbolWalker±getAmbientModules¹getJsxIntrinsicTagNamesAt³isOptionalParameter»tryGetMemberInModuleExportsÙ(tryGetMemberInModuleExportsAndProperties´tryFindAmbientModuleÙ(tryFindAmbientModuleWithoutAugmentations¯getApparentType¬getUnionType²isTypeAssignableTo³createAnonymousType¯createSignature¬createSymbol¯createIndexInfoªgetAnyType­getStringType­getNumberType±createPromiseType¯createArrayType¹getElementTypeOfArrayType®getBooleanType¬getFalseType«getTrueType«getVoidType°getUndefinedType«getNullType¯getESSymbolType¬getNeverType¯getOptionalType®getPromiseType²getPromiseLikeType´getAsyncIterableType²isSymbolAccessible«isArrayType«isTupleType¯isArrayLikeTypeÙ#isTypeInvalidDueToUnionDiscriminantºgetExactOptionalProperties¿getAllPossiblePropertiesOfTypesÙ(getSuggestedSymbolForNonexistentPropertyÙ#getSuggestionForNonexistentPropertyÙ,getSuggestedSymbolForNonexistentJSXAttributeÙ&getSuggestedSymbolForNonexistentSymbolÙ!getSuggestionForNonexistentSymbolÙ&getSuggestedSymbolForNonexistentModuleÙ!getSuggestionForNonexistentExportÙ+getSuggestedSymbolForNonexistentClassMember·getBaseConstraintOfType»getDefaultFromTypeParameter«resolveName¯getJsxNamespaceµgetJsxFragmentFactory¸getAccessibleSymbolChain»getTypePredicateOfSignature¹resolveExternalModuleName»resolveExternalModuleSymbol°tryGetThisTypeAt¹getTypeArgumentConstraint¸getSuggestionDiagnostics¸runWithCancellationTokenÙ3getLocalTypeParametersOfClassOrInterfaceOrTypeAlias´isDeclarationVisible´isPropertyAccessible»getTypeOnlyAliasDeclaration¿getMemberOverrideModifierStatusÙ!isTypeParameterPossiblyReferenced²getConstEnumRelate´clearConstEnumRelateµdeleteConstEnumRelateÙ$getTypeArgumentsForResolvedSignatureµgetCheckedSourceFilesÙ"collectHaveTsNoCheckFilesForLinter·clearQualifiedNameCache®isStaticRecord²isStaticSourceFileÔ  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  ÃÃÚCmimport { sensor } from '@kit.SensorServiceKit';
+import { geoLocationManager } from '@kit.LocationKit';
+import { wifiManager } from '@kit.ConnectivityKit';
+import { hilog } from '@kit.PerformanceAnalysisKit';
+import { fusedAzimuth } from '../common/Utils';
+
+const TAG = 'RoomMarker';
+
+export interface LocView {
+  lat: number; lng: number; alt: number;
+  acc?: number; spd?: number; brg?: number; timeMs: number;
+}
+export interface PressureView { hpa: number; alt: number; }
+export interface MagView { x: number; y: number; z: number; mag: number; az?: number; }
+export interface WifiView { ssid: string; bssid: string; rssi: number; freq: number; }
+export interface SensorInfoView { id: number; label: string; name: string; vendor: string; }
+export interface Vec3View { x: number; y: number; z: number; m: number; }
+export interface QuatView { x: number; y: number; z: number; w: number; }
+export interface OrientView { alpha: number; beta: number; gamma: number; }
+
+/** å®æ—¶æ•°æ®ç›‘å¬å™¨ï¼ˆé¡µé¢ä¿ç•™ç”¨äºæ°”å‹é”šç‚¹ç­‰æœ¬åœ°é€»è¾‘ï¼Œæ˜¾ç¤ºåˆ·æ–°ç”±å¿ƒè·³é‡å»ºé©±åŠ¨ï¼‰ */
+export interface LiveListener {
+  onLoc?: (v: LocView) => void;
+  onPressure?: (v: PressureView) => void;
+  onMag?: (v: MagView) => void;
+  onWifi?: (list: WifiView[]) => void;
+  onFlags?: (hasPressure: boolean, hasMag: boolean) => void;
+  onSensorList?: (list: SensorInfoView[]) => void;
+  onTick?: (ms: number) => void;
+}
+
+function hasSensor(t: sensor.SensorId): boolean {
+  try {
+    sensor.getSingleSensorSync(t);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+function vec3(x: number, y: number, z: number): Vec3View {
+  return { x: x, y: y, z: z, m: Math.sqrt(x * x + y * y + z * z) } as Vec3View;
+}
+
+/**
+ * å®æ—¶ä¼ æ„Ÿå™¨æµï¼š
+ * æ•°æ®æºä¸º 500ms å®šæ—¶å™¨ + sensor.once è½®è¯¢ï¼ˆçœŸæœºéªŒè¯å¯é ï¼›æŒç»­è®¢é˜…åœ¨æœ¬ç¯å¢ƒæ— æ•ˆï¼‰ï¼›
+ * å…¨éƒ¨å†™å…¥ AppStorageï¼Œé¡µé¢é€šè¿‡å¿ƒè·³é‡å»ºæœºåˆ¶è¯»å–ï¼ˆè§ LiveSensors é¡µï¼‰ã€‚
+ */
+export class LiveStream {
+  private static inst: LiveStream | null = null;
+  static get(): LiveStream {
+    if (!LiveStream.inst) {
+      LiveStream.inst = new LiveStream();
+    }
+    return LiveStream.inst;
+  }
+
+  private started = false;
+  private listener: LiveListener | null = null;
+  private sensorTimer = -1;
+  private locTimer = -1;
+  private wifiTimer = -1;
+  private wifiReadTimer = -1;
+  private accel: number[] = [0, 0, 0];
+  private mag: number[] = [0, 0, 0];
+  private hasAccelData = false;
+  private hasMagData = false;
+
+  // è®¾å¤‡ä¼ æ„Ÿå™¨å¯ç”¨æ ‡å¿—ï¼ˆstart æ—¶æ¢æµ‹ä¸€æ¬¡ï¼ŒonceRead æŒ‰éœ€è½®è¯¢ï¼‰
+  private hasLinearAccel = false;
+  private hasGravity = false;
+  private hasGyro = false;
+  private hasRotVec = false;
+  private hasOrient = false;
+  private hasLight = false;
+  private hasProx = false;
+  private hasHumidity = false;
+  private hasAmbTemp = false;
+  private hasHall = false;
+  private hasPedometer = false;
+
+  /** é¡µé¢è¿›å…¥æ—¶æ³¨å†Œã€ç¦»å¼€æ—¶æ³¨é”€ */
+  setListener(l: LiveListener | null): void {
+    this.listener = l;
+  }
+
+  private handlePressure = (d: sensor.BarometerResponse): void => {
+    const p = d.pressure;
+    const alt = 44330 * (1 - Math.pow(p / 1013.25, 0.1903));
+    const v: PressureView = { hpa: p, alt: alt } as PressureView;
+    this.push('rm_live_pressure', v);
+    this.setVal('rm_live_pressure_ms', Date.now());
+    if (this.listener && this.listener.onPressure) {
+      this.listener.onPressure(v);
+    }
+  };
+  private handleMag = (d: sensor.MagneticFieldResponse): void => {
+    this.mag = [d.x, d.y, d.z];
+    this.hasMagData = true;
+    this.publishMag();
+  };
+  private handleAccel = (d: sensor.AccelerometerResponse): void => {
+    this.accel = [d.x, d.y, d.z];
+    this.hasAccelData = true;
+    this.publishMag();
+    this.push('rm_live_accel', vec3(d.x, d.y, d.z));
+  };
+  private handleLinear = (d: sensor.LinearAccelerometerResponse): void => {
+    this.push('rm_live_linear', vec3(d.x, d.y, d.z));
+  };
+  private handleGravity = (d: sensor.GravityResponse): void => {
+    this.push('rm_live_gravity', vec3(d.x, d.y, d.z));
+  };
+  private handleGyro = (d: sensor.GyroscopeResponse): void => {
+    this.push('rm_live_gyro', vec3(d.x, d.y, d.z));
+  };
+  private handleRotVec = (d: sensor.RotationVectorResponse): void => {
+    this.push('rm_live_rotvec', { x: d.x, y: d.y, z: d.z, w: d.w } as QuatView);
+  };
+  private handleOrient = (d: sensor.OrientationResponse): void => {
+    this.push('rm_live_orient',
+      { alpha: d.alpha, beta: d.beta, gamma: d.gamma } as OrientView);
+  };
+  private handleLight = (d: sensor.LightResponse): void => {
+    this.push('rm_live_light', d.intensity);
+  };
+  private handleProx = (d: sensor.ProximityResponse): void => {
+    this.push('rm_live_proximity', d.distance);
+  };
+  private handleHumidity = (d: sensor.HumidityResponse): void => {
+    this.push('rm_live_humidity', d.humidity);
+  };
+  private handleAmbTemp = (d: sensor.AmbientTemperatureResponse): void => {
+    this.push('rm_live_ambtemp', d.temperature);
+  };
+  private handleHall = (d: sensor.HallResponse): void => {
+    this.push('rm_live_hall', d.status);
+  };
+  private handlePedo = (d: sensor.PedometerResponse): void => {
+    this.push('rm_live_pedometer', d.steps);
+  };
+  private handleLoc = (loc: geoLocationManager.Location): void => {
+    const v: LocView = {
+      lat: loc.latitude, lng: loc.longitude, alt: loc.altitude,
+      acc: loc.accuracy, spd: loc.speed, brg: loc.direction,
+      timeMs: loc.timeStamp
+    };
+    this.push('rm_live_location', v);
+    if (this.listener && this.listener.onLoc) {
+      this.listener.onLoc(v);
+    }
+  };
+
+  /** å†™ AppStorageï¼ˆsetOrCreate ä¸ WiFi è·¯å¾„åŒæ¬¾ï¼‰+ æ›´æ–°å…¨å±€æ—¶é—´æˆ³ */
+  private push(key: string, v: Object): void {
+    try {
+      AppStorage.setOrCreate(key, v);
+    } catch (e) {
+    }
+    const now = Date.now();
+    try {
+      AppStorage.setOrCreate('rm_live_tick_ms', now);
+    } catch (e) {
+    }
+    if (this.listener && this.listener.onTick) {
+      this.listener.onTick(now);
+    }
+  }
+
+  private setVal(key: string, v: Object): void {
+    try {
+      AppStorage.setOrCreate(key, v);
+    } catch (e) {
+    }
+  }
+
+  private publishMag(): void {
+    const x = this.mag[0], y = this.mag[1], z = this.mag[2];
+    const mag = Math.sqrt(x * x + y * y + z * z);
+    let az: number | undefined = undefined;
+    if (this.hasAccelData && this.hasMagData) {
+      az = fusedAzimuth(this.accel, this.mag);
+    }
+    const v: MagView = { x: x, y: y, z: z, mag: mag, az: az };
+    this.push('rm_live_magnetic', v);
+    this.setVal('rm_live_mag_ms', Date.now());
+    if (this.listener && this.listener.onMag) {
+      this.listener.onMag(v);
+    }
+  }
+
+  private labelFor(id: number): string {
+    if (id === sensor.SensorId.ACCELEROMETER) {
+      return 'åŠ é€Ÿåº¦è®¡';
+    }
+    if (id === sensor.SensorId.ACCELEROMETER_UNCALIBRATED) {
+      return 'åŠ é€Ÿåº¦è®¡Â·æœªæ ¡å‡†';
+    }
+    if (id === sensor.SensorId.LINEAR_ACCELEROMETER) {
+      return 'çº¿æ€§åŠ é€Ÿåº¦';
+    }
+    if (id === sensor.SensorId.GRAVITY) {
+      return 'é‡åŠ›';
+    }
+    if (id === sensor.SensorId.GYROSCOPE) {
+      return 'é™€èºä»ª';
+    }
+    if (id === sensor.SensorId.GYROSCOPE_UNCALIBRATED) {
+      return 'é™€èºä»ªÂ·æœªæ ¡å‡†';
+    }
+    if (id === sensor.SensorId.MAGNETIC_FIELD) {
+      return 'ç£åŠ›è®¡';
+    }
+    if (id === sensor.SensorId.MAGNETIC_FIELD_UNCALIBRATED) {
+      return 'ç£åŠ›è®¡Â·æœªæ ¡å‡†';
+    }
+    if (id === sensor.SensorId.BAROMETER) {
+      return 'æ°”å‹è®¡';
+    }
+    if (id === sensor.SensorId.ROTATION_VECTOR) {
+      return 'æ—‹è½¬çŸ¢é‡';
+    }
+    if (id === sensor.SensorId.ORIENTATION) {
+      return 'æ–¹å‘';
+    }
+    if (id === sensor.SensorId.AMBIENT_LIGHT) {
+      return 'ç¯å¢ƒå…‰';
+    }
+    if (id === sensor.SensorId.PROXIMITY) {
+      return 'æ¥è¿‘';
+    }
+    if (id === sensor.SensorId.HUMIDITY) {
+      return 'æ¹¿åº¦';
+    }
+    if (id === sensor.SensorId.AMBIENT_TEMPERATURE) {
+      return 'ç¯å¢ƒæ¸©åº¦';
+    }
+    if (id === sensor.SensorId.HALL) {
+      return 'éœå°”';
+    }
+    if (id === sensor.SensorId.PEDOMETER) {
+      return 'è®¡æ­¥å™¨';
+    }
+    if (id === sensor.SensorId.PEDOMETER_DETECTION) {
+      return 'è®¡æ­¥æ£€æµ‹';
+    }
+    if (id === sensor.SensorId.HEART_RATE) {
+      return 'å¿ƒç‡';
+    }
+    if (id === sensor.SensorId.SIGNIFICANT_MOTION) {
+      return 'å¤§å¹…è¿åŠ¨';
+    }
+    return `ä¼ æ„Ÿå™¨ #${id}`;
+  }
+
+  /** æšä¸¾è®¾å¤‡å…¨éƒ¨ä¼ æ„Ÿå™¨ï¼ˆä¾›ã€Œè®¾å¤‡ä¼ æ„Ÿå™¨æ¸…å•ã€å¡ç‰‡å±•ç¤ºï¼‰ */
+  private scanSensorList(): void {
+    let out: SensorInfoView[] = [];
+    try {
+      const list = sensor.getSensorListSync();
+      out = list.map((s: sensor.Sensor) => {
+        return {
+          id: s.sensorId,
+          label: this.labelFor(s.sensorId),
+          name: s.sensorName,
+          vendor: s.vendorName
+        } as SensorInfoView;
+      });
+    } catch (e) {
+    }
+    AppStorage.setOrCreate('rm_sensor_list', out);
+    if (this.listener && this.listener.onSensorList) {
+      this.listener.onSensorList(out);
+    }
+  }
+
+  /**
+   * å®šæ—¶è½®è¯¢ä¸€æ¬¡ä¼ æ„Ÿå™¨è¯»æ•°ï¼ˆsensor.onceï¼ŒæŒ‰è®¾å¤‡èƒ½åŠ›æŒ‰éœ€è°ƒç”¨ï¼‰ã€‚
+   * å¼€å¤´æ— æ¡ä»¶åˆ·æ–°æ—¶é—´æˆ³å¿ƒè·³ï¼šé¡µé¢ @State heartbeat ä¾èµ–å…¶èŠ‚å¥é‡å»ºå¡ç‰‡ï¼ˆè§ LiveSensors é¡µï¼‰ã€‚
+   */
+  private onceRead(): void {
+    const now = Date.now();
+    try {
+      AppStorage.setOrCreate('rm_live_tick_ms', now);
+    } catch (e) {
+    }
+    if (this.listener && this.listener.onTick) {
+      this.listener.onTick(now);
+    }
+    try {
+      sensor.once(sensor.SensorId.BAROMETER, this.handlePressure);
+    } catch (e) {
+    }
+    try {
+      sensor.once(sensor.SensorId.MAGNETIC_FIELD, this.handleMag);
+    } catch (e) {
+    }
+    try {
+      sensor.once(sensor.SensorId.ACCELEROMETER, this.handleAccel);
+    } catch (e) {
+    }
+    if (this.hasLinearAccel) {
+      try {
+        sensor.once(sensor.SensorId.LINEAR_ACCELEROMETER, this.handleLinear);
+      } catch (e) {
+      }
+    }
+    if (this.hasGravity) {
+      try {
+        sensor.once(sensor.SensorId.GRAVITY, this.handleGravity);
+      } catch (e) {
+      }
+    }
+    if (this.hasGyro) {
+      try {
+        sensor.once(sensor.SensorId.GYROSCOPE, this.handleGyro);
+      } catch (e) {
+      }
+    }
+    if (this.hasRotVec) {
+      try {
+        sensor.once(sensor.SensorId.ROTATION_VECTOR, this.handleRotVec);
+      } catch (e) {
+      }
+    }
+    if (this.hasOrient) {
+      try {
+        sensor.once(sensor.SensorId.ORIENTATION, this.handleOrient);
+      } catch (e) {
+      }
+    }
+    if (this.hasLight) {
+      try {
+        sensor.once(sensor.SensorId.AMBIENT_LIGHT, this.handleLight);
+      } catch (e) {
+      }
+    }
+    if (this.hasProx) {
+      try {
+        sensor.once(sensor.SensorId.PROXIMITY, this.handleProx);
+      } catch (e) {
+      }
+    }
+    if (this.hasHumidity) {
+      try {
+        sensor.once(sensor.SensorId.HUMIDITY, this.handleHumidity);
+      } catch (e) {
+      }
+    }
+    if (this.hasAmbTemp) {
+      try {
+        sensor.once(sensor.SensorId.AMBIENT_TEMPERATURE, this.handleAmbTemp);
+      } catch (e) {
+      }
+    }
+    if (this.hasHall) {
+      try {
+        sensor.once(sensor.SensorId.HALL, this.handleHall);
+      } catch (e) {
+      }
+    }
+    if (this.hasPedometer) {
+      try {
+        sensor.once(sensor.SensorId.PEDOMETER, this.handlePedo);
+      } catch (e) {
+      }
+    }
+  }
+
+  /** å®šä½å…œåº•è½®è¯¢ï¼šé™¤æŒç»­è®¢é˜…å¤–ï¼Œæ¯ 5 ç§’ä¸»åŠ¨è¯·æ±‚ä¸€æ¬¡å•æ¬¡å®šä½ */
+  private pollLoc(): void {
+    try {
+      const oneShot: geoLocationManager.SingleLocationRequest = {
+        locatingPriority: geoLocationManager.LocatingPriority.PRIORITY_ACCURACY,
+        locatingTimeoutMs: 4000
+      };
+      geoLocationManager.getCurrentLocation(oneShot).then((l: geoLocationManager.Location) => {
+        this.handleLoc(l);
+      }).catch(() => {
+      });
+    } catch (e) {
+    }
+  }
+
+  start(): void {
+    if (this.started) {
+      return;
+    }
+    this.started = true;
+    AppStorage.setOrCreate('rm_live_tick_ms', 0);
+    AppStorage.setOrCreate('rm_live_pressure_ms', 0);
+    AppStorage.setOrCreate('rm_live_mag_ms', 0);
+    this.scanSensorList();
+    const hp = hasSensor(sensor.SensorId.BAROMETER);
+    const hm = hasSensor(sensor.SensorId.MAGNETIC_FIELD);
+    this.hasLinearAccel = hasSensor(sensor.SensorId.LINEAR_ACCELEROMETER);
+    this.hasGravity = hasSensor(sensor.SensorId.GRAVITY);
+    this.hasGyro = hasSensor(sensor.SensorId.GYROSCOPE);
+    this.hasRotVec = hasSensor(sensor.SensorId.ROTATION_VECTOR);
+    this.hasOrient = hasSensor(sensor.SensorId.ORIENTATION);
+    this.hasLight = hasSensor(sensor.SensorId.AMBIENT_LIGHT);
+    this.hasProx = hasSensor(sensor.SensorId.PROXIMITY);
+    this.hasHumidity = hasSensor(sensor.SensorId.HUMIDITY);
+    this.hasAmbTemp = hasSensor(sensor.SensorId.AMBIENT_TEMPERATURE);
+    this.hasHall = hasSensor(sensor.SensorId.HALL);
+    this.hasPedometer = hasSensor(sensor.SensorId.PEDOMETER);
+    AppStorage.setOrCreate('rm_live_has_pressure', hp);
+    AppStorage.setOrCreate('rm_live_has_magnetic', hm);
+    AppStorage.setOrCreate('rm_live_has_accel', hasSensor(sensor.SensorId.ACCELEROMETER));
+    AppStorage.setOrCreate('rm_live_has_linear', this.hasLinearAccel);
+    AppStorage.setOrCreate('rm_live_has_gravity', this.hasGravity);
+    AppStorage.setOrCreate('rm_live_has_gyro', this.hasGyro);
+    AppStorage.setOrCreate('rm_live_has_rotvec', this.hasRotVec);
+    AppStorage.setOrCreate('rm_live_has_orient', this.hasOrient);
+    AppStorage.setOrCreate('rm_live_has_light', this.hasLight);
+    AppStorage.setOrCreate('rm_live_has_proximity', this.hasProx);
+    AppStorage.setOrCreate('rm_live_has_humidity', this.hasHumidity);
+    AppStorage.setOrCreate('rm_live_has_ambtemp', this.hasAmbTemp);
+    AppStorage.setOrCreate('rm_live_has_hall', this.hasHall);
+    AppStorage.setOrCreate('rm_live_has_pedometer', this.hasPedometer);
+    if (this.listener && this.listener.onFlags) {
+      this.listener.onFlags(hp, hm);
+    }
+    AppStorage.setOrCreate('rm_live_location', null);
+    AppStorage.setOrCreate('rm_live_pressure', null);
+    AppStorage.setOrCreate('rm_live_magnetic', null);
+    AppStorage.setOrCreate('rm_live_wifi', [] as WifiView[]);
+    AppStorage.setOrCreate('rm_live_wifi_scan_ms', 0);
+    AppStorage.setOrCreate('rm_live_accel', null);
+    AppStorage.setOrCreate('rm_live_linear', null);
+    AppStorage.setOrCreate('rm_live_gravity', null);
+    AppStorage.setOrCreate('rm_live_gyro', null);
+    AppStorage.setOrCreate('rm_live_rotvec', null);
+    AppStorage.setOrCreate('rm_live_orient', null);
+    AppStorage.setOrCreate('rm_live_light', -1);
+    AppStorage.setOrCreate('rm_live_proximity', -1);
+    AppStorage.setOrCreate('rm_live_humidity', -1);
+    AppStorage.setOrCreate('rm_live_ambtemp', -999);
+    AppStorage.setOrCreate('rm_live_hall', -1);
+    AppStorage.setOrCreate('rm_live_pedometer', -1);
+
+    // ä¼ æ„Ÿå™¨ï¼š250ms å®šæ—¶å™¨ once è½®è¯¢ï¼ˆçœŸæœºæŒç»­è®¢é˜…ä¸å¯é ï¼Œå®šæ—¶å™¨æ¨¡å¼ä¸ WiFi ä¸€è‡´ã€å·²éªŒè¯ï¼›
+    // once å®Œæ•´å‘¨æœŸçº¦ 200msï¼Œé—´éš”ä½äº 250ms ä¼šé€ æˆè®¢é˜…é‡å ï¼‰
+    this.onceRead();
+    this.sensorTimer = setInterval(() => {
+      this.onceRead();
+    }, 250);
+
+    // å®šä½ï¼šæŒç»­è®¢é˜… + 5 ç§’è½®è¯¢å…œåº•
+    const req: geoLocationManager.ContinuousLocationRequest = {
+      interval: 1,
+      locationScenario: geoLocationManager.UserActivityScenario.NAVIGATION
+    };
+    try {
+      geoLocationManager.on('locationChange', req, this.handleLoc);
+    } catch (e) {
+      hilog.error(0x0000, TAG, 'å®šä½è®¢é˜…å¤±è´¥: %{public}s', JSON.stringify(e));
+    }
+    this.pollLoc();
+    this.locTimer = setInterval(() => {
+      this.pollLoc();
+    }, 5000);
+
+    this.doWifiScan();
+    this.wifiTimer = setInterval(() => {
+      this.doWifiScan();
+    }, 30000);
+  }
+
+  stop(): void {
+    if (!this.started) {
+      return;
+    }
+    this.started = false;
+    if (this.sensorTimer >= 0) {
+      clearInterval(this.sensorTimer);
+      this.sensorTimer = -1;
+    }
+    if (this.locTimer >= 0) {
+      clearInterval(this.locTimer);
+      this.locTimer = -1;
+    }
+    if (this.wifiTimer >= 0) {
+      clearInterval(this.wifiTimer);
+      this.wifiTimer = -1;
+    }
+    if (this.wifiReadTimer >= 0) {
+      clearTimeout(this.wifiReadTimer);
+      this.wifiReadTimer = -1;
+    }
+    try {
+      geoLocationManager.off('locationChange', this.handleLoc);
+    } catch (e) {
+    }
+  }
+
+  private doWifiScan(): void {
+    try {
+      wifiManager.scan();
+    } catch (e) {
+    }
+    // æ‰«æç»“æœå¼‚æ­¥è¿”å›ï¼Œ1.5s åè¯»å–ä¸€æ¬¡æœ€æ–°åˆ—è¡¨ï¼ˆå—ç³»ç»ŸèŠ‚æµé™åˆ¶ï¼‰
+    if (this.wifiReadTimer >= 0) {
+      clearTimeout(this.wifiReadTimer);
+    }
+    this.wifiReadTimer = setTimeout(() => {
+      this.readWifi();
+    }, 1500);
+  }
+
+  private readWifi(): void {
+    try {
+      const list = wifiManager.getScanInfoList();
+      const out: WifiView[] = list.map((i: wifiManager.WifiScanInfo) => {
+        return { ssid: i.ssid, bssid: i.bssid, rssi: i.rssi, freq: i.frequency } as WifiView;
+      });
+      out.sort((a: WifiView, b: WifiView) => b.rssi - a.rssi);
+      AppStorage.setOrCreate('rm_live_wifi', out);
+      AppStorage.setOrCreate('rm_live_wifi_scan_ms', Date.now());
+      if (this.listener && this.listener.onWifi) {
+        this.listener.onWifi(out);
+      }
+    } catch (e) {
+    }
+  }
+}
+ÀÔrE•¬@ohos.sensor¸@ohos.geoLocationManager±@ohos.wifiManager«@ohos.hilog¯../common/UtilsÔrF—ªassertions¨external¢id¤meta±moduleSideEffectsªresolvedByµsyntheticNamedExportsAÃÙX hvigor_ignore_D:_DevEco_DevEco Studio_sdk_default_openharmony_ets_api_@ohos.sensor.d.tsAÃªoh-resolveÂFAÃÙd hvigor_ignore_D:_DevEco_DevEco Studio_sdk_default_openharmony_ets_api_@ohos.geoLocationManager.d.tsAÃªoh-resolveÂFAÃÙ] hvigor_ignore_D:_DevEco_DevEco Studio_sdk_default_openharmony_ets_api_@ohos.wifiManager.d.tsAÃªoh-resolveÂFAÃÙW hvigor_ignore_D:_DevEco_DevEco Studio_sdk_default_openharmony_ets_api_@ohos.hilog.d.tsAÃªoh-resolveÂFAÂÙVD:\CityUproject\CampusNavigation\RoomMarkerHarmony\entry\src\main\ets\common\Utils.etsAÃªoh-resolveÂ“ÔrG–§version¤fileªsourceRoot§sources¥names¨mappings­LiveStream.js ‘®LiveStream.etsÜü–”    ”  	”  ”  ”!  .”"  /–”   ” 	” ” #”9 5”: 6–”   ” 	” ” ”+ 2”, 3–”   ” 	” ” ” 3”  4˜”   ” ”	 	” ” ” ”. .”/ /–”   ” ”	 	” ” ” •”   ”	 	” ” ” %’”  ”  ˜” !” !
+” !”" !”# !”$ ! ”% !!”& !"”” "” "” "” "‘” #”” #” #” #” #”” $” $” $” $‘” %’”  & ” &™”  ( ”	 (	” (” (” (” (” ("” ($” (-Ü #” )” )	” )” )” )” )” )” )” )” )” )” )” )” )” )”  )”" ) ”& )$”' )%”+ ))”, )*”- )+”0 ).”1 )/”4 )2”5 )3”8 )6”9 )7”< ):”= );”Ì@ )>”ÌA )?”ÌB )Ì@”ÌD )ÌN”ÌE )ÌO’”  * ” *‘”  , ‘” 0””  1 ” 1” 1” 1‘” 1 •” :
+” :” :” :” :•” ;
+” ;” ;*” ;.” ;/–” <
+” <” <” <” <” <–” =
+” =” =” =” =” =–” >
+” >” >” >” >” >–” ?
+” ?” ?” ?” ?”  ?›” Ì@
+” Ì@” Ì@” Ì@” Ì@” Ì@ ” Ì@!” Ì@#” Ì@$” Ì@%” Ì@&›” ÌA
+” ÌA” ÌA” ÌA” ÌA” ÌA” ÌA” ÌA!” ÌA"” ÌA#” ÌA$•” ÌB
+” ÌB” ÌB”! ÌB”" ÌB•” ÌC
+” ÌC” ÌC” ÌC”  ÌC’” ÌE”/ ÌE)•” ÌF
+” ÌF” ÌF”# ÌF ”$ ÌF!•” ÌG
+” ÌG” ÌG” ÌG”  ÌG•” ÌH
+” ÌH” ÌH” ÌH” ÌH•” ÌI
+” ÌI” ÌI” ÌI” ÌI•” ÌJ
+” ÌJ” ÌJ” ÌJ” ÌJ•” ÌK
+” ÌK” ÌK” ÌK” ÌK•” ÌL
+” ÌL” ÌL” ÌL” ÌL•” ÌM
+” ÌM” ÌM”  ÌM”! ÌM•” ÌN
+” ÌN” ÌN” ÌN”  ÌN•” ÌO
+” ÌO” ÌO” ÌO” ÌO•” ÌP
+” ÌP” ÌP”! ÌP”" ÌP—” ÌW
+” ÌW” ÌW” ÌW”  ÌW7”" ÌW?”$ ÌWÌA˜” ÌX” ÌX
+” ÌX” ÌX” ÌX” ÌX”  ÌX”! ÌXÜ ” ÌY” ÌY
+” ÌY” ÌY” ÌY”  ÌY”! ÌY”" ÌY”% ÌY”) ÌY!”* ÌY"”- ÌY%”. ÌY&”/ ÌY'”2 ÌY*”9 ÌY1”; ÌY3”ÌA ÌY9”ÌB ÌY:”ÌC ÌY;”ÌD ÌY<” ÌZ” ÌZ
+” ÌZ” ÌZ” ÌZ” ÌZ!” ÌZ#” ÌZ$”  ÌZ&”# ÌZ)”% ÌZ+”( ÌZ.”* ÌZÌ@”+ ÌZÌAš” Ì[” Ì[” Ì[	” Ì[” Ì[”( Ì[ ”* Ì["”+ Ì[#”, Ì[$”- Ì[%” Ì\” Ì\” Ì\	” Ì\” Ì\”- Ì\%”/ Ì\'”3 Ì\+”4 Ì\,”7 Ì\/”9 Ì\1”: Ì\2”; Ì\3œ” Ì]” Ì]” Ì]” Ì]” Ì]”! Ì]”% Ì]”& Ì]”. Ì]&”/ Ì]'”9 Ì]1”; Ì]3š” Ì^” Ì^
+” Ì^” Ì^” Ì^”( Ì^”) Ì^”* Ì^ ”+ Ì^!”, Ì^"‘” Ì_“” Ì`”	 Ì`”
+ Ì`—” Ìa
+” Ìa” Ìa” Ìa” Ìa6” Ìa>” ÌaÌ@Ü ” Ìb” Ìb” Ìb	” Ìb” Ìb” Ìb” Ìb” Ìb” Ìb” Ìb” Ìb” Ìb”  Ìb”" Ìb”# Ìb”$ Ìb”% Ìb”& Ìb”' Ìb—” Ìc” Ìc” Ìc	” Ìc” Ìc”" Ìc”# Ìc–” Ìd” Ìd” Ìd	” Ìd” Ìd” Ìd“” Ìe”	 Ìe”
+ Ìe—” Ìf
+” Ìf” Ìf” Ìf” Ìf8” ÌfÌ@”! ÌfÌBÜ ” Ìg” Ìg” Ìg	” Ìg” Ìg” Ìg” Ìg” Ìg” Ìg” Ìg”  Ìg”! Ìg”" Ìg”$ Ìg”% Ìg”& Ìg”' Ìg”( Ìg ”) Ìg!—” Ìh” Ìh” Ìh	” Ìh”  Ìh”$ Ìh”% Ìh–” Ìi” Ìi” Ìi	” Ìi” Ìi” ÌiÜ ” Ìj” Ìj” Ìj	” Ìj” Ìj”% Ìj”' Ìj”+ Ìj#”, Ìj$”- Ìj%”. Ìj&”/ Ìj'”1 Ìj)”2 Ìj*”3 Ìj+”4 Ìj,”6 Ìj.”7 Ìj/”8 Ìj0”9 Ìj1”: Ìj2”; Ìj3”< Ìj4“” Ìk”	 Ìk”
+ Ìk—” Ìl
+” Ìl” Ìl” Ìl” Ìl?”  ÌlÌG”" ÌlÌIÜ ” Ìm” Ìm” Ìm	” Ìm” Ìm”& Ìm”( Ìm ”, Ìm$”- Ìm%”. Ìm&”/ Ìm'”0 Ìm(”2 Ìm*”3 Ìm+”4 Ìm,”5 Ìm-”7 Ìm/”8 Ìm0”9 Ìm1”: Ìm2”; Ìm3”< Ìm4”= Ìm5“” Ìn”	 Ìn”
+ Ìn—” Ìo
+” Ìo” Ìo” Ìo” Ìo4”! Ìo<”# Ìo>Ü ” Ìp” Ìp” Ìp	” Ìp” Ìp”' Ìp”) Ìp!”- Ìp%”. Ìp&”/ Ìp'”0 Ìp(”1 Ìp)”3 Ìp+”4 Ìp,”5 Ìp-”6 Ìp.”8 Ìp0”9 Ìp1”: Ìp2”; Ìp3”< Ìp4”= Ìp5”> Ìp6“” Ìq”	 Ìq”
+ Ìq—” Ìr
+” Ìr” Ìr” Ìr” Ìr3” Ìr;”  Ìr=Ü ” Ìs” Ìs” Ìs	” Ìs” Ìs”$ Ìs”& Ìs”* Ìs"”+ Ìs#”, Ìs$”- Ìs%”. Ìs&”0 Ìs(”1 Ìs)”2 Ìs*”3 Ìs+”5 Ìs-”6 Ìs.”7 Ìs/”8 Ìs0”9 Ìs1”: Ìs2”; Ìs3“” Ìt”	 Ìt”
+ Ìt—” Ìu
+” Ìu” Ìu” Ìu” Ìu:”  ÌuÌB”" ÌuÌDÜ "” Ìv” Ìv” Ìv	” Ìv” Ìv”& Ìv”( Ìv ”* Ìv"”+ Ìv#”- Ìv%”. Ìv&”/ Ìv'”0 Ìv(”2 Ìv*”3 Ìv+”5 Ìv-”6 Ìv.”7 Ìv/”8 Ìv0”: Ìv2”; Ìv3”= Ìv5”> Ìv6”? Ìv7”Ì@ Ìv8”ÌB Ìv:”ÌC Ìv;”ÌE Ìv=”ÌF Ìv>”ÌG Ìv?”ÌH ÌvÌ@”ÌJ ÌvÌN”ÌK ÌvÌO”ÌL ÌvÌP“” Ìw”	 Ìw”
+ Ìw—” Ìx
+” Ìx” Ìx” Ìx” Ìx7”  Ìx?”" ÌxÌAÜ ” Ìy” Ìy” Ìy	” Ìy” Ìy”& Ìy”( Ìz”* Ìz”/ Ìz”1 Ìz”2 Ìz”3 Ìz”8 Ìz”: Ìz”> Ìz”Ì@ Ìz”ÌA Ìz”ÌB Ìz ”ÌF Ìz$”ÌH Ìz&”ÌM Ìz+”ÌO Ìz-”ÌP Ìz.”ÌQ Ìz/”ÌV Ìz4”ÌX ÌzÌD”ÌY ÌzÌE”ÌZ ÌzÌF“” Ì{”	 Ì{”
+ Ì{—” Ì|
+” Ì|” Ì|” Ì|” Ì|0” Ì|8”! Ì|:œ” Ì}” Ì}” Ì}	” Ì}” Ì}”% Ì}”' Ì}”( Ì} ”) Ì}!”2 Ì}*”3 Ì}+”4 Ì},“” Ì~”	 Ì~”
+ Ì~—” Ì
+” Ì” Ì” Ì” Ì3” Ì;”  Ì=œ” Ì€” Ì€” Ì€	” Ì€” Ì€”) Ì€!”+ Ì€#”, Ì€$”- Ì€%”5 Ì€-”6 Ì€.”7 Ì€/“” Ì”	 Ì”
+ Ì—” Ì‚
+” Ì‚” Ì‚” Ì‚”  Ì‚6”" Ì‚>”$ Ì‚Ì@œ” Ìƒ” Ìƒ” Ìƒ	” Ìƒ” Ìƒ”( Ìƒ ”* Ìƒ"”+ Ìƒ#”, Ìƒ$”4 Ìƒ,”5 Ìƒ-”6 Ìƒ.“” Ì„”	 Ì„”
+ Ì„—” Ì…
+” Ì…” Ì…” Ì…” Ì…?”! Ì…ÌG”# Ì…ÌIœ” Ì†” Ì†” Ì†	” Ì†” Ì†”' Ì†”) Ì†!”* Ì†"”+ Ì†#”6 Ì†.”7 Ì†/”8 Ì†0“” Ì‡”	 Ì‡”
+ Ì‡—” Ìˆ
+” Ìˆ” Ìˆ” Ìˆ” Ìˆ.” Ìˆ6”  Ìˆ8œ” Ì‰” Ì‰” Ì‰	” Ì‰” Ì‰”$ Ì‰”& Ì‰”' Ì‰”( Ì‰ ”. Ì‰&”/ Ì‰'”0 Ì‰(“” ÌŠ”	 ÌŠ”
+ ÌŠ—” Ì‹
+” Ì‹” Ì‹” Ì‹” Ì‹3” Ì‹;”  Ì‹=œ” ÌŒ” ÌŒ” ÌŒ	” ÌŒ” ÌŒ”) ÌŒ!”+ ÌŒ#”, ÌŒ$”- ÌŒ%”2 ÌŒ*”3 ÌŒ+”4 ÌŒ,“” Ì”	 Ì”
+ Ì—” Ì
+” Ì” Ì” Ì” Ì7” Ì?”! ÌÌA”” Ì” Ì
+” Ì” ÌÜ ” Ì” Ì	” Ì” Ì” Ì”! Ì”# Ì”& Ì”( Ì”+ Ì!”, Ì"”5 Ì+”7 Ì-”: Ì0”< Ì2”? Ì5”Ì@ Ì6”ÌH Ì>Ü ” Ì‘” Ì‘	” Ì‘” Ì‘” Ì‘”! Ì‘”# Ì‘”& Ì‘”( Ì‘”+ Ì‘!”, Ì‘"”1 Ì‘'”3 Ì‘)”6 Ì‘,”8 Ì‘.”; Ì‘1”< Ì‘2”ÌE Ì‘;–” Ì’” Ì’” Ì’” Ì’” Ì’”% Ì’’” Ì“” Ì“š” Ì”” Ì”” Ì”	” Ì”” Ì””( Ì” ”* Ì”"”+ Ì”#”, Ì”$”- Ì”%œ” Ì•” Ì•” Ì•” Ì•” Ì•”! Ì•”% Ì•”& Ì•”. Ì•&”/ Ì•'”4 Ì•,”6 Ì•.š” Ì–” Ì–
+” Ì–” Ì–” Ì–”# Ì–”$ Ì–”% Ì–”& Ì–”' Ì–‘” Ì—“” Ì˜”	 Ì˜”
+ Ì˜’” Í ” Í”” 3”
+ 3” 3	” 3—” 4” 4” 4	” 4” 4” 4” 4™” 5” 5” 5” 5” 5”" 5”, 5&”. 5(”/ 5)‘”	 6–” 7” 7” 7” 7” 7” 7’” 8” 8’” ÌR” ÌR”” ÌS” ÌS” ÌS” ÌS$—” ÌT” ÌT” ÌT	” ÌT” ÌT” ÌT” ÌT’” ÌU” ÌU’” Ìš”9 Ìš7–” Ì›
+” Ì›”	 Ì›” Ì›” Ì›” Ì›%’” Ìœ” Ìœš” Ì” Ì” Ì”" Ì”# Ì”& Ì ”( Ì"”) Ì#”* Ì$”+ Ì%‘”	 Ì”” Ì” Ì” Ì” Ì‘”	 ÌŸ™” Ì ” Ì 
+” Ì ” Ì ” Ì ” Ì ” Ì ” Ì ” Ì ’” Ì¡” Ì¡š” Ì¢” Ì¢” Ì¢”" Ì¢”# Ì¢”4 Ì¢.”6 Ì¢0”9 Ì¢3”: Ì¢4”; Ì¢5‘”	 Ì£”” Ì£” Ì£” Ì£” Ì£‘”	 Ì¤œ” Ì¥” Ì¥” Ì¥” Ì¥” Ì¥” Ì¥”! Ì¥”" Ì¥”* Ì¥&”+ Ì¥'”1 Ì¥-”3 Ì¥/š” Ì¦” Ì¦
+” Ì¦” Ì¦” Ì¦”  Ì¦”! Ì¦”$ Ì¦”% Ì¦”& Ì¦ ‘”	 Ì§’” Ì¨” Ì¨–” Ìª
+”
+ Ìª” Ìª” Ìª” Ìª” Ìª'’” Ì«” Ì«š” Ì¬” Ì¬” Ì¬”" Ì¬”# Ì¬”& Ì¬ ”( Ì¬"”) Ì¬#”* Ì¬$”+ Ì¬%‘”	 Ì­”” Ì­” Ì­” Ì­” Ì­‘”	 Ì®’” Ì¯” Ì¯’” Ì±
+” Ì±Ü ” Ì²” Ì²
+” Ì²” Ì²” Ì²” Ì²” Ì²” Ì²” Ì²” Ì²” Ì²”  Ì²”# Ì²”' Ì²#”( Ì²$”+ Ì²'”, Ì²(”- Ì²)”. Ì²*”0 Ì²,”1 Ì²-”4 Ì²0”8 Ì²4”9 Ì²5”< Ì²8”= Ì²9”> Ì²:”? Ì²;”Ì@ Ì²<Ü ” Ì³” Ì³
+” Ì³” Ì³” Ì³” Ì³” Ì³” Ì³” Ì³”" Ì³”# Ì³”& Ì³"”' Ì³#”* Ì³&”+ Ì³'”. Ì³*”/ Ì³+”2 Ì³.”3 Ì³/”4 Ì³0”5 Ì³1–” Ì´” Ì´” Ì´
+” Ì´!” Ì´*” Ì´+š” Ìµ” Ìµ” Ìµ” Ìµ” Ìµ”! Ìµ”% Ìµ!”& Ìµ"”0 Ìµ,”2 Ìµ.” Ì¶” Ì¶” Ì¶” Ì¶” Ì¶”" Ì¶”# Ì¶”( Ì¶"”* Ì¶$”. Ì¶(”/ Ì¶)”2 Ì¶,”3 Ì¶-”4 Ì¶.‘”	 Ì·Ü ” Ì¸” Ì¸
+” Ì¸” Ì¸” Ì¸” Ì¸” Ì¸” Ì¸” Ì¸” Ì¸ ” Ì¸"” Ì¸#”  Ì¸%”! Ì¸&”# Ì¸(”$ Ì¸)”& Ì¸+”) Ì¸.”+ Ì¸0”. Ì¸3”0 Ì¸5”2 Ì¸7”4 Ì¸9”6 Ì¸;”8 Ì¸=”9 Ì¸>š” Ì¹” Ì¹” Ì¹	” Ì¹” Ì¹”$ Ì¹ ”& Ì¹"”' Ì¹#”( Ì¹$”) Ì¹%” Ìº” Ìº” Ìº	” Ìº” Ìº”$ Ìº ”& Ìº"”* Ìº&”+ Ìº'”. Ìº*”0 Ìº,”1 Ìº-”2 Ìº.œ” Ì»” Ì»” Ì»” Ì»” Ì»” Ì»”! Ì»”" Ì»”* Ì»&”+ Ì»'”0 Ì»,”2 Ì».š” Ì¼” Ì¼
+” Ì¼” Ì¼” Ì¼” Ì¼”  Ì¼”! Ì¼”" Ì¼”# Ì¼‘”	 Ì½’” Ì¾” Ì¾”” ÌÀ
+” ÌÀ” ÌÀ” ÌÀš” ÌÁ” ÌÁ” ÌÁ
+” ÌÁ” ÌÁ” ÌÁ”" ÌÁ”# ÌÁ”0 ÌÁ,”2 ÌÁ.”” ÌÂ” ÌÂ” ÌÂ” ÌÂ‘”	 ÌÃš” ÌÄ” ÌÄ” ÌÄ
+” ÌÄ” ÌÄ” ÌÄ”" ÌÄ”# ÌÄ”= ÌÄ9”? ÌÄ;”” ÌÅ” ÌÅ” ÌÅ” ÌÅ‘”	 ÌÆš” ÌÇ” ÌÇ” ÌÇ
+” ÌÇ” ÌÇ” ÌÇ”" ÌÇ”# ÌÇ”7 ÌÇ3”9 ÌÇ5”” ÌÈ” ÌÈ” ÌÈ” ÌÈ‘”	 ÌÉš” ÌÊ” ÌÊ” ÌÊ
+” ÌÊ” ÌÊ” ÌÊ”" ÌÊ”# ÌÊ”* ÌÊ&”, ÌÊ(”” ÌË” ÌË” ÌË” ÌË‘”	 ÌÌš” ÌÍ” ÌÍ” ÌÍ
+” ÌÍ” ÌÍ” ÌÍ”" ÌÍ”# ÌÍ”, ÌÍ(”. ÌÍ*”” ÌÎ” ÌÎ” ÌÎ” ÌÎ‘”	 ÌÏš” ÌĞ” ÌĞ” ÌĞ
+” ÌĞ” ÌĞ” ÌĞ”" ÌĞ”# ÌĞ”9 ÌĞ5”; ÌĞ7”” ÌÑ” ÌÑ” ÌÑ” ÌÑ‘”	 ÌÒš” ÌÓ” ÌÓ” ÌÓ
+” ÌÓ” ÌÓ” ÌÓ”" ÌÓ”# ÌÓ”1 ÌÓ-”3 ÌÓ/”” ÌÔ” ÌÔ” ÌÔ” ÌÔ‘”	 ÌÕš” ÌÖ” ÌÖ” ÌÖ
+” ÌÖ” ÌÖ” ÌÖ”" ÌÖ”# ÌÖ”> ÌÖ:”Ì@ ÌÖ<”” Ì×” Ì×” Ì×” Ì×‘”	 ÌØš” ÌÙ” ÌÙ” ÌÙ
+” ÌÙ” ÌÙ” ÌÙ”" ÌÙ”# ÌÙ”, ÌÙ(”. ÌÙ*”” ÌÚ” ÌÚ” ÌÚ” ÌÚ‘”	 ÌÛš” ÌÜ” ÌÜ” ÌÜ
+” ÌÜ” ÌÜ” ÌÜ”" ÌÜ”# ÌÜ”2 ÌÜ.”4 ÌÜ0”” Ìİ” Ìİ” Ìİ” Ìİ‘”	 ÌŞš” Ìß” Ìß” Ìß
+” Ìß” Ìß” Ìß”" Ìß”# Ìß”. Ìß*”0 Ìß,”” Ìà” Ìà” Ìà” Ìà‘”	 Ìáš” Ìâ” Ìâ” Ìâ
+” Ìâ” Ìâ” Ìâ”" Ìâ”# Ìâ”0 Ìâ,”2 Ìâ.”” Ìã” Ìã” Ìã” Ìã‘”	 Ìäš” Ìå” Ìå” Ìå
+” Ìå” Ìå” Ìå”" Ìå”# Ìå”, Ìå(”. Ìå*”” Ìæ” Ìæ” Ìæ” Ìæ‘”	 Ìçš” Ìè” Ìè” Ìè
+” Ìè” Ìè” Ìè”" Ìè”# Ìè”+ Ìè'”- Ìè)”” Ìé” Ìé” Ìé” Ìé‘”	 Ìêš” Ìë” Ìë” Ìë
+” Ìë” Ìë” Ìë”" Ìë”# Ìë”6 Ìë2”8 Ìë4”” Ìì” Ìì” Ìì” Ìì‘”	 Ìíš” Ìî” Ìî” Ìî
+” Ìî” Ìî” Ìî”" Ìî”# Ìî”' Ìî#”) Ìî%”” Ìï” Ìï” Ìï” Ìï‘”	 Ìğš” Ìñ” Ìñ” Ìñ
+” Ìñ” Ìñ” Ìñ”" Ìñ”# Ìñ”, Ìñ(”. Ìñ*”” Ìò” Ìò” Ìò” Ìò‘”	 Ìóš” Ìô” Ìô” Ìô
+” Ìô” Ìô” Ìô”" Ìô”# Ìô”6 Ìô2”8 Ìô4”” Ìõ” Ìõ” Ìõ” Ìõ‘”	 Ìöš” Ì÷” Ì÷” Ì÷
+” Ì÷” Ì÷” Ì÷”" Ì÷”# Ì÷”- Ì÷)”/ Ì÷+”” Ìø” Ìø” Ìø” Ìø‘”	 Ìùš” Ìú” Ìú” Ìú
+” Ìú” Ìú” Ìú”" Ìú”# Ìú”5 Ìú1”7 Ìú3”” Ìû” Ìû” Ìû” Ìû‘”	 Ìü–” Ìı” Ìı” Ìı” Ìı” Ìı” Ìı’” Ìş” Ìş’” Í ”$ Í "’” Í
+” Í–” Í” Í” Í” Í ” Í"” Í#’” Í” Í™” Í” Í” Í” Í” Í”  Í”1 Í+”3 Í-”4 Í.›” Í” Í	” Í” Í” Í” Í” Í” Í” Í&” Í(”! Í*’” Í” Í–” Í
+” Í” Í” Í” Í”" Í›” Í
+” Í” Í” Í”  Í”( Í”) Í”* Í ”+ Í!”3 Í)”4 Í*–” Í	
+” Í	” Í	” Í	” Í	”& Í	–” Í
+
+” Í
+” Í
+” Í
+” Í
+”( Í
+’” Í” Í”” Í” Í” Í” Í	‘”	 Í”” Í” Í” Í” Í‘”	 Íš” Í” Í” Í” Í” Í”/ Í+”1 Í-”4 Í0”5 Í1”6 Í2œ” Í” Í” Í” Í” Í” Í”! Í”" Í”* Í&”+ Í'”7 Í3”9 Í5š” Í” Í
+” Í” Í” Í”& Í ”' Í!”* Í$”+ Í%”, Í&‘”	 Í’” Í” Í‘” Í‘” Í’” Í
+” Í™” Í” Í
+” Í” Í” Í” Í” Í” Í” Í’” Í” Íš” Í” Í” Í”" Í”# Í”4 Í.”6 Í0”9 Í3”: Í4”; Í5‘”	 Í”” Í” Í” Í” Í‘”	 Íœ” Í” Í” Í” Í” Í” Í”! Í”" Í”* Í&”+ Í'”1 Í-”3 Í/š” Í ” Í 
+” Í ” Í ” Í ”  Í ”! Í ”$ Í ”% Í ”& Í  ‘”	 Í!’” Í"” Í"Ü ” Í#” Í#” Í#” Í#” Í#” Í#” Í#”' Í#!”( Í#"”1 Í#+”3 Í#-”7 Í#1”8 Í#2”ÌF Í#Ì@”ÌG Í#ÌA”ÌH Í#ÌB‘”	 Í$”” Í$” Í$” Í$” Í$‘”	 Í%’” Í&” Í&Ü ” Í'” Í'” Í'” Í'” Í'” Í'” Í'”' Í'!”( Í'"”6 Í'0”8 Í'2”< Í'6”= Í'7”ÌF Í'Ì@”ÌG Í'ÌA”ÌH Í'ÌB‘”	 Í(”” Í(” Í(” Í(” Í(‘”	 Í)’” Í*” Í*Ü ” Í+” Í+” Í+” Í+” Í+” Í+” Í+”' Í+!”( Í+"”5 Í+/”7 Í+1”; Í+5”< Í+6”ÌG Í+ÌA”ÌH Í+ÌB”ÌI Í+ÌC‘”	 Í,”” Í,” Í,” Í,” Í,‘”	 Í-–” Í.” Í.” Í.” Í.” Í.”! Í.’” Í/” Í/
+Ü ” Í0” Í0” Í0” Í0” Í0”" Í0”# Í0”+ Í0#”, Í0$”Ì@ Í08”ÌB Í0:”ÌF Í0>”ÌG Í0?”ÌS Í0ÌK”ÌT Í0ÌL”ÌU Í0ÌM‘” Í1”” Í1” Í1” Í1” Í1‘” Í2‘”	 Í3–” Í4” Í4” Í4” Í4” Í4” Í4’” Í5” Í5
+Ü ” Í6” Í6” Í6” Í6” Í6”" Í6”# Í6”+ Í6#”, Í6$”3 Í6+”5 Í6-”9 Í61”: Í62”ÌG Í6?”ÌH Í6Ì@”ÌI Í6ÌA‘” Í7”” Í7” Í7” Í7” Í7‘” Í8‘”	 Í9–” Í:” Í:” Í:” Í:” Í:” Í:’” Í;” Í;
+Ü ” Í<” Í<” Í<” Í<” Í<”" Í<”# Í<”+ Í<#”, Í<$”5 Í<-”7 Í</”; Í<3”< Í<4”ÌF Í<>”ÌG Í<?”ÌH Í<Ì@‘” Í=”” Í=” Í=” Í=” Í=‘” Í>‘”	 Í?–” Í@” Í@” Í@” Í@” Í@” Í@’” ÍA” ÍA
+Ü ” ÍB” ÍB” ÍB” ÍB” ÍB”" ÍB”# ÍB”+ ÍB#”, ÍB$”; ÍB3”= ÍB5”ÌA ÍB9”ÌB ÍB:”ÌN ÍBÌF”ÌO ÍBÌG”ÌP ÍBÌH‘” ÍC”” ÍC” ÍC” ÍC” ÍC‘” ÍD‘”	 ÍE–” ÍF” ÍF” ÍF” ÍF” ÍF” ÍF’” ÍG” ÍG
+Ü ” ÍH” ÍH” ÍH” ÍH” ÍH”" ÍH”# ÍH”+ ÍH#”, ÍH$”7 ÍH/”9 ÍH1”= ÍH5”> ÍH6”ÌJ ÍHÌB”ÌK ÍHÌC”ÌL ÍHÌD‘” ÍI”” ÍI” ÍI” ÍI” ÍI‘” ÍJ‘”	 ÍK–” ÍL” ÍL” ÍL” ÍL” ÍL” ÍL’” ÍM” ÍM
+Ü ” ÍN” ÍN” ÍN” ÍN” ÍN”" ÍN”# ÍN”+ ÍN#”, ÍN$”9 ÍN1”; ÍN3”? ÍN7”Ì@ ÍN8”ÌK ÍNÌC”ÌL ÍNÌD”ÌM ÍNÌE‘” ÍO”” ÍO” ÍO” ÍO” ÍO‘” ÍP‘”	 ÍQ–” ÍR” ÍR” ÍR” ÍR” ÍR” ÍR’” ÍS” ÍS
+Ü ” ÍT” ÍT” ÍT” ÍT” ÍT”" ÍT”# ÍT”+ ÍT#”, ÍT$”5 ÍT-”7 ÍT/”; ÍT3”< ÍT4”ÌF ÍT>”ÌG ÍT?”ÌH ÍTÌ@‘” ÍU”” ÍU” ÍU” ÍU” ÍU‘” ÍV‘”	 ÍW–” ÍX” ÍX” ÍX” ÍX” ÍX” ÍX’” ÍY” ÍY
+Ü ” ÍZ” ÍZ” ÍZ” ÍZ” ÍZ”" ÍZ”# ÍZ”+ ÍZ#”, ÍZ$”4 ÍZ,”6 ÍZ.”: ÍZ2”; ÍZ3”ÌI ÍZÌA”ÌJ ÍZÌB”ÌK ÍZÌC‘” Í[”” Í[” Í[” Í[” Í[‘” Í\‘”	 Í]–” Í^” Í^” Í^” Í^” Í^” Í^’” Í_” Í_
+Ü ” Í`” Í`” Í`” Í`” Í`”" Í`”# Í`”+ Í`#”, Í`$”? Í`7”ÌA Í`9”ÌE Í`=”ÌF Í`>”ÌS Í`ÌK”ÌT Í`ÌL”ÌU Í`ÌM‘” Ía”” Ía” Ía” Ía” Ía‘” Íb‘”	 Íc–” Íd” Íd” Íd” Íd” Íd” Íd’” Íe” Íe
+Ü ” Íf” Íf” Íf” Íf” Íf”" Íf”# Íf”+ Íf#”, Íf$”0 Íf(”2 Íf*”6 Íf.”7 Íf/”ÌA Íf9”ÌB Íf:”ÌC Íf;‘” Íg”” Íg” Íg” Íg” Íg‘” Íh‘”	 Íi–” Íj” Íj” Íj” Íj” Íj” Íj’” Ík” Ík
+Ü ” Íl” Íl” Íl” Íl” Íl”" Íl”# Íl”+ Íl#”, Íl$”5 Íl-”7 Íl/”; Íl3”< Íl4”ÌF Íl>”ÌG Íl?”ÌH ÍlÌ@‘” Ím”” Ím” Ím” Ím” Ím‘” Ín‘”	 Ío’” Íp” Íp’” Ír”( Ír&’” Ís
+” Ís’” Ít” Ít”” Íu” Íu” Íu” ÍuÌ@˜” Ív”  Ív”" Ív”4 Ív,”5 Ív-”ÌE Ív=”ÌF Ív>”ÌW ÍvÌO”” Íw”! Íw”# Íw”' Íw’” Íx” Íx” Íy” Íy” Íy”1 Íy+”2 Íy,”9 Íy3”: Íy4”; Íy5”? Íy9”Ì@ Íy:”ÌA Íy;”ÌB ÍyÌY”ÌD ÍyÌ[”ÌF ÍyÌ]˜” Íz” Íz” Íz” Íz” Íz”  Íz”! Íz”" Íz˜” Í{” Í{” Í{” Í{	” Í{” Í{” Í{” Í{”” Í|” Í|” Í|” Í|	‘”	 Í}”” Í}” Í}” Í}” Í}‘”	 Í~’” Í” Í’” Í”	 Í–” Í‚” Í‚” Í‚” Í‚” Í‚” Í‚’” Íƒ” Íƒ‘”	 Í„—” Í…” Í…” Í…	” Í…” Í…” Í…” Í…š” Í†” Í†” Í†” Í†” Í†”0 Í†,”2 Í†.”3 Í†/”4 Í†0”5 Í†1š” Í‡” Í‡” Í‡” Í‡” Í‡”4 Í‡0”6 Í‡2”7 Í‡3”8 Í‡4”9 Í‡5š” Íˆ” Íˆ” Íˆ” Íˆ” Íˆ”/ Íˆ+”1 Íˆ-”2 Íˆ.”3 Íˆ/”4 Íˆ0–” Í‰” Í‰” Í‰	” Í‰” Í‰” Í‰” ÍŠ” ÍŠ
+” ÍŠ” ÍŠ” ÍŠ” ÍŠ”# ÍŠ”$ ÍŠ ”, ÍŠ(”- ÍŠ)”6 ÍŠ2”7 ÍŠ3”8 ÍŠ4” Í‹” Í‹
+” Í‹” Í‹” Í‹” Í‹”# Í‹”$ Í‹ ”, Í‹(”- Í‹)”; Í‹7”< Í‹8”= Í‹9” ÍŒ” ÍŒ” ÍŒ	” ÍŒ” ÍŒ”' ÍŒ#”( ÍŒ$”. ÍŒ*”/ ÍŒ+”7 ÍŒ3”8 ÍŒ4”ÌL ÍŒÌH”ÌM ÍŒÌI”ÌN ÍŒÌJ” Í” Í” Í	” Í” Í”# Í”$ Í ”* Í&”+ Í'”3 Í/”4 Í0”; Í7”< Í8”= Í9” Í” Í” Í	” Í” Í”  Í”! Í”' Í#”( Í$”0 Í,”1 Í-”: Í6”; Í7”< Í8” Í” Í” Í	” Í” Í”" Í”# Í”) Í%”* Í&”2 Í.”3 Í/”ÌB Í>”ÌC Í?”ÌD ÍÌ@” Í” Í” Í	” Í” Í”" Í”# Í”) Í%”* Í&”2 Í.”3 Í/”> Í:”? Í;”Ì@ Í<” Í‘” Í‘” Í‘	” Í‘” Í‘”! Í‘”" Í‘”( Í‘$”) Í‘%”1 Í‘-”2 Í‘.”? Í‘;”Ì@ Í‘<”ÌA Í‘=” Í’” Í’” Í’	” Í’” Í’”  Í’”! Í’”' Í’#”( Í’$”0 Í’,”1 Í’-”: Í’6”; Í’7”< Í’8” Í“” Í“” Í“	” Í“” Í“”$ Í“ ”% Í“!”+ Í“'”, Í“(”4 Í“0”5 Í“1”= Í“9”> Í“:”? Í“;” Í”” Í”” Í”	” Í”” Í””# Í””$ Í” ”* Í”&”+ Í”'”3 Í”/”4 Í”0”ÌG Í”ÌC”ÌH Í”ÌD”ÌI Í”ÌE” Í•” Í•” Í•	” Í•” Í•”  Í•”! Í•”' Í•#”( Í•$”0 Í•,”1 Í•-”5 Í•1”6 Í•2”7 Í•3” Í–” Í–” Í–	” Í–” Í–”% Í–!”& Í–"”, Í–(”- Í–)”5 Í–1”6 Í–2”? Í–;”Ì@ Í–<”ÌA Í–=š” Í—” Í—” Í—” Í—” Í—”5 Í—1”7 Í—3”9 Í—5”: Í—6”; Í—7š” Í˜” Í˜” Í˜” Í˜” Í˜”5 Í˜1”7 Í˜3”9 Í˜5”: Í˜6”; Í˜7Ü ” Í™” Í™” Í™” Í™” Í™”2 Í™.”4 Í™0”= Í™9”> Í™:”ÌD Í™Ì@”ÌE Í™ÌA”ÌM Í™ÌI”ÌN Í™ÌJ”Ì[ Í™ÌW”Ì\ Í™ÌX”Ì] Í™ÌY”Ì^ Í™ÌZœ” Íš” Íš” Íš” Íš” Íš”3 Íš/”5 Íš1”9 Íš5”: Íš6”ÌH ÍšÌD”ÌI ÍšÌE”ÌJ ÍšÌFœ” Í›” Í›” Í›” Í›” Í›”4 Í›0”6 Í›2”: Í›6”; Í›7”ÌE Í›ÌA”ÌF Í›ÌB”ÌG Í›ÌCœ” Íœ” Íœ” Íœ” Íœ” Íœ”1 Íœ-”3 Íœ/”7 Íœ3”8 Íœ4”? Íœ;”Ì@ Íœ<”ÌA Íœ=œ” Í” Í” Í” Í” Í”3 Í/”5 Í1”9 Í5”: Í6”ÌC Í?”ÌD ÍÌ@”ÌE ÍÌAœ” Í” Í” Í” Í” Í”3 Í/”5 Í1”9 Í5”: Í6”ÌC Í?”ÌD ÍÌ@”ÌE ÍÌAœ” ÍŸ” ÍŸ” ÍŸ” ÍŸ” ÍŸ”2 ÍŸ.”4 ÍŸ0”8 ÍŸ4”9 ÍŸ5”ÌA ÍŸ=”ÌB ÍŸ>”ÌC ÍŸ?œ” Í ” Í ” Í ” Í ” Í ”6 Í 2”8 Í 4”< Í 8”= Í 9”ÌD Í Ì@”ÌE Í ÌA”ÌF Í ÌBœ” Í¡” Í¡” Í¡” Í¡” Í¡”5 Í¡1”7 Í¡3”; Í¡7”< Í¡8”ÌG Í¡ÌC”ÌH Í¡ÌD”ÌI Í¡ÌEœ” Í¢” Í¢” Í¢” Í¢” Í¢”4 Í¢0”6 Í¢2”: Í¢6”; Í¢7”ÌE Í¢ÌA”ÌF Í¢ÌB”ÌG Í¢ÌCœ” Í£” Í£” Í£” Í£” Í£”1 Í£-”3 Í£/”7 Í£3”8 Í£4”? Í£;”Ì@ Í£<”ÌA Í£=œ” Í¤” Í¤” Í¤” Í¤” Í¤”6 Í¤2”8 Í¤4”< Í¤8”= Í¤9”ÌI Í¤ÌE”ÌJ Í¤ÌF”ÌK Í¤ÌGœ” Í¥” Í¥” Í¥” Í¥” Í¥” Í¥”! Í¥”" Í¥”* Í¥&”+ Í¥'”2 Í¥.”4 Í¥0œ” Í¦” Í¦
+” Í¦” Í¦” Í¦”! Í¦”" Í¦”$ Í¦”& Í¦ ”( Í¦"”) Í¦#”* Í¦$‘”	 Í§š” Í¨” Í¨” Í¨” Í¨” Í¨”1 Í¨-”3 Í¨/”7 Í¨3”8 Í¨4”9 Í¨5š” Í©” Í©” Í©” Í©” Í©”1 Í©-”3 Í©/”7 Í©3”8 Í©4”9 Í©5š” Íª” Íª” Íª” Íª” Íª”1 Íª-”3 Íª/”7 Íª3”8 Íª4”9 Íª5š” Í«” Í«” Í«” Í«” Í«”- Í«)”/ Í«+”1 Í«;”2 Í«<”3 Í«=š” Í¬” Í¬” Í¬” Í¬” Í¬”5 Í¬1”7 Í¬3”8 Í¬4”9 Í¬5”: Í¬6š” Í­” Í­” Í­” Í­” Í­”. Í­*”0 Í­,”4 Í­0”5 Í­1”6 Í­2š” Í®” Í®” Í®” Í®” Í®”/ Í®+”1 Í®-”5 Í®1”6 Í®2”7 Í®3š” Í¯” Í¯” Í¯” Í¯” Í¯”0 Í¯,”2 Í¯.”6 Í¯2”7 Í¯3”8 Í¯4š” Í°” Í°” Í°” Í°” Í°”- Í°)”/ Í°+”3 Í°/”4 Í°0”5 Í°1š” Í±” Í±” Í±” Í±” Í±”/ Í±+”1 Í±-”5 Í±1”6 Í±2”7 Í±3š” Í²” Í²” Í²” Í²” Í²”/ Í²+”1 Í²-”5 Í²1”6 Í²2”7 Í²3›” Í³” Í³” Í³” Í³” Í³”. Í³*”0 Í³,”1 Í³-”2 Í³.”3 Í³/”4 Í³0›” Í´” Í´” Í´” Í´” Í´”2 Í´.”4 Í´0”5 Í´1”6 Í´2”7 Í´3”8 Í´4›” Íµ” Íµ” Íµ” Íµ” Íµ”1 Íµ-”3 Íµ/”4 Íµ0”5 Íµ1”6 Íµ2”7 Íµ3›” Í¶” Í¶” Í¶” Í¶” Í¶”0 Í¶,”2 Í¶.”3 Í¶/”6 Í¶2”7 Í¶3”8 Í¶4›” Í·” Í·” Í·” Í·” Í·”- Í·)”/ Í·+”0 Í·,”1 Í·-”2 Í·.”3 Í·/›” Í¸” Í¸” Í¸” Í¸” Í¸”2 Í¸.”4 Í¸0”5 Í¸1”6 Í¸2”7 Í¸3”8 Í¸4’” Íº”> Íº:’” Í»”/ Í»+–” Í¼” Í¼” Í¼	” Í¼” Í¼” Í¼™” Í½” Í½” Í½	” Í½” Í½”& Í½"”' Í½#”* Í½&”, Í½(–” Í¾” Í¾
+” Í¾” Í¾” Í¾” Í¾–” Í¿”	 Í¿” Í¿” Í¿
+” Í¿” Í¿’” ÍÁ” ÍÁ”” ÍÂ” ÍÂ
+” ÍÂ” ÍÂ>”” ÍÃ” ÍÃ” ÍÃ” ÍÃ˜” ÍÄ” ÍÄ” ÍÄ”0 ÍÄ*”1 ÍÄ+”ÌE ÍÄ?”ÌF ÍÄÌ@”ÌP ÍÄÌJ’”	 ÍÅ”
+ ÍÅ’” ÍÆ” ÍÆ” ÍÇ” ÍÇ” ÍÇ”! ÍÇ”" ÍÇ”2 ÍÇ,”4 ÍÇ.”7 ÍÇ1”9 ÍÇ3”= ÍÇ7”> ÍÇ8”ÌG ÍÇÌA”ÌH ÍÇÌB”ÌI ÍÇÌC‘”	 ÍÈ”” ÍÈ” ÍÈ” ÍÈ” ÍÈÜ ” ÍÉ” ÍÉ” ÍÉ” ÍÉ” ÍÉ” ÍÉ”  ÍÉ”# ÍÉ”% ÍÉ”9 ÍÉ3”; ÍÉ5”? ÍÉ9”Ì@ ÍÉ:”ÌI ÍÉÌC”ÌJ ÍÉÌD”ÌK ÍÉÌE”ÌL ÍÉÌF”ÌM ÍÉÌG”ÌN ÍÉÌH‘”	 ÍÊ–” ÍË” ÍË” ÍË	” ÍË” ÍË” ÍË™” ÍÌ” ÍÌ” ÍÌ	” ÍÌ” ÍÌ”# ÍÌ”$ ÍÌ ”' ÍÌ#”) ÍÌ%–” ÍÍ” ÍÍ
+” ÍÍ” ÍÍ” ÍÍ” ÍÍ–” ÍÎ”	 ÍÎ” ÍÎ” ÍÎ” ÍÎ” ÍÎ–” ÍĞ” ÍĞ” ÍĞ	” ÍĞ” ÍĞ” ÍĞ™” ÍÑ” ÍÑ” ÍÑ	” ÍÑ” ÍÑ”$ ÍÑ ”% ÍÑ!”( ÍÑ$”* ÍÑ&–” ÍÒ” ÍÒ
+” ÍÒ” ÍÒ” ÍÒ” ÍÒ–” ÍÓ”	 ÍÓ” ÍÓ” ÍÓ” ÍÓ” ÍÓ’” ÍÔ” ÍÔ’” ÍÖ” ÍÖ—” Í×” Í×” Í×	” Í×” Í×” Í×” Í×’” ÍØ” ÍØ‘”	 ÍÙ—” ÍÚ” ÍÚ” ÍÚ	” ÍÚ” ÍÚ” ÍÚ” ÍÚ˜” ÍÛ” ÍÛ” ÍÛ” ÍÛ” ÍÛ”  ÍÛ”! ÍÛ”# ÍÛ˜” ÍÜ” ÍÜ” ÍÜ” ÍÜ” ÍÜ”* ÍÜ$”+ ÍÜ%”, ÍÜ&˜” Íİ” Íİ
+” Íİ” Íİ” Íİ”  Íİ”! Íİ”" Íİ‘”	 ÍŞ˜” Íß” Íß” Íß” Íß” Íß” Íß” Íß”  Íß˜” Íà” Íà” Íà” Íà” Íà”' Íà!”( Íà"”) Íà#˜” Íá” Íá
+” Íá” Íá” Íá” Íá” Íá” Íá‘”	 Íâ˜” Íã” Íã” Íã” Íã” Íã” Íã” Íã”! Íã˜” Íä” Íä” Íä” Íä” Íä”( Íä"”) Íä#”* Íä$˜” Íå” Íå
+” Íå” Íå” Íå” Íå” Íå”  Íå‘”	 Íæ˜” Íç” Íç” Íç” Íç” Íç”" Íç”# Íç”% Íç!˜” Íè” Íè” Íè” Íè” Íè”+ Íè%”, Íè&”- Íè'˜” Íé” Íé
+” Íé” Íé”! Íé”" Íé”# Íé”$ Íé‘”	 Íê’” Íë” Íëœ” Íì” Íì” Íì”" Íì”# Íì”3 Íì-”5 Íì/”9 Íì3”: Íì4”ÌC Íì=”ÌD Íì>”ÌE Íì?‘”	 Íí”” Íí” Íí” Íí” Íí‘”	 Íî’” Íï” Íï’” Íñ
+” Íñ’” Íò” Íò–” Íó” Íó” Íó” Íó” Íó” Íó‘”	 Íô”” Íô” Íô” Íô” Íô‘”	 Íõ’” Íö”+ Íö'˜” Í÷” Í÷” Í÷” Í÷” Í÷”" Í÷”# Í÷”% Í÷!˜” Íø” Íø” Íø” Íø” Íø”+ Íø%”, Íø&”- Íø'‘”	 Íù™” Íú” Íú” Íú	” Íú” Íú”' Íú#”( Íú$”+ Íú'”- Íú)–” Íû” Íû
+” Íû” Íû” Íû” Íû–” Íü”	 Íü” Íü” Íü” Íü” Íü’” Íı” Íı’” Íÿ
+” Íÿ’” Í ” Í ™” Í” Í” Í” Í”$ Í”% Í”4 Í.”6 Í0”7 Í1œ” Í” Í” Í” Í” Í"” Í#”  Í&”! Í'”" Í(”# ÍÌC”% ÍÌE”' ÍÌGÜ ” Í” Í” Í” Í” Í”  Í”! Í”% Í”' Í”, Í$”. Í&”/ Í'”0 Í(”5 Í-”7 Í/”; Í3”= Í5”> Í6”? Í7”ÌC Í;”ÌE Í=”ÌI ÍÌA”ÌK ÍÌC”ÌL ÍÌD”ÌM ÍÌE”ÌV ÍÌN”ÌX ÍÌ\”ÌY ÍÌ]”” Í” Í” Í” Í	Ü ” Í” Í	” Í
+” Í” Í” Í” Í” Í” Í(” Í*” Í,” Í-”  Í.”! Í/”% Í3”( Í6”) Í7”* Í8”. Í<”/ Í=”0 Í>š” Í” Í” Í”" Í”# Í”1 Í+”3 Í-”6 Í0”7 Í1”8 Í2” Í” Í” Í”" Í”# Í”9 Í3”; Í5”? Í9”Ì@ Í:”ÌC Í=”ÌE Í?”ÌF ÍÌ@”ÌG ÍÌAœ” Í” Í
+” Í” Í” Í”! Í”% Í”& Í ”. Í(”/ Í)”5 Í/”7 Í1š” Í	” Í	” Í	” Í	” Í	”$ Í	”% Í	”( Í	 ”) Í	!”* Í	"‘” Í
+‘”	 Í”” Í” Í” Í” Í‘”	 Í’” Í” Í•”  2” 2” 2+” 2/” 20ÔrH–§version¤file§sources®sourcesContent¥names¨mappingsÀ‘À‘ÀÜı‘”    ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”  	 ‘”  
+ ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”    ‘”  ! ‘”  " ‘”  # ‘”  $ ‘”  % ‘”  & ‘”  ' ‘”  ( ‘”  ) ‘”  * ‘”  + ‘”  , ‘”  - ‘”  . ‘”  / ‘”  0 ‘”  1 ‘”  2 ‘”  3 ‘”  4 ‘”  5 ‘”  6 ‘”  7 ‘”  8 ‘”  9 ‘”  : ‘”  ; ‘”  < ‘”  = ‘”  > ‘”  ? ‘”  Ì@ ‘”  ÌA ‘”  ÌB ‘”  ÌC ‘”  ÌD ‘”  ÌE ‘”  ÌF ‘”  ÌG ‘”  ÌH ‘”  ÌI ‘”  ÌJ ‘”  ÌK ‘”  ÌL ‘”  ÌM ‘”  ÌN ‘”  ÌO ‘”  ÌP ‘”  ÌQ ‘”  ÌR ‘”  ÌS ‘”  ÌT ‘”  ÌU ‘”  ÌV ‘”  ÌW ‘”  ÌX ‘”  ÌY ‘”  ÌZ ‘”  Ì[ ‘”  Ì\ ‘”  Ì] ‘”  Ì^ ‘”  Ì_ ‘”  Ì` ‘”  Ìa ‘”  Ìb ‘”  Ìc ‘”  Ìd ‘”  Ìe ‘”  Ìf ‘”  Ìg ‘”  Ìh ‘”  Ìi ‘”  Ìj ‘”  Ìk ‘”  Ìl ‘”  Ìm ‘”  Ìn ‘”  Ìo ‘”  Ìp ‘”  Ìq ‘”  Ìr ‘”  Ìs ‘”  Ìt ‘”  Ìu ‘”  Ìv ‘”  Ìw ‘”  Ìx ‘”  Ìy ‘”  Ìz ‘”  Ì{ ‘”  Ì| ‘”  Ì} ‘”  Ì~ ‘”  Ì ‘”  Ì€ ‘”  Ì ‘”  Ì‚ ‘”  Ìƒ ‘”  Ì„ ‘”  Ì… ‘”  Ì† ‘”  Ì‡ ‘”  Ìˆ ‘”  Ì‰ ‘”  ÌŠ ‘”  Ì‹ ‘”  ÌŒ ‘”  Ì ‘”  Ì ‘”  Ì ‘”  Ì ‘”  Ì‘ ‘”  Ì’ ‘”  Ì“ ‘”  Ì” ‘”  Ì• ‘”  Ì– ‘”  Ì— ‘”  Ì˜ ‘”  Ì™ ‘”  Ìš ‘”  Ì› ‘”  Ìœ ‘”  Ì ‘”  Ì ‘”  ÌŸ ‘”  Ì  ‘”  Ì¡ ‘”  Ì¢ ‘”  Ì£ ‘”  Ì¤ ‘”  Ì¥ ‘”  Ì¦ ‘”  Ì§ ‘”  Ì¨ ‘”  Ì© ‘”  Ìª ‘”  Ì« ‘”  Ì¬ ‘”  Ì­ ‘”  Ì® ‘”  Ì¯ ‘”  Ì° ‘”  Ì± ‘”  Ì² ‘”  Ì³ ‘”  Ì´ ‘”  Ìµ ‘”  Ì¶ ‘”  Ì· ‘”  Ì¸ ‘”  Ì¹ ‘”  Ìº ‘”  Ì» ‘”  Ì¼ ‘”  Ì½ ‘”  Ì¾ ‘”  Ì¿ ‘”  ÌÀ ‘”  ÌÁ ‘”  ÌÂ ‘”  ÌÃ ‘”  ÌÄ ‘”  ÌÅ ‘”  ÌÆ ‘”  ÌÇ ‘”  ÌÈ ‘”  ÌÉ ‘”  ÌÊ ‘”  ÌË ‘”  ÌÌ ‘”  ÌÍ ‘”  ÌÎ ‘”  ÌÏ ‘”  ÌĞ ‘”  ÌÑ ‘”  ÌÒ ‘”  ÌÓ ‘”  ÌÔ ‘”  ÌÕ ‘”  ÌÖ ‘”  Ì× ‘”  ÌØ ‘”  ÌÙ ‘”  ÌÚ ‘”  ÌÛ ‘”  ÌÜ ‘”  Ìİ ‘”  ÌŞ ‘”  Ìß ‘”  Ìà ‘”  Ìá ‘”  Ìâ ‘”  Ìã ‘”  Ìä ‘”  Ìå ‘”  Ìæ ‘”  Ìç ‘”  Ìè ‘”  Ìé ‘”  Ìê ‘”  Ìë ‘”  Ìì ‘”  Ìí ‘”  Ìî ‘”  Ìï ‘”  Ìğ ‘”  Ìñ ‘”  Ìò ‘”  Ìó ‘”  Ìô ‘”  Ìõ ‘”  Ìö ‘”  Ì÷ ‘”  Ìø ‘”  Ìù ‘”  Ìú ‘”  Ìû ‘”  Ìü ‘”  Ìı ‘”  Ìş ‘”  Ìÿ ‘”  Í  ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í	 ‘”  Í
+ ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í  ‘”  Í! ‘”  Í" ‘”  Í# ‘”  Í$ ‘”  Í% ‘”  Í& ‘”  Í' ‘”  Í( ‘”  Í) ‘”  Í* ‘”  Í+ ‘”  Í, ‘”  Í- ‘”  Í. ‘”  Í/ ‘”  Í0 ‘”  Í1 ‘”  Í2 ‘”  Í3 ‘”  Í4 ‘”  Í5 ‘”  Í6 ‘”  Í7 ‘”  Í8 ‘”  Í9 ‘”  Í: ‘”  Í; ‘”  Í< ‘”  Í= ‘”  Í> ‘”  Í? ‘”  Í@ ‘”  ÍA ‘”  ÍB ‘”  ÍC ‘”  ÍD ‘”  ÍE ‘”  ÍF ‘”  ÍG ‘”  ÍH ‘”  ÍI ‘”  ÍJ ‘”  ÍK ‘”  ÍL ‘”  ÍM ‘”  ÍN ‘”  ÍO ‘”  ÍP ‘”  ÍQ ‘”  ÍR ‘”  ÍS ‘”  ÍT ‘”  ÍU ‘”  ÍV ‘”  ÍW ‘”  ÍX ‘”  ÍY ‘”  ÍZ ‘”  Í[ ‘”  Í\ ‘”  Í] ‘”  Í^ ‘”  Í_ ‘”  Í` ‘”  Ía ‘”  Íb ‘”  Íc ‘”  Íd ‘”  Íe ‘”  Íf ‘”  Íg ‘”  Íh ‘”  Íi ‘”  Íj ‘”  Ík ‘”  Íl ‘”  Ím ‘”  Ín ‘”  Ío ‘”  Íp ‘”  Íq ‘”  Ír ‘”  Ís ‘”  Ít ‘”  Íu ‘”  Ív ‘”  Íw ‘”  Íx ‘”  Íy ‘”  Íz ‘”  Í{ ‘”  Í| ‘”  Í} ‘”  Í~ ‘”  Í ‘”  Í€ ‘”  Í ‘”  Í‚ ‘”  Íƒ ‘”  Í„ ‘”  Í… ‘”  Í† ‘”  Í‡ ‘”  Íˆ ‘”  Í‰ ‘”  ÍŠ ‘”  Í‹ ‘”  ÍŒ ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í‘ ‘”  Í’ ‘”  Í“ ‘”  Í” ‘”  Í• ‘”  Í– ‘”  Í— ‘”  Í˜ ‘”  Í™ ‘”  Íš ‘”  Í› ‘”  Íœ ‘”  Í ‘”  Í ‘”  ÍŸ ‘”  Í  ‘”  Í¡ ‘”  Í¢ ‘”  Í£ ‘”  Í¤ ‘”  Í¥ ‘”  Í¦ ‘”  Í§ ‘”  Í¨ ‘”  Í© ‘”  Íª ‘”  Í« ‘”  Í¬ ‘”  Í­ ‘”  Í® ‘”  Í¯ ‘”  Í° ‘”  Í± ‘”  Í² ‘”  Í³ ‘”  Í´ ‘”  Íµ ‘”  Í¶ ‘”  Í· ‘”  Í¸ ‘”  Í¹ ‘”  Íº ‘”  Í» ‘”  Í¼ ‘”  Í½ ‘”  Í¾ ‘”  Í¿ ‘”  ÍÀ ‘”  ÍÁ ‘”  ÍÂ ‘”  ÍÃ ‘”  ÍÄ ‘”  ÍÅ ‘”  ÍÆ ‘”  ÍÇ ‘”  ÍÈ ‘”  ÍÉ ‘”  ÍÊ ‘”  ÍË ‘”  ÍÌ ‘”  ÍÍ ‘”  ÍÎ ‘”  ÍÏ ‘”  ÍĞ ‘”  ÍÑ ‘”  ÍÒ ‘”  ÍÓ ‘”  ÍÔ ‘”  ÍÕ ‘”  ÍÖ ‘”  Í× ‘”  ÍØ ‘”  ÍÙ ‘”  ÍÚ ‘”  ÍÛ ‘”  ÍÜ ‘”  Íİ ‘”  ÍŞ ‘”  Íß ‘”  Íà ‘”  Íá ‘”  Íâ ‘”  Íã ‘”  Íä ‘”  Íå ‘”  Íæ ‘”  Íç ‘”  Íè ‘”  Íé ‘”  Íê ‘”  Íë ‘”  Íì ‘”  Íí ‘”  Íî ‘”  Íï ‘”  Íğ ‘”  Íñ ‘”  Íò ‘”  Íó ‘”  Íô ‘”  Íõ ‘”  Íö ‘”  Í÷ ‘”  Íø ‘”  Íù ‘”  Íú ‘”  Íû ‘”  Íü ÔrI’§missing¦pluginÃ¦genAbcÂÔ  ÔrJ”²dynamicImportCache¹exportAllDeclarationCache»exportNamedDeclarationCache«importCache‘ÔrK–¤type¥start£end«declarationªspecifiers¦source¶ExportNamedDeclarationÍ|ÍB±ÔrL–¤type¥start£end¢idªsuperClass¤body°ClassDeclarationÍƒÍB±ÔrM”¤type¥start£end¤nameªIdentifierÍ‰Í“ªLiveStreamÀÔrN”¤type¥start£end¤body©ClassBodyÍ”ÍB±ÔrO˜¤type¥start£end¦static¨computed£key¤kind¥value°MethodDefinitionÍ›ÍFÂÂMªIdentifierÍ›Í¦«constructor«constructorÔrP™¤type¥start£end¢idªexpression©generator¥async¦params¤body²FunctionExpressionÍ¦ÍFÀÂÂÂN®BlockStatementÍ©ÍFÜ $ÔrQ”¤type¥start£endªexpression³ExpressionStatementÍ´ÍÉÔrR–¤type¥start£end¨operator¤left¥right´AssignmentExpressionÍ´ÍÈ¡=ÔrS—¤type¥start£end¦object¨property¨computed¨optional°MemberExpressionÍ´ÍÀÔrT“¤type¥start£end®ThisExpressionÍ´Í¸MªIdentifierÍ¹ÍÀ§startedÂÂÔrU•¤type¥start£end¥value£raw§LiteralÍÃÍÈÂ¥falseQ³ExpressionStatementÍÓÍèR´AssignmentExpressionÍÓÍç¡=S°MemberExpressionÍÓÍàT®ThisExpressionÍÓÍ×MªIdentifierÍØÍà¨listenerÂÂU§LiteralÍãÍçÀ¤nullQ³ExpressionStatementÍòÍR´AssignmentExpressionÍòÍ¡=S°MemberExpressionÍòÍT®ThisExpressionÍòÍöMªIdentifierÍ÷Í«sensorTimerÂÂÔrV–¤type¥start£end¨operator¦prefix¨argument¯UnaryExpressionÍÍ¡-ÃU§LiteralÍÍ¡1Q³ExpressionStatementÍÍ%R´AssignmentExpressionÍÍ$¡=S°MemberExpressionÍÍT®ThisExpressionÍÍMªIdentifierÍÍ¨locTimerÂÂV¯UnaryExpressionÍ"Í$¡-ÃU§LiteralÍ#Í$¡1Q³ExpressionStatementÍ/ÍCR´AssignmentExpressionÍ/ÍB¡=S°MemberExpressionÍ/Í=T®ThisExpressionÍ/Í3MªIdentifierÍ4Í=©wifiTimerÂÂV¯UnaryExpressionÍ@ÍB¡-ÃU§LiteralÍAÍB¡1Q³ExpressionStatementÍMÍeR´AssignmentExpressionÍMÍd¡=S°MemberExpressionÍMÍ_T®ThisExpressionÍMÍQMªIdentifierÍRÍ_­wifiReadTimerÂÂV¯UnaryExpressionÍbÍd¡-ÃU§LiteralÍcÍd¡1Q³ExpressionStatementÍoÍ†R´AssignmentExpressionÍoÍ…¡=S°MemberExpressionÍoÍyT®ThisExpressionÍoÍsMªIdentifierÍtÍy¥accelÂÂÔrW”¤type¥start£end¨elements¯ArrayExpressionÍ|Í…“U§LiteralÍ}Í~ ¡0U§LiteralÍ€Í ¡0U§LiteralÍƒÍ„ ¡0Q³ExpressionStatementÍÍ¥R´AssignmentExpressionÍÍ¤¡=S°MemberExpressionÍÍ˜T®ThisExpressionÍÍ”MªIdentifierÍ•Í˜£magÂÂW¯ArrayExpressionÍ›Í¤“U§LiteralÍœÍ ¡0U§LiteralÍŸÍ  ¡0U§LiteralÍ¢Í£ ¡0Q³ExpressionStatementÍ¯ÍÉR´AssignmentExpressionÍ¯ÍÈ¡=S°MemberExpressionÍ¯ÍÀT®ThisExpressionÍ¯Í³MªIdentifierÍ´ÍÀ¬hasAccelDataÂÂU§LiteralÍÃÍÈÂ¥falseQ³ExpressionStatementÍÓÍëR´AssignmentExpressionÍÓÍê¡=S°MemberExpressionÍÓÍâT®ThisExpressionÍÓÍ×MªIdentifierÍØÍâªhasMagDataÂÂU§LiteralÍåÍêÂ¥falseQ³ExpressionStatementÍ&ÍBR´AssignmentExpressionÍ&ÍA¡=S°MemberExpressionÍ&Í9T®ThisExpressionÍ&Í*MªIdentifierÍ+Í9®hasLinearAccelÂÂU§LiteralÍ<ÍAÂ¥falseQ³ExpressionStatementÍLÍdR´AssignmentExpressionÍLÍc¡=S°MemberExpressionÍLÍ[T®ThisExpressionÍLÍPMªIdentifierÍQÍ[ªhasGravityÂÂU§LiteralÍ^ÍcÂ¥falseQ³ExpressionStatementÍnÍƒR´AssignmentExpressionÍnÍ‚¡=S°MemberExpressionÍnÍzT®ThisExpressionÍnÍrMªIdentifierÍsÍz§hasGyroÂÂU§LiteralÍ}Í‚Â¥falseQ³ExpressionStatementÍÍ¤R´AssignmentExpressionÍÍ£¡=S°MemberExpressionÍÍ›T®ThisExpressionÍÍ‘MªIdentifierÍ’Í›©hasRotVecÂÂU§LiteralÍÍ£Â¥falseQ³ExpressionStatementÍ®ÍÅR´AssignmentExpressionÍ®ÍÄ¡=S°MemberExpressionÍ®Í¼T®ThisExpressionÍ®Í²MªIdentifierÍ³Í¼©hasOrientÂÂU§LiteralÍ¿ÍÄÂ¥falseQ³ExpressionStatementÍÏÍåR´AssignmentExpressionÍÏÍä¡=S°MemberExpressionÍÏÍÜT®ThisExpressionÍÏÍÓMªIdentifierÍÔÍÜ¨hasLightÂÂU§LiteralÍßÍäÂ¥falseQ³ExpressionStatementÍïÍR´AssignmentExpressionÍïÍ¡=S°MemberExpressionÍïÍûT®ThisExpressionÍïÍóMªIdentifierÍôÍû§hasProxÂÂU§LiteralÍşÍÂ¥falseQ³ExpressionStatementÍÍ'R´AssignmentExpressionÍÍ&¡=S°MemberExpressionÍÍT®ThisExpressionÍÍMªIdentifierÍÍ«hasHumidityÂÂU§LiteralÍ!Í&Â¥falseQ³ExpressionStatementÍ1ÍIR´AssignmentExpressionÍ1ÍH¡=S°MemberExpressionÍ1Í@T®ThisExpressionÍ1Í5MªIdentifierÍ6Í@ªhasAmbTempÂÂU§LiteralÍCÍHÂ¥falseQ³ExpressionStatementÍSÍhR´AssignmentExpressionÍSÍg¡=S°MemberExpressionÍSÍ_T®ThisExpressionÍSÍWMªIdentifierÍXÍ_§hasHallÂÂU§LiteralÍbÍgÂ¥falseQ³ExpressionStatementÍrÍŒR´AssignmentExpressionÍrÍ‹¡=S°MemberExpressionÍrÍƒT®ThisExpressionÍrÍvMªIdentifierÍwÍƒ¬hasPedometerÂÂU§LiteralÍ†Í‹Â¥falseQ³ExpressionStatementÍ–Í=R´AssignmentExpressionÍ–Í<¡=S°MemberExpressionÍ–Í©T®ThisExpressionÍ–ÍšMªIdentifierÍ›Í©®handlePressureÂÂP·ArrowFunctionExpressionÍ¬Í<ÀÂÂÂ‘MªIdentifierÍ­Í®¡dN®BlockStatementÍ³Í<–ÔrX•¤type¥start£end¬declarations¤kind³VariableDeclarationÍÂÍ×‘ÔrY•¤type¥start£end¢id¤init²VariableDeclaratorÍÈÍÖMªIdentifierÍÈÍÉ¡pS°MemberExpressionÍÌÍÖMªIdentifierÍÌÍÍ¡dMªIdentifierÍÎÍÖ¨pressureÂÂ¥constX³VariableDeclarationÍåÍ‘Y²VariableDeclaratorÍëÍMªIdentifierÍëÍî£altÔrZ–¤type¥start£end¤left¨operator¥right°BinaryExpressionÍñÍU§LiteralÍñÍöÍ­*¥44330¡*Z°BinaryExpressionÍúÍU§LiteralÍúÍû¡1¡-Ôr[–¤type¥start£end¦callee©arguments¨optional®CallExpressionÍşÍS°MemberExpressionÍşÍMªIdentifierÍşÍ¤MathMªIdentifierÍÍ£powÂÂ’Z°BinaryExpressionÍÍMªIdentifierÍÍ¡p¡/U§LiteralÍÍË@ª     §1013.25U§LiteralÍÍË?È[À6âë¦0.1903Â¥constX³VariableDeclarationÍ+ÍJ‘Y²VariableDeclaratorÍ1ÍIMªIdentifierÍ1Í2¡vÔr\”¤type¥start£endªproperties°ObjectExpressionÍ5ÍI’Ôr]™¤type¥start£end¦method©shorthand¨computed£key¥value¤kind¨PropertyÍ7Í=ÂÂÂMªIdentifierÍ7Í:£hpaMªIdentifierÍ<Í=¡p¤init]¨PropertyÍ?ÍGÂÂÂMªIdentifierÍ?ÍB£altMªIdentifierÍDÍG£alt¤init¥constQ³ExpressionStatementÍXÍy[®CallExpressionÍXÍxS°MemberExpressionÍXÍaT®ThisExpressionÍXÍ\MªIdentifierÍ]Ía¤pushÂÂ’U§LiteralÍbÍt°rm_live_pressure²'rm_live_pressure'MªIdentifierÍvÍw¡vÂQ³ExpressionStatementÍ‡Í¶[®CallExpressionÍ‡ÍµS°MemberExpressionÍ‡Í’T®ThisExpressionÍ‡Í‹MªIdentifierÍŒÍ’¦setValÂÂ’U§LiteralÍ“Í¨³rm_live_pressure_msµ'rm_live_pressure_ms'[®CallExpressionÍªÍ´S°MemberExpressionÍªÍ²MªIdentifierÍªÍ®¤DateMªIdentifierÍ¯Í²£nowÂÂÂÂÔr^–¤type¥start£end¤testªconsequent©alternate«IfStatementÍÄÍ1Z±LogicalExpressionÍÈÍñS°MemberExpressionÍÈÍÕT®ThisExpressionÍÈÍÌMªIdentifierÍÍÍÕ¨listenerÂÂ¢&&S°MemberExpressionÍÙÍñS°MemberExpressionÍÙÍæT®ThisExpressionÍÙÍİMªIdentifierÍŞÍæ¨listenerÂÂMªIdentifierÍçÍñªonPressureÂÂN®BlockStatementÍóÍ1‘Q³ExpressionStatementÍÍ"[®CallExpressionÍÍ!S°MemberExpressionÍÍS°MemberExpressionÍÍT®ThisExpressionÍÍ
+MªIdentifierÍÍ¨listenerÂÂMªIdentifierÍÍªonPressureÂÂ‘MªIdentifierÍÍ ¡vÂÀQ³ExpressionStatementÍGÍÚR´AssignmentExpressionÍGÍÙ¡=S°MemberExpressionÍGÍUT®ThisExpressionÍGÍKMªIdentifierÍLÍU©handleMagÂÂP·ArrowFunctionExpressionÍXÍÙÀÂÂÂ‘MªIdentifierÍYÍZ¡dN®BlockStatementÍ_ÍÙ“Q³ExpressionStatementÍnÍ‰R´AssignmentExpressionÍnÍˆ¡=S°MemberExpressionÍnÍvT®ThisExpressionÍnÍrMªIdentifierÍsÍv£magÂÂW¯ArrayExpressionÍyÍˆ“S°MemberExpressionÍzÍ}MªIdentifierÍzÍ{¡dMªIdentifierÍ|Í}¡xÂÂS°MemberExpressionÍÍ‚MªIdentifierÍÍ€¡dMªIdentifierÍÍ‚¡yÂÂS°MemberExpressionÍ„Í‡MªIdentifierÍ„Í…¡dMªIdentifierÍ†Í‡¡zÂÂQ³ExpressionStatementÍ—Í®R´AssignmentExpressionÍ—Í­¡=S°MemberExpressionÍ—Í¦T®ThisExpressionÍ—Í›MªIdentifierÍœÍ¦ªhasMagDataÂÂU§LiteralÍ©Í­Ã¤trueQ³ExpressionStatementÍ¼ÍÎ[®CallExpressionÍ¼ÍÍS°MemberExpressionÍ¼ÍËT®ThisExpressionÍ¼ÍÀMªIdentifierÍÁÍËªpublishMagÂÂÂQ³ExpressionStatementÍäÍ»R´AssignmentExpressionÍäÍº¡=S°MemberExpressionÍäÍôT®ThisExpressionÍäÍèMªIdentifierÍéÍô«handleAccelÂÂP·ArrowFunctionExpressionÍ÷ÍºÀÂÂÂ‘MªIdentifierÍøÍù¡dN®BlockStatementÍşÍº”Q³ExpressionStatementÍÍ*R´AssignmentExpressionÍÍ)¡=S°MemberExpressionÍÍT®ThisExpressionÍÍMªIdentifierÍÍ¥accelÂÂW¯ArrayExpressionÍÍ)“S°MemberExpressionÍÍMªIdentifierÍÍ¡dMªIdentifierÍÍ¡xÂÂS°MemberExpressionÍ Í#MªIdentifierÍ Í!¡dMªIdentifierÍ"Í#¡yÂÂS°MemberExpressionÍ%Í(MªIdentifierÍ%Í&¡dMªIdentifierÍ'Í(¡zÂÂQ³ExpressionStatementÍ8ÍQR´AssignmentExpressionÍ8ÍP¡=S°MemberExpressionÍ8ÍIT®ThisExpressionÍ8Í<MªIdentifierÍ=ÍI¬hasAccelDataÂÂU§LiteralÍLÍPÃ¤trueQ³ExpressionStatementÍ_Íq[®CallExpressionÍ_ÍpS°MemberExpressionÍ_ÍnT®ThisExpressionÍ_ÍcMªIdentifierÍdÍnªpublishMagÂÂÂQ³ExpressionStatementÍÍ¯[®CallExpressionÍÍ®S°MemberExpressionÍÍˆT®ThisExpressionÍÍƒMªIdentifierÍ„Íˆ¤pushÂÂ’U§LiteralÍ‰Í˜­rm_live_accel¯'rm_live_accel'[®CallExpressionÍšÍ­MªIdentifierÍšÍ¤vec3“S°MemberExpressionÍŸÍ¢MªIdentifierÍŸÍ ¡dMªIdentifierÍ¡Í¢¡xÂÂS°MemberExpressionÍ¤Í§MªIdentifierÍ¤Í¥¡dMªIdentifierÍ¦Í§¡yÂÂS°MemberExpressionÍ©Í¬MªIdentifierÍ©Íª¡dMªIdentifierÍ«Í¬¡zÂÂÂÂQ³ExpressionStatementÍÅÍ	,R´AssignmentExpressionÍÅÍ	+¡=S°MemberExpressionÍÅÍÖT®ThisExpressionÍÅÍÉMªIdentifierÍÊÍÖ¬handleLinearÂÂP·ArrowFunctionExpressionÍÙÍ	+ÀÂÂÂ‘MªIdentifierÍÚÍÛ¡dN®BlockStatementÍàÍ	+‘Q³ExpressionStatementÍïÍ	 [®CallExpressionÍïÍ	S°MemberExpressionÍïÍøT®ThisExpressionÍïÍóMªIdentifierÍôÍø¤pushÂÂ’U§LiteralÍùÍ		®rm_live_linear°'rm_live_linear'[®CallExpressionÍ	Í	MªIdentifierÍ	Í	¤vec3“S°MemberExpressionÍ	Í	MªIdentifierÍ	Í	¡dMªIdentifierÍ	Í	¡xÂÂS°MemberExpressionÍ	Í	MªIdentifierÍ	Í	¡dMªIdentifierÍ	Í	¡yÂÂS°MemberExpressionÍ	Í	MªIdentifierÍ	Í	¡dMªIdentifierÍ	Í	¡zÂÂÂÂQ³ExpressionStatementÍ	6Í	ŸR´AssignmentExpressionÍ	6Í	¡=S°MemberExpressionÍ	6Í	HT®ThisExpressionÍ	6Í	:MªIdentifierÍ	;Í	H­handleGravityÂÂP·ArrowFunctionExpressionÍ	KÍ	ÀÂÂÂ‘MªIdentifierÍ	LÍ	M¡dN®BlockStatementÍ	RÍ	‘Q³ExpressionStatementÍ	aÍ	“[®CallExpressionÍ	aÍ	’S°MemberExpressionÍ	aÍ	jT®ThisExpressionÍ	aÍ	eMªIdentifierÍ	fÍ	j¤pushÂÂ’U§LiteralÍ	kÍ	|¯rm_live_gravity±'rm_live_gravity'[®CallExpressionÍ	~Í	‘MªIdentifierÍ	~Í	‚¤vec3“S°MemberExpressionÍ	ƒÍ	†MªIdentifierÍ	ƒÍ	„¡dMªIdentifierÍ	…Í	†¡xÂÂS°MemberExpressionÍ	ˆÍ	‹MªIdentifierÍ	ˆÍ	‰¡dMªIdentifierÍ	ŠÍ	‹¡yÂÂS°MemberExpressionÍ	Í	MªIdentifierÍ	Í	¡dMªIdentifierÍ	Í	¡zÂÂÂÂQ³ExpressionStatementÍ	©Í
+R´AssignmentExpressionÍ	©Í
+¡=S°MemberExpressionÍ	©Í	¸T®ThisExpressionÍ	©Í	­MªIdentifierÍ	®Í	¸ªhandleGyroÂÂP·ArrowFunctionExpressionÍ	»Í
+ÀÂÂÂ‘MªIdentifierÍ	¼Í	½¡dN®BlockStatementÍ	ÂÍ
+‘Q³ExpressionStatementÍ	ÑÍ
+ [®CallExpressionÍ	ÑÍ	ÿS°MemberExpressionÍ	ÑÍ	ÚT®ThisExpressionÍ	ÑÍ	ÕMªIdentifierÍ	ÖÍ	Ú¤pushÂÂ’U§LiteralÍ	ÛÍ	é¬rm_live_gyro®'rm_live_gyro'[®CallExpressionÍ	ëÍ	şMªIdentifierÍ	ëÍ	ï¤vec3“S°MemberExpressionÍ	ğÍ	óMªIdentifierÍ	ğÍ	ñ¡dMªIdentifierÍ	òÍ	ó¡xÂÂS°MemberExpressionÍ	õÍ	øMªIdentifierÍ	õÍ	ö¡dMªIdentifierÍ	÷Í	ø¡yÂÂS°MemberExpressionÍ	úÍ	ıMªIdentifierÍ	úÍ	û¡dMªIdentifierÍ	üÍ	ı¡zÂÂÂÂQ³ExpressionStatementÍ
+Í
+ŒR´AssignmentExpressionÍ
+Í
+‹¡=S°MemberExpressionÍ
+Í
+'T®ThisExpressionÍ
+Í
+MªIdentifierÍ
+Í
+'¬handleRotVecÂÂP·ArrowFunctionExpressionÍ
+*Í
+‹ÀÂÂÂ‘MªIdentifierÍ
++Í
+,¡dN®BlockStatementÍ
+1Í
+‹‘Q³ExpressionStatementÍ
+@Í
+€[®CallExpressionÍ
+@Í
+S°MemberExpressionÍ
+@Í
+IT®ThisExpressionÍ
+@Í
+DMªIdentifierÍ
+EÍ
+I¤pushÂÂ’U§LiteralÍ
+JÍ
+Z®rm_live_rotvec°'rm_live_rotvec'\°ObjectExpressionÍ
+\Í
+~”]¨PropertyÍ
+^Í
+dÂÂÂMªIdentifierÍ
+^Í
+_¡xS°MemberExpressionÍ
+aÍ
+dMªIdentifierÍ
+aÍ
+b¡dMªIdentifierÍ
+cÍ
+d¡xÂÂ¤init]¨PropertyÍ
+fÍ
+lÂÂÂMªIdentifierÍ
+fÍ
+g¡yS°MemberExpressionÍ
+iÍ
+lMªIdentifierÍ
+iÍ
+j¡dMªIdentifierÍ
+kÍ
+l¡yÂÂ¤init]¨PropertyÍ
+nÍ
+tÂÂÂMªIdentifierÍ
+nÍ
+o¡zS°MemberExpressionÍ
+qÍ
+tMªIdentifierÍ
+qÍ
+r¡dMªIdentifierÍ
+sÍ
+t¡zÂÂ¤init]¨PropertyÍ
+vÍ
+|ÂÂÂMªIdentifierÍ
+vÍ
+w¡wS°MemberExpressionÍ
+yÍ
+|MªIdentifierÍ
+yÍ
+z¡dMªIdentifierÍ
+{Í
+|¡wÂÂ¤initÂQ³ExpressionStatementÍ
+–ÍR´AssignmentExpressionÍ
+–Í¡=S°MemberExpressionÍ
+–Í
+§T®ThisExpressionÍ
+–Í
+šMªIdentifierÍ
+›Í
+§¬handleOrientÂÂP·ArrowFunctionExpressionÍ
+ªÍÀÂÂÂ‘MªIdentifierÍ
+«Í
+¬¡dN®BlockStatementÍ
+±Í‘Q³ExpressionStatementÍ
+ÀÍ[®CallExpressionÍ
+ÀÍS°MemberExpressionÍ
+ÀÍ
+ÉT®ThisExpressionÍ
+ÀÍ
+ÄMªIdentifierÍ
+ÅÍ
+É¤pushÂÂ’U§LiteralÍ
+ÊÍ
+Ú®rm_live_orient°'rm_live_orient'\°ObjectExpressionÍ
+ÜÍ“]¨PropertyÍ
+ŞÍ
+ìÂÂÂMªIdentifierÍ
+ŞÍ
+ã¥alphaS°MemberExpressionÍ
+åÍ
+ìMªIdentifierÍ
+åÍ
+æ¡dMªIdentifierÍ
+çÍ
+ì¥alphaÂÂ¤init]¨PropertyÍ
+îÍ
+úÂÂÂMªIdentifierÍ
+îÍ
+ò¤betaS°MemberExpressionÍ
+ôÍ
+úMªIdentifierÍ
+ôÍ
+õ¡dMªIdentifierÍ
+öÍ
+ú¤betaÂÂ¤init]¨PropertyÍ
+üÍ
+ÂÂÂMªIdentifierÍ
+üÍ¥gammaS°MemberExpressionÍÍ
+MªIdentifierÍÍ¡dMªIdentifierÍÍ
+¥gammaÂÂ¤initÂQ³ExpressionStatementÍ$ÍR´AssignmentExpressionÍ$Í€¡=S°MemberExpressionÍ$Í4T®ThisExpressionÍ$Í(MªIdentifierÍ)Í4«handleLightÂÂP·ArrowFunctionExpressionÍ7Í€ÀÂÂÂ‘MªIdentifierÍ8Í9¡dN®BlockStatementÍ>Í€‘Q³ExpressionStatementÍMÍu[®CallExpressionÍMÍtS°MemberExpressionÍMÍVT®ThisExpressionÍMÍQMªIdentifierÍRÍV¤pushÂÂ’U§LiteralÍWÍf­rm_live_light¯'rm_live_light'S°MemberExpressionÍhÍsMªIdentifierÍhÍi¡dMªIdentifierÍjÍs©intensityÂÂÂQ³ExpressionStatementÍ‹ÍêR´AssignmentExpressionÍ‹Íé¡=S°MemberExpressionÍ‹ÍšT®ThisExpressionÍ‹ÍMªIdentifierÍÍšªhandleProxÂÂP·ArrowFunctionExpressionÍÍéÀÂÂÂ‘MªIdentifierÍÍŸ¡dN®BlockStatementÍ¤Íé‘Q³ExpressionStatementÍ³ÍŞ[®CallExpressionÍ³ÍİS°MemberExpressionÍ³Í¼T®ThisExpressionÍ³Í·MªIdentifierÍ¸Í¼¤pushÂÂ’U§LiteralÍ½ÍĞ±rm_live_proximity³'rm_live_proximity'S°MemberExpressionÍÒÍÜMªIdentifierÍÒÍÓ¡dMªIdentifierÍÔÍÜ¨distanceÂÂÂQ³ExpressionStatementÍôÍVR´AssignmentExpressionÍôÍU¡=S°MemberExpressionÍôÍT®ThisExpressionÍôÍøMªIdentifierÍùÍ®handleHumidityÂÂP·ArrowFunctionExpressionÍ
+ÍUÀÂÂÂ‘MªIdentifierÍÍ¡dN®BlockStatementÍÍU‘Q³ExpressionStatementÍ ÍJ[®CallExpressionÍ ÍIS°MemberExpressionÍ Í)T®ThisExpressionÍ Í$MªIdentifierÍ%Í)¤pushÂÂ’U§LiteralÍ*Í<°rm_live_humidity²'rm_live_humidity'S°MemberExpressionÍ>ÍHMªIdentifierÍ>Í?¡dMªIdentifierÍ@ÍH¨humidityÂÂÂQ³ExpressionStatementÍ`ÍÃR´AssignmentExpressionÍ`ÍÂ¡=S°MemberExpressionÍ`ÍrT®ThisExpressionÍ`ÍdMªIdentifierÍeÍr­handleAmbTempÂÂP·ArrowFunctionExpressionÍuÍÂÀÂÂÂ‘MªIdentifierÍvÍw¡dN®BlockStatementÍ|ÍÂ‘Q³ExpressionStatementÍ‹Í·[®CallExpressionÍ‹Í¶S°MemberExpressionÍ‹Í”T®ThisExpressionÍ‹ÍMªIdentifierÍÍ”¤pushÂÂ’U§LiteralÍ•Í¦¯rm_live_ambtemp±'rm_live_ambtemp'S°MemberExpressionÍ¨ÍµMªIdentifierÍ¨Í©¡dMªIdentifierÍªÍµ«temperatureÂÂÂQ³ExpressionStatementÍÍÍ%R´AssignmentExpressionÍÍÍ$¡=S°MemberExpressionÍÍÍÜT®ThisExpressionÍÍÍÑMªIdentifierÍÒÍÜªhandleHallÂÂP·ArrowFunctionExpressionÍßÍ$ÀÂÂÂ‘MªIdentifierÍàÍá¡dN®BlockStatementÍæÍ$‘Q³ExpressionStatementÍõÍ[®CallExpressionÍõÍS°MemberExpressionÍõÍşT®ThisExpressionÍõÍùMªIdentifierÍúÍş¤pushÂÂ’U§LiteralÍÿÍ¬rm_live_hall®'rm_live_hall'S°MemberExpressionÍÍMªIdentifierÍÍ¡dMªIdentifierÍÍ¦statusÂÂÂQ³ExpressionStatementÍ/Í‹R´AssignmentExpressionÍ/ÍŠ¡=S°MemberExpressionÍ/Í>T®ThisExpressionÍ/Í3MªIdentifierÍ4Í>ªhandlePedoÂÂP·ArrowFunctionExpressionÍAÍŠÀÂÂÂ‘MªIdentifierÍBÍC¡dN®BlockStatementÍHÍŠ‘Q³ExpressionStatementÍWÍ[®CallExpressionÍWÍ~S°MemberExpressionÍWÍ`T®ThisExpressionÍWÍ[MªIdentifierÍ\Í`¤pushÂÂ’U§LiteralÍaÍt±rm_live_pedometer³'rm_live_pedometer'S°MemberExpressionÍvÍ}MªIdentifierÍvÍw¡dMªIdentifierÍxÍ}¥stepsÂÂÂQ³ExpressionStatementÍ•Í?R´AssignmentExpressionÍ•Í>¡=S°MemberExpressionÍ•Í£T®ThisExpressionÍ•Í™MªIdentifierÍšÍ£©handleLocÂÂP·ArrowFunctionExpressionÍ¦Í>ÀÂÂÂ‘MªIdentifierÍ§Íª£locN®BlockStatementÍ¯Í>“X³VariableDeclarationÍ¾Í“‘Y²VariableDeclaratorÍÄÍ’MªIdentifierÍÄÍÅ¡v\°ObjectExpressionÍÈÍ’—]¨PropertyÍÛÍìÂÂÂMªIdentifierÍÛÍŞ£latS°MemberExpressionÍàÍìMªIdentifierÍàÍã£locMªIdentifierÍäÍì¨latitudeÂÂ¤init]¨PropertyÍîÍ ÂÂÂMªIdentifierÍîÍñ£lngS°MemberExpressionÍóÍ MªIdentifierÍóÍö£locMªIdentifierÍ÷Í ©longitudeÂÂ¤init]¨PropertyÍÍÂÂÂMªIdentifierÍÍ£altS°MemberExpressionÍÍMªIdentifierÍÍ
+£locMªIdentifierÍÍ¨altitudeÂÂ¤init]¨PropertyÍ&Í7ÂÂÂMªIdentifierÍ&Í)£accS°MemberExpressionÍ+Í7MªIdentifierÍ+Í.£locMªIdentifierÍ/Í7¨accuracyÂÂ¤init]¨PropertyÍ9ÍGÂÂÂMªIdentifierÍ9Í<£spdS°MemberExpressionÍ>ÍGMªIdentifierÍ>ÍA£locMªIdentifierÍBÍG¥speedÂÂ¤init]¨PropertyÍIÍ[ÂÂÂMªIdentifierÍIÍL£brgS°MemberExpressionÍNÍ[MªIdentifierÍNÍQ£locMªIdentifierÍRÍ[©directionÂÂ¤init]¨PropertyÍnÍƒÂÂÂMªIdentifierÍnÍt¦timeMsS°MemberExpressionÍvÍƒMªIdentifierÍvÍy£locMªIdentifierÍzÍƒ©timeStampÂÂ¤init¥constQ³ExpressionStatementÍ¡ÍÂ[®CallExpressionÍ¡ÍÁS°MemberExpressionÍ¡ÍªT®ThisExpressionÍ¡Í¥MªIdentifierÍ¦Íª¤pushÂÂ’U§LiteralÍ«Í½°rm_live_location²'rm_live_location'MªIdentifierÍ¿ÍÀ¡vÂ^«IfStatementÍĞÍ3Z±LogicalExpressionÍÔÍøS°MemberExpressionÍÔÍáT®ThisExpressionÍÔÍØMªIdentifierÍÙÍá¨listenerÂÂ¢&&S°MemberExpressionÍåÍøS°MemberExpressionÍåÍòT®ThisExpressionÍåÍéMªIdentifierÍêÍò¨listenerÂÂMªIdentifierÍóÍø¥onLocÂÂN®BlockStatementÍúÍ3‘Q³ExpressionStatementÍÍ$[®CallExpressionÍÍ#S°MemberExpressionÍÍ S°MemberExpressionÍÍT®ThisExpressionÍÍMªIdentifierÍÍ¨listenerÂÂMªIdentifierÍÍ ¥onLocÂÂ‘MªIdentifierÍ!Í"¡vÂÀO°MethodDefinitionÍLÍßÃÂMªIdentifierÍSÍV£get¦methodP²FunctionExpressionÍVÍßÀÂÂÂN®BlockStatementÍYÍß’^«IfStatementÍdÍ·V¯UnaryExpressionÍhÍx¡!ÃS°MemberExpressionÍiÍxMªIdentifierÍiÍsªLiveStreamMªIdentifierÍtÍx¤instÂÂN®BlockStatementÍzÍ·‘Q³ExpressionStatementÍ‰Í¬R´AssignmentExpressionÍ‰Í«¡=S°MemberExpressionÍ‰Í˜MªIdentifierÍ‰Í“ªLiveStreamMªIdentifierÍ”Í˜¤instÂÂÔr_•¤type¥start£end¦callee©arguments­NewExpressionÍ›Í«MªIdentifierÍŸÍ©ªLiveStreamÀÔr`”¤type¥start£end¨argument¯ReturnStatementÍÁÍØS°MemberExpressionÍÈÍ×MªIdentifierÍÈÍÒªLiveStreamMªIdentifierÍÓÍ×¤instÂÂO°MethodDefinitionÍÿÍ2ÂÂMªIdentifierÍÿÍ
+«setListener¦methodP²FunctionExpressionÍ
+Í2ÀÂÂÂ‘MªIdentifierÍÍ¡lN®BlockStatementÍÍ2‘Q³ExpressionStatementÍÍ+R´AssignmentExpressionÍÍ*¡=S°MemberExpressionÍÍ&T®ThisExpressionÍÍMªIdentifierÍÍ&¨listenerÂÂMªIdentifierÍ)Í*¡lO°MethodDefinitionÍsÍğÂÂMªIdentifierÍsÍw¤push¦methodP²FunctionExpressionÍwÍğÀÂÂÂ’MªIdentifierÍxÍ{£keyMªIdentifierÍ}Í~¡vN®BlockStatementÍ€Íğ”Ôra–¤type¥start£end¥block§handler©finalizer¬TryStatementÍ‹ÍèN®BlockStatementÍÍÈ‘Q³ExpressionStatementÍÍ½[®CallExpressionÍÍ¼S°MemberExpressionÍÍ´MªIdentifierÍÍ¨ªAppStorageMªIdentifierÍ©Í´«setOrCreateÂÂ’MªIdentifierÍµÍ¸£keyMªIdentifierÍºÍ»¡vÂÔrb•¤type¥start£end¥param¤body«CatchClauseÍÒÍèMªIdentifierÍÙÍÚ¡eN®BlockStatementÍÜÍèÀX³VariableDeclarationÍòÍ	‘Y²VariableDeclaratorÍøÍMªIdentifierÍøÍû£now[®CallExpressionÍşÍS°MemberExpressionÍşÍMªIdentifierÍşÍ¤DateMªIdentifierÍÍ£nowÂÂÂ¥consta¬TryStatementÍÍ€N®BlockStatementÍÍ`‘Q³ExpressionStatementÍ&ÍU[®CallExpressionÍ&ÍTS°MemberExpressionÍ&Í<MªIdentifierÍ&Í0ªAppStorageMªIdentifierÍ1Í<«setOrCreateÂÂ’U§LiteralÍ=ÍN¯rm_live_tick_ms±'rm_live_tick_ms'MªIdentifierÍPÍS£nowÂb«CatchClauseÍjÍ€MªIdentifierÍqÍr¡eN®BlockStatementÍtÍ€À^«IfStatementÍŠÍéZ±LogicalExpressionÍÍ³S°MemberExpressionÍÍ›T®ThisExpressionÍÍ’MªIdentifierÍ“Í›¨listenerÂÂ¢&&S°MemberExpressionÍŸÍ³S°MemberExpressionÍŸÍ¬T®ThisExpressionÍŸÍ£MªIdentifierÍ¤Í¬¨listenerÂÂMªIdentifierÍ­Í³¦onTickÂÂN®BlockStatementÍµÍé‘Q³ExpressionStatementÍÄÍŞ[®CallExpressionÍÄÍİS°MemberExpressionÍÄÍØS°MemberExpressionÍÄÍÑT®ThisExpressionÍÄÍÈMªIdentifierÍÉÍÑ¨listenerÂÂMªIdentifierÍÒÍØ¦onTickÂÂ‘MªIdentifierÍÙÍÜ£nowÂÀO°MethodDefinitionÍöÍtÂÂMªIdentifierÍöÍü¦setVal¦methodP²FunctionExpressionÍüÍtÀÂÂÂ’MªIdentifierÍıÍ £keyMªIdentifierÍÍ¡vN®BlockStatementÍÍt‘a¬TryStatementÍÍmN®BlockStatementÍÍM‘Q³ExpressionStatementÍ#ÍB[®CallExpressionÍ#ÍAS°MemberExpressionÍ#Í9MªIdentifierÍ#Í-ªAppStorageMªIdentifierÍ.Í9«setOrCreateÂÂ’MªIdentifierÍ:Í=£keyMªIdentifierÍ?Í@¡vÂb«CatchClauseÍWÍmMªIdentifierÍ^Í_¡eN®BlockStatementÍaÍmÀO°MethodDefinitionÍzÍšÂÂMªIdentifierÍzÍ„ªpublishMag¦methodP²FunctionExpressionÍ„ÍšÀÂÂÂN®BlockStatementÍ‡Íš˜X³VariableDeclarationÍ’ÍÊ“Y²VariableDeclaratorÍ˜Í§MªIdentifierÍ˜Í™¡xS°MemberExpressionÍœÍ§S°MemberExpressionÍœÍ¤T®ThisExpressionÍœÍ MªIdentifierÍ¡Í¤£magÂÂU§LiteralÍ¥Í¦ ¡0ÃÂY²VariableDeclaratorÍ©Í¸MªIdentifierÍ©Íª¡yS°MemberExpressionÍ­Í¸S°MemberExpressionÍ­ÍµT®ThisExpressionÍ­Í±MªIdentifierÍ²Íµ£magÂÂU§LiteralÍ¶Í·¡1ÃÂY²VariableDeclaratorÍºÍÉMªIdentifierÍºÍ»¡zS°MemberExpressionÍ¾ÍÉS°MemberExpressionÍ¾ÍÆT®ThisExpressionÍ¾ÍÂMªIdentifierÍÃÍÆ£magÂÂU§LiteralÍÇÍÈ¡2ÃÂ¥constX³VariableDeclarationÍÔÍ‘Y²VariableDeclaratorÍÚÍ MªIdentifierÍÚÍİ£mag[®CallExpressionÍàÍ S°MemberExpressionÍàÍéMªIdentifierÍàÍä¤MathMªIdentifierÍåÍé¤sqrtÂÂ‘Z°BinaryExpressionÍêÍÿZ°BinaryExpressionÍêÍ÷Z°BinaryExpressionÍêÍïMªIdentifierÍêÍë¡x¡*MªIdentifierÍîÍï¡x¡+Z°BinaryExpressionÍòÍ÷MªIdentifierÍòÍó¡y¡*MªIdentifierÍöÍ÷¡y¡+Z°BinaryExpressionÍúÍÿMªIdentifierÍúÍû¡z¡*MªIdentifierÍşÍÿ¡zÂ¥constX³VariableDeclarationÍÍ‘Y²VariableDeclaratorÍÍMªIdentifierÍÍ¢azMªIdentifierÍÍ©undefined£let^«IfStatementÍ(Í”Z±LogicalExpressionÍ,ÍPS°MemberExpressionÍ,Í=T®ThisExpressionÍ,Í0MªIdentifierÍ1Í=¬hasAccelDataÂÂ¢&&S°MemberExpressionÍAÍPT®ThisExpressionÍAÍEMªIdentifierÍFÍPªhasMagDataÂÂN®BlockStatementÍRÍ”‘Q³ExpressionStatementÍaÍ‰R´AssignmentExpressionÍaÍˆ¡=MªIdentifierÍaÍc¢az[®CallExpressionÍfÍˆMªIdentifierÍfÍr¬fusedAzimuth’S°MemberExpressionÍsÍ}T®ThisExpressionÍsÍwMªIdentifierÍxÍ}¥accelÂÂS°MemberExpressionÍÍ‡T®ThisExpressionÍÍƒMªIdentifierÍ„Í‡£magÂÂÂÀX³VariableDeclarationÍÍÏ‘Y²VariableDeclaratorÍ¤ÍÎMªIdentifierÍ¤Í¥¡v\°ObjectExpressionÍ¨ÍÎ•]¨PropertyÍªÍ®ÂÂÂMªIdentifierÍªÍ«¡xMªIdentifierÍ­Í®¡x¤init]¨PropertyÍ°Í´ÂÂÂMªIdentifierÍ°Í±¡yMªIdentifierÍ³Í´¡y¤init]¨PropertyÍ¶ÍºÂÂÂMªIdentifierÍ¶Í·¡zMªIdentifierÍ¹Íº¡z¤init]¨PropertyÍ¼ÍÄÂÂÂMªIdentifierÍ¼Í¿£magMªIdentifierÍÁÍÄ£mag¤init]¨PropertyÍÆÍÌÂÂÂMªIdentifierÍÆÍÈ¢azMªIdentifierÍÊÍÌ¢az¤init¥constQ³ExpressionStatementÍÙÍú[®CallExpressionÍÙÍùS°MemberExpressionÍÙÍâT®ThisExpressionÍÙÍİMªIdentifierÍŞÍâ¤pushÂÂ’U§LiteralÍãÍõ°rm_live_magnetic²'rm_live_magnetic'MªIdentifierÍ÷Íø¡vÂQ³ExpressionStatementÍÍ.[®CallExpressionÍÍ-S°MemberExpressionÍÍT®ThisExpressionÍÍMªIdentifierÍ	Í¦setValÂÂ’U§LiteralÍÍ ®rm_live_mag_ms°'rm_live_mag_ms'[®CallExpressionÍ"Í,S°MemberExpressionÍ"Í*MªIdentifierÍ"Í&¤DateMªIdentifierÍ'Í*£nowÂÂÂÂ^«IfStatementÍ8Í“Z±LogicalExpressionÍ<Í`S°MemberExpressionÍ<ÍIT®ThisExpressionÍ<Í@MªIdentifierÍAÍI¨listenerÂÂ¢&&S°MemberExpressionÍMÍ`S°MemberExpressionÍMÍZT®ThisExpressionÍMÍQMªIdentifierÍRÍZ¨listenerÂÂMªIdentifierÍ[Í`¥onMagÂÂN®BlockStatementÍbÍ“‘Q³ExpressionStatementÍqÍˆ[®CallExpressionÍqÍ‡S°MemberExpressionÍqÍ„S°MemberExpressionÍqÍ~T®ThisExpressionÍqÍuMªIdentifierÍvÍ~¨listenerÂÂMªIdentifierÍÍ„¥onMagÂÂ‘MªIdentifierÍ…Í†¡vÂÀO°MethodDefinitionÍ ÍÂÂMªIdentifierÍ Í¨¨labelFor¦methodP²FunctionExpressionÍ¨ÍÀÂÂÂ‘MªIdentifierÍ©Í«¢idN®BlockStatementÍ­ÍÜ ^«IfStatementÍ¸Í
+Z°BinaryExpressionÍ¼ÍàMªIdentifierÍ¼Í¾¢id£===S°MemberExpressionÍÃÍàS°MemberExpressionÍÃÍÒMªIdentifierÍÃÍÉ¦sensorMªIdentifierÍÊÍÒ¨SensorIdÂÂMªIdentifierÍÓÍà­ACCELEROMETERÂÂN®BlockStatementÍâÍ
+‘`¯ReturnStatementÍñÍÿU§LiteralÍøÍş¬åŠ é€Ÿåº¦è®¡®'åŠ é€Ÿåº¦è®¡'À^«IfStatementÍÍwZ°BinaryExpressionÍÍIMªIdentifierÍÍ¢id£===S°MemberExpressionÍÍIS°MemberExpressionÍÍ.MªIdentifierÍÍ%¦sensorMªIdentifierÍ&Í.¨SensorIdÂÂMªIdentifierÍ/ÍIºACCELEROMETER_UNCALIBRATEDÂÂN®BlockStatementÍKÍw‘`¯ReturnStatementÍZÍlU§LiteralÍaÍk·åŠ é€Ÿåº¦è®¡Â·æœªæ ¡å‡†¹'åŠ é€Ÿåº¦è®¡Â·æœªæ ¡å‡†'À^«IfStatementÍÍÛZ°BinaryExpressionÍ…Í°MªIdentifierÍ…Í‡¢id£===S°MemberExpressionÍŒÍ°S°MemberExpressionÍŒÍ›MªIdentifierÍŒÍ’¦sensorMªIdentifierÍ“Í›¨SensorIdÂÂMªIdentifierÍœÍ°´LINEAR_ACCELEROMETERÂÂN®BlockStatementÍ²ÍÛ‘`¯ReturnStatementÍÁÍĞU§LiteralÍÈÍÏ¯çº¿æ€§åŠ é€Ÿåº¦±'çº¿æ€§åŠ é€Ÿåº¦'À^«IfStatementÍåÍ/Z°BinaryExpressionÍéÍMªIdentifierÍéÍë¢id£===S°MemberExpressionÍğÍS°MemberExpressionÍğÍÿMªIdentifierÍğÍö¦sensorMªIdentifierÍ÷Íÿ¨SensorIdÂÂMªIdentifierÍ Í§GRAVITYÂÂN®BlockStatementÍ	Í/‘`¯ReturnStatementÍÍ$U§LiteralÍÍ#¦é‡åŠ›¨'é‡åŠ›'À^«IfStatementÍ9Í†Z°BinaryExpressionÍ=Í]MªIdentifierÍ=Í?¢id£===S°MemberExpressionÍDÍ]S°MemberExpressionÍDÍSMªIdentifierÍDÍJ¦sensorMªIdentifierÍKÍS¨SensorIdÂÂMªIdentifierÍTÍ]©GYROSCOPEÂÂN®BlockStatementÍ_Í†‘`¯ReturnStatementÍnÍ{U§LiteralÍuÍz©é™€èºä»ª«'é™€èºä»ª'À^«IfStatementÍÍîZ°BinaryExpressionÍ”ÍÁMªIdentifierÍ”Í–¢id£===S°MemberExpressionÍ›ÍÁS°MemberExpressionÍ›ÍªMªIdentifierÍ›Í¡¦sensorMªIdentifierÍ¢Íª¨SensorIdÂÂMªIdentifierÍ«ÍÁ¶GYROSCOPE_UNCALIBRATEDÂÂN®BlockStatementÍÃÍî‘`¯ReturnStatementÍÒÍãU§LiteralÍÙÍâ´é™€èºä»ªÂ·æœªæ ¡å‡†¶'é™€èºä»ªÂ·æœªæ ¡å‡†'À^«IfStatementÍøÍJZ°BinaryExpressionÍüÍ!MªIdentifierÍüÍş¢id£===S°MemberExpressionÍÍ!S°MemberExpressionÍÍMªIdentifierÍÍ	¦sensorMªIdentifierÍ
+Í¨SensorIdÂÂMªIdentifierÍÍ!®MAGNETIC_FIELDÂÂN®BlockStatementÍ#ÍJ‘`¯ReturnStatementÍ2Í?U§LiteralÍ9Í>©ç£åŠ›è®¡«'ç£åŠ›è®¡'À^«IfStatementÍTÍ·Z°BinaryExpressionÍXÍŠMªIdentifierÍXÍZ¢id£===S°MemberExpressionÍ_ÍŠS°MemberExpressionÍ_ÍnMªIdentifierÍ_Íe¦sensorMªIdentifierÍfÍn¨SensorIdÂÂMªIdentifierÍoÍŠ»MAGNETIC_FIELD_UNCALIBRATEDÂÂN®BlockStatementÍŒÍ·‘`¯ReturnStatementÍ›Í¬U§LiteralÍ¢Í«´ç£åŠ›è®¡Â·æœªæ ¡å‡†¶'ç£åŠ›è®¡Â·æœªæ ¡å‡†'À^«IfStatementÍÁÍZ°BinaryExpressionÍÅÍåMªIdentifierÍÅÍÇ¢id£===S°MemberExpressionÍÌÍåS°MemberExpressionÍÌÍÛMªIdentifierÍÌÍÒ¦sensorMªIdentifierÍÓÍÛ¨SensorIdÂÂMªIdentifierÍÜÍå©BAROMETERÂÂN®BlockStatementÍçÍ‘`¯ReturnStatementÍöÍU§LiteralÍıÍ©æ°”å‹è®¡«'æ°”å‹è®¡'À^«IfStatementÍÍlZ°BinaryExpressionÍÍBMªIdentifierÍÍ¢id£===S°MemberExpressionÍ#ÍBS°MemberExpressionÍ#Í2MªIdentifierÍ#Í)¦sensorMªIdentifierÍ*Í2¨SensorIdÂÂMªIdentifierÍ3ÍB¯ROTATION_VECTORÂÂN®BlockStatementÍDÍl‘`¯ReturnStatementÍSÍaU§LiteralÍZÍ`¬æ—‹è½¬çŸ¢é‡®'æ—‹è½¬çŸ¢é‡'À^«IfStatementÍvÍÄZ°BinaryExpressionÍzÍœMªIdentifierÍzÍ|¢id£===S°MemberExpressionÍÍœS°MemberExpressionÍÍMªIdentifierÍÍ‡¦sensorMªIdentifierÍˆÍ¨SensorIdÂÂMªIdentifierÍ‘Íœ«ORIENTATIONÂÂN®BlockStatementÍÍÄ‘`¯ReturnStatementÍ­Í¹U§LiteralÍ´Í¸¦æ–¹å‘¨'æ–¹å‘'À^«IfStatementÍÎÍZ°BinaryExpressionÍÒÍöMªIdentifierÍÒÍÔ¢id£===S°MemberExpressionÍÙÍöS°MemberExpressionÍÙÍèMªIdentifierÍÙÍß¦sensorMªIdentifierÍàÍè¨SensorIdÂÂMªIdentifierÍéÍö­AMBIENT_LIGHTÂÂN®BlockStatementÍøÍ‘`¯ReturnStatementÍÍU§LiteralÍÍ©ç¯å¢ƒå…‰«'ç¯å¢ƒå…‰'À^«IfStatementÍ)ÍuZ°BinaryExpressionÍ-ÍMMªIdentifierÍ-Í/¢id£===S°MemberExpressionÍ4ÍMS°MemberExpressionÍ4ÍCMªIdentifierÍ4Í:¦sensorMªIdentifierÍ;ÍC¨SensorIdÂÂMªIdentifierÍDÍM©PROXIMITYÂÂN®BlockStatementÍOÍu‘`¯ReturnStatementÍ^ÍjU§LiteralÍeÍi¦æ¥è¿‘¨'æ¥è¿‘'À^«IfStatementÍÍÊZ°BinaryExpressionÍƒÍ¢MªIdentifierÍƒÍ…¢id£===S°MemberExpressionÍŠÍ¢S°MemberExpressionÍŠÍ™MªIdentifierÍŠÍ¦sensorMªIdentifierÍ‘Í™¨SensorIdÂÂMªIdentifierÍšÍ¢¨HUMIDITYÂÂN®BlockStatementÍ¤ÍÊ‘`¯ReturnStatementÍ³Í¿U§LiteralÍºÍ¾¦æ¹¿åº¦¨'æ¹¿åº¦'À^«IfStatementÍÔÍ,Z°BinaryExpressionÍØÍMªIdentifierÍØÍÚ¢id£===S°MemberExpressionÍßÍS°MemberExpressionÍßÍîMªIdentifierÍßÍå¦sensorMªIdentifierÍæÍî¨SensorIdÂÂMªIdentifierÍïÍ³AMBIENT_TEMPERATUREÂÂN®BlockStatementÍÍ,‘`¯ReturnStatementÍÍ!U§LiteralÍÍ ¬ç¯å¢ƒæ¸©åº¦®'ç¯å¢ƒæ¸©åº¦'À^«IfStatementÍ6Í}Z°BinaryExpressionÍ:ÍUMªIdentifierÍ:Í<¢id£===S°MemberExpressionÍAÍUS°MemberExpressionÍAÍPMªIdentifierÍAÍG¦sensorMªIdentifierÍHÍP¨SensorIdÂÂMªIdentifierÍQÍU¤HALLÂÂN®BlockStatementÍWÍ}‘`¯ReturnStatementÍfÍrU§LiteralÍmÍq¦éœå°”¨'éœå°”'À^«IfStatementÍ‡ÍÔZ°BinaryExpressionÍ‹Í«MªIdentifierÍ‹Í¢id£===S°MemberExpressionÍ’Í«S°MemberExpressionÍ’Í¡MªIdentifierÍ’Í˜¦sensorMªIdentifierÍ™Í¡¨SensorIdÂÂMªIdentifierÍ¢Í«©PEDOMETERÂÂN®BlockStatementÍ­ÍÔ‘`¯ReturnStatementÍ¼ÍÉU§LiteralÍÃÍÈ©è®¡æ­¥å™¨«'è®¡æ­¥å™¨'À^«IfStatementÍŞÍ6Z°BinaryExpressionÍâÍMªIdentifierÍâÍä¢id£===S°MemberExpressionÍéÍS°MemberExpressionÍéÍøMªIdentifierÍéÍï¦sensorMªIdentifierÍğÍø¨SensorIdÂÂMªIdentifierÍùÍ³PEDOMETER_DETECTIONÂÂN®BlockStatementÍÍ6‘`¯ReturnStatementÍÍ+U§LiteralÍ$Í*¬è®¡æ­¥æ£€æµ‹®'è®¡æ­¥æ£€æµ‹'À^«IfStatementÍ@ÍZ°BinaryExpressionÍDÍeMªIdentifierÍDÍF¢id£===S°MemberExpressionÍKÍeS°MemberExpressionÍKÍZMªIdentifierÍKÍQ¦sensorMªIdentifierÍRÍZ¨SensorIdÂÂMªIdentifierÍ[ÍeªHEART_RATEÂÂN®BlockStatementÍgÍ‘`¯ReturnStatementÍvÍ‚U§LiteralÍ}Í¦å¿ƒç‡¨'å¿ƒç‡'À^«IfStatementÍ—ÍîZ°BinaryExpressionÍ›ÍÄMªIdentifierÍ›Í¢id£===S°MemberExpressionÍ¢ÍÄS°MemberExpressionÍ¢Í±MªIdentifierÍ¢Í¨¦sensorMªIdentifierÍ©Í±¨SensorIdÂÂMªIdentifierÍ²ÍÄ²SIGNIFICANT_MOTIONÂÂN®BlockStatementÍÆÍî‘`¯ReturnStatementÍÕÍãU§LiteralÍÜÍâ¬å¤§å¹…è¿åŠ¨®'å¤§å¹…è¿åŠ¨'À`¯ReturnStatementÍøÍÔrc•¤type¥start£end«expressions¦quasis¯TemplateLiteralÍÿÍ‘MªIdentifierÍÍ	¢id’Ôrd•¤type¥start£end¥value¤tail¯TemplateElementÍ ÍÔre’£raw¦cooked«ä¼ æ„Ÿå™¨ #«ä¼ æ„Ÿå™¨ #Âd¯TemplateElementÍ
+Í
+e  ÃO°MethodDefinitionÍ?ÍŸÂÂMªIdentifierÍ?ÍM®scanSensorList¦methodP²FunctionExpressionÍMÍŸÀÂÂÂN®BlockStatementÍPÍŸ”X³VariableDeclarationÍ[Íh‘Y²VariableDeclaratorÍ_ÍgMªIdentifierÍ_Íb£outW¯ArrayExpressionÍeÍg£leta¬TryStatementÍrÍëN®BlockStatementÍvÍË’X³VariableDeclarationÍ…Í­‘Y²VariableDeclaratorÍ‹Í¬MªIdentifierÍ‹Í¤list[®CallExpressionÍ’Í¬S°MemberExpressionÍ’ÍªMªIdentifierÍ’Í˜¦sensorMªIdentifierÍ™Íª±getSensorListSyncÂÂÂ¥constQ³ExpressionStatementÍ»ÍÀR´AssignmentExpressionÍ»Í¿¡=MªIdentifierÍ»Í¾£out[®CallExpressionÍÁÍ¿S°MemberExpressionÍÁÍÉMªIdentifierÍÁÍÅ¤listMªIdentifierÍÆÍÉ£mapÂÂ‘P·ArrowFunctionExpressionÍÊÍ¾ÀÂÂÂ‘MªIdentifierÍËÍÌ¡sN®BlockStatementÍÑÍ¾‘`¯ReturnStatementÍäÍ¯\°ObjectExpressionÍëÍ®”]¨PropertyÍÍÂÂÂMªIdentifierÍÍ¢idS°MemberExpressionÍÍMªIdentifierÍÍ¡sMªIdentifierÍÍ¨sensorIdÂÂ¤init]¨PropertyÍ'ÍGÂÂÂMªIdentifierÍ'Í,¥label[®CallExpressionÍ.ÍGS°MemberExpressionÍ.Í;T®ThisExpressionÍ.Í2MªIdentifierÍ3Í;¨labelForÂÂ‘S°MemberExpressionÍ<ÍFMªIdentifierÍ<Í=¡sMªIdentifierÍ>ÍF¨sensorIdÂÂÂ¤init]¨PropertyÍ^ÍpÂÂÂMªIdentifierÍ^Íb¤nameS°MemberExpressionÍdÍpMªIdentifierÍdÍe¡sMªIdentifierÍfÍpªsensorNameÂÂ¤init]¨PropertyÍ‡Í›ÂÂÂMªIdentifierÍ‡Í¦vendorS°MemberExpressionÍÍ›MªIdentifierÍÍ¡sMªIdentifierÍ‘Í›ªvendorNameÂÂ¤initÂb«CatchClauseÍÕÍëMªIdentifierÍÜÍİ¡eN®BlockStatementÍßÍëÀQ³ExpressionStatementÍõÍ#[®CallExpressionÍõÍ"S°MemberExpressionÍõÍMªIdentifierÍõÍÿªAppStorageMªIdentifierÍ Í«setOrCreateÂÂ’U§LiteralÍÍ®rm_sensor_list°'rm_sensor_list'MªIdentifierÍÍ!£outÂ^«IfStatementÍ-Í˜Z±LogicalExpressionÍ1Í\S°MemberExpressionÍ1Í>T®ThisExpressionÍ1Í5MªIdentifierÍ6Í>¨listenerÂÂ¢&&S°MemberExpressionÍBÍ\S°MemberExpressionÍBÍOT®ThisExpressionÍBÍFMªIdentifierÍGÍO¨listenerÂÂMªIdentifierÍPÍ\¬onSensorListÂÂN®BlockStatementÍ^Í˜‘Q³ExpressionStatementÍmÍ[®CallExpressionÍmÍŒS°MemberExpressionÍmÍ‡S°MemberExpressionÍmÍzT®ThisExpressionÍmÍqMªIdentifierÍrÍz¨listenerÂÂMªIdentifierÍ{Í‡¬onSensorListÂÂ‘MªIdentifierÍˆÍ‹£outÂÀO°MethodDefinitionÍ(Í*"ÂÂMªIdentifierÍ(Í0¨onceRead¦methodP²FunctionExpressionÍ0Í*"ÀÂÂÂN®BlockStatementÍ3Í*"Ü X³VariableDeclarationÍ>ÍU‘Y²VariableDeclaratorÍDÍTMªIdentifierÍDÍG£now[®CallExpressionÍJÍTS°MemberExpressionÍJÍRMªIdentifierÍJÍN¤DateMªIdentifierÍOÍR£nowÂÂÂ¥consta¬TryStatementÍ_ÍÌN®BlockStatementÍcÍ¬‘Q³ExpressionStatementÍrÍ¡[®CallExpressionÍrÍ S°MemberExpressionÍrÍˆMªIdentifierÍrÍ|ªAppStorageMªIdentifierÍ}Íˆ«setOrCreateÂÂ’U§LiteralÍ‰Íš¯rm_live_tick_ms±'rm_live_tick_ms'MªIdentifierÍœÍŸ£nowÂb«CatchClauseÍ¶ÍÌMªIdentifierÍ½Í¾¡eN®BlockStatementÍÀÍÌÀ^«IfStatementÍÖÍ 5Z±LogicalExpressionÍÚÍÿS°MemberExpressionÍÚÍçT®ThisExpressionÍÚÍŞMªIdentifierÍßÍç¨listenerÂÂ¢&&S°MemberExpressionÍëÍÿS°MemberExpressionÍëÍøT®ThisExpressionÍëÍïMªIdentifierÍğÍø¨listenerÂÂMªIdentifierÍùÍÿ¦onTickÂÂN®BlockStatementÍ Í 5‘Q³ExpressionStatementÍ Í *[®CallExpressionÍ Í )S°MemberExpressionÍ Í $S°MemberExpressionÍ Í T®ThisExpressionÍ Í MªIdentifierÍ Í ¨listenerÂÂMªIdentifierÍ Í $¦onTickÂÂ‘MªIdentifierÍ %Í (£nowÂÀa¬TryStatementÍ ?Í ¹N®BlockStatementÍ CÍ ™‘Q³ExpressionStatementÍ RÍ [®CallExpressionÍ RÍ S°MemberExpressionÍ RÍ ]MªIdentifierÍ RÍ X¦sensorMªIdentifierÍ YÍ ]¤onceÂÂ’S°MemberExpressionÍ ^Í wS°MemberExpressionÍ ^Í mMªIdentifierÍ ^Í d¦sensorMªIdentifierÍ eÍ m¨SensorIdÂÂMªIdentifierÍ nÍ w©BAROMETERÂÂS°MemberExpressionÍ yÍ ŒT®ThisExpressionÍ yÍ }MªIdentifierÍ ~Í Œ®handlePressureÂÂÂb«CatchClauseÍ £Í ¹MªIdentifierÍ ªÍ «¡eN®BlockStatementÍ ­Í ¹Àa¬TryStatementÍ ÃÍ!=N®BlockStatementÍ ÇÍ!‘Q³ExpressionStatementÍ ÖÍ![®CallExpressionÍ ÖÍ!S°MemberExpressionÍ ÖÍ áMªIdentifierÍ ÖÍ Ü¦sensorMªIdentifierÍ İÍ á¤onceÂÂ’S°MemberExpressionÍ âÍ! S°MemberExpressionÍ âÍ ñMªIdentifierÍ âÍ è¦sensorMªIdentifierÍ éÍ ñ¨SensorIdÂÂMªIdentifierÍ òÍ! ®MAGNETIC_FIELDÂÂS°MemberExpressionÍ!Í!T®ThisExpressionÍ!Í!MªIdentifierÍ!Í!©handleMagÂÂÂb«CatchClauseÍ!'Í!=MªIdentifierÍ!.Í!/¡eN®BlockStatementÍ!1Í!=Àa¬TryStatementÍ!GÍ!ÂN®BlockStatementÍ!KÍ!¢‘Q³ExpressionStatementÍ!ZÍ!—[®CallExpressionÍ!ZÍ!–S°MemberExpressionÍ!ZÍ!eMªIdentifierÍ!ZÍ!`¦sensorMªIdentifierÍ!aÍ!e¤onceÂÂ’S°MemberExpressionÍ!fÍ!ƒS°MemberExpressionÍ!fÍ!uMªIdentifierÍ!fÍ!l¦sensorMªIdentifierÍ!mÍ!u¨SensorIdÂÂMªIdentifierÍ!vÍ!ƒ­ACCELEROMETERÂÂS°MemberExpressionÍ!…Í!•T®ThisExpressionÍ!…Í!‰MªIdentifierÍ!ŠÍ!•«handleAccelÂÂÂb«CatchClauseÍ!¬Í!ÂMªIdentifierÍ!³Í!´¡eN®BlockStatementÍ!¶Í!ÂÀ^«IfStatementÍ!ÌÍ"’S°MemberExpressionÍ!ĞÍ!ãT®ThisExpressionÍ!ĞÍ!ÔMªIdentifierÍ!ÕÍ!ã®hasLinearAccelÂÂN®BlockStatementÍ!åÍ"’‘a¬TryStatementÍ!ôÍ"‡N®BlockStatementÍ!øÍ"_‘Q³ExpressionStatementÍ"Í"P[®CallExpressionÍ"Í"OS°MemberExpressionÍ"Í"MªIdentifierÍ"Í"¦sensorMªIdentifierÍ"Í"¤onceÂÂ’S°MemberExpressionÍ"Í";S°MemberExpressionÍ"Í"&MªIdentifierÍ"Í"¦sensorMªIdentifierÍ"Í"&¨SensorIdÂÂMªIdentifierÍ"'Í";´LINEAR_ACCELEROMETERÂÂS°MemberExpressionÍ"=Í"NT®ThisExpressionÍ"=Í"AMªIdentifierÍ"BÍ"N¬handleLinearÂÂÂb«CatchClauseÍ"mÍ"‡MªIdentifierÍ"tÍ"u¡eN®BlockStatementÍ"wÍ"‡ÀÀ^«IfStatementÍ"œÍ#RS°MemberExpressionÍ" Í"¯T®ThisExpressionÍ" Í"¤MªIdentifierÍ"¥Í"¯ªhasGravityÂÂN®BlockStatementÍ"±Í#R‘a¬TryStatementÍ"ÀÍ#GN®BlockStatementÍ"ÄÍ#‘Q³ExpressionStatementÍ"×Í#[®CallExpressionÍ"×Í#S°MemberExpressionÍ"×Í"âMªIdentifierÍ"×Í"İ¦sensorMªIdentifierÍ"ŞÍ"â¤onceÂÂ’S°MemberExpressionÍ"ãÍ"úS°MemberExpressionÍ"ãÍ"òMªIdentifierÍ"ãÍ"é¦sensorMªIdentifierÍ"êÍ"ò¨SensorIdÂÂMªIdentifierÍ"óÍ"ú§GRAVITYÂÂS°MemberExpressionÍ"üÍ#T®ThisExpressionÍ"üÍ# MªIdentifierÍ#Í#­handleGravityÂÂÂb«CatchClauseÍ#-Í#GMªIdentifierÍ#4Í#5¡eN®BlockStatementÍ#7Í#GÀÀ^«IfStatementÍ#\Í$S°MemberExpressionÍ#`Í#lT®ThisExpressionÍ#`Í#dMªIdentifierÍ#eÍ#l§hasGyroÂÂN®BlockStatementÍ#nÍ$‘a¬TryStatementÍ#}Í$N®BlockStatementÍ#Í#Û‘Q³ExpressionStatementÍ#”Í#Ì[®CallExpressionÍ#”Í#ËS°MemberExpressionÍ#”Í#ŸMªIdentifierÍ#”Í#š¦sensorMªIdentifierÍ#›Í#Ÿ¤onceÂÂ’S°MemberExpressionÍ# Í#¹S°MemberExpressionÍ# Í#¯MªIdentifierÍ# Í#¦¦sensorMªIdentifierÍ#§Í#¯¨SensorIdÂÂMªIdentifierÍ#°Í#¹©GYROSCOPEÂÂS°MemberExpressionÍ#»Í#ÊT®ThisExpressionÍ#»Í#¿MªIdentifierÍ#ÀÍ#ÊªhandleGyroÂÂÂb«CatchClauseÍ#éÍ$MªIdentifierÍ#ğÍ#ñ¡eN®BlockStatementÍ#óÍ$ÀÀ^«IfStatementÍ$Í$ÔS°MemberExpressionÍ$Í$*T®ThisExpressionÍ$Í$ MªIdentifierÍ$!Í$*©hasRotVecÂÂN®BlockStatementÍ$,Í$Ô‘a¬TryStatementÍ$;Í$ÉN®BlockStatementÍ$?Í$¡‘Q³ExpressionStatementÍ$RÍ$’[®CallExpressionÍ$RÍ$‘S°MemberExpressionÍ$RÍ$]MªIdentifierÍ$RÍ$X¦sensorMªIdentifierÍ$YÍ$]¤onceÂÂ’S°MemberExpressionÍ$^Í$}S°MemberExpressionÍ$^Í$mMªIdentifierÍ$^Í$d¦sensorMªIdentifierÍ$eÍ$m¨SensorIdÂÂMªIdentifierÍ$nÍ$}¯ROTATION_VECTORÂÂS°MemberExpressionÍ$Í$T®ThisExpressionÍ$Í$ƒMªIdentifierÍ$„Í$¬handleRotVecÂÂÂb«CatchClauseÍ$¯Í$ÉMªIdentifierÍ$¶Í$·¡eN®BlockStatementÍ$¹Í$ÉÀÀ^«IfStatementÍ$ŞÍ%–S°MemberExpressionÍ$âÍ$ğT®ThisExpressionÍ$âÍ$æMªIdentifierÍ$çÍ$ğ©hasOrientÂÂN®BlockStatementÍ$òÍ%–‘a¬TryStatementÍ%Í%‹N®BlockStatementÍ%Í%c‘Q³ExpressionStatementÍ%Í%T[®CallExpressionÍ%Í%SS°MemberExpressionÍ%Í%#MªIdentifierÍ%Í%¦sensorMªIdentifierÍ%Í%#¤onceÂÂ’S°MemberExpressionÍ%$Í%?S°MemberExpressionÍ%$Í%3MªIdentifierÍ%$Í%*¦sensorMªIdentifierÍ%+Í%3¨SensorIdÂÂMªIdentifierÍ%4Í%?«ORIENTATIONÂÂS°MemberExpressionÍ%AÍ%RT®ThisExpressionÍ%AÍ%EMªIdentifierÍ%FÍ%R¬handleOrientÂÂÂb«CatchClauseÍ%qÍ%‹MªIdentifierÍ%xÍ%y¡eN®BlockStatementÍ%{Í%‹ÀÀ^«IfStatementÍ% Í&XS°MemberExpressionÍ%¤Í%±T®ThisExpressionÍ%¤Í%¨MªIdentifierÍ%©Í%±¨hasLightÂÂN®BlockStatementÍ%³Í&X‘a¬TryStatementÍ%ÂÍ&MN®BlockStatementÍ%ÆÍ&%‘Q³ExpressionStatementÍ%ÙÍ&[®CallExpressionÍ%ÙÍ&S°MemberExpressionÍ%ÙÍ%äMªIdentifierÍ%ÙÍ%ß¦sensorMªIdentifierÍ%àÍ%ä¤onceÂÂ’S°MemberExpressionÍ%åÍ&S°MemberExpressionÍ%åÍ%ôMªIdentifierÍ%åÍ%ë¦sensorMªIdentifierÍ%ìÍ%ô¨SensorIdÂÂMªIdentifierÍ%õÍ&­AMBIENT_LIGHTÂÂS°MemberExpressionÍ&Í&T®ThisExpressionÍ&Í&MªIdentifierÍ&	Í&«handleLightÂÂÂb«CatchClauseÍ&3Í&MMªIdentifierÍ&:Í&;¡eN®BlockStatementÍ&=Í&MÀÀ^«IfStatementÍ&bÍ'S°MemberExpressionÍ&fÍ&rT®ThisExpressionÍ&fÍ&jMªIdentifierÍ&kÍ&r§hasProxÂÂN®BlockStatementÍ&tÍ'‘a¬TryStatementÍ&ƒÍ'	N®BlockStatementÍ&‡Í&á‘Q³ExpressionStatementÍ&šÍ&Ò[®CallExpressionÍ&šÍ&ÑS°MemberExpressionÍ&šÍ&¥MªIdentifierÍ&šÍ& ¦sensorMªIdentifierÍ&¡Í&¥¤onceÂÂ’S°MemberExpressionÍ&¦Í&¿S°MemberExpressionÍ&¦Í&µMªIdentifierÍ&¦Í&¬¦sensorMªIdentifierÍ&­Í&µ¨SensorIdÂÂMªIdentifierÍ&¶Í&¿©PROXIMITYÂÂS°MemberExpressionÍ&ÁÍ&ĞT®ThisExpressionÍ&ÁÍ&ÅMªIdentifierÍ&ÆÍ&ĞªhandleProxÂÂÂb«CatchClauseÍ&ïÍ'	MªIdentifierÍ&öÍ&÷¡eN®BlockStatementÍ&ùÍ'	ÀÀ^«IfStatementÍ'Í'×S°MemberExpressionÍ'"Í'2T®ThisExpressionÍ'"Í'&MªIdentifierÍ''Í'2«hasHumidityÂÂN®BlockStatementÍ'4Í'×‘a¬TryStatementÍ'CÍ'ÌN®BlockStatementÍ'GÍ'¤‘Q³ExpressionStatementÍ'ZÍ'•[®CallExpressionÍ'ZÍ'”S°MemberExpressionÍ'ZÍ'eMªIdentifierÍ'ZÍ'`¦sensorMªIdentifierÍ'aÍ'e¤onceÂÂ’S°MemberExpressionÍ'fÍ'~S°MemberExpressionÍ'fÍ'uMªIdentifierÍ'fÍ'l¦sensorMªIdentifierÍ'mÍ'u¨SensorIdÂÂMªIdentifierÍ'vÍ'~¨HUMIDITYÂÂS°MemberExpressionÍ'€Í'“T®ThisExpressionÍ'€Í'„MªIdentifierÍ'…Í'“®handleHumidityÂÂÂb«CatchClauseÍ'²Í'ÌMªIdentifierÍ'¹Í'º¡eN®BlockStatementÍ'¼Í'ÌÀÀ^«IfStatementÍ'áÍ(£S°MemberExpressionÍ'åÍ'ôT®ThisExpressionÍ'åÍ'éMªIdentifierÍ'êÍ'ôªhasAmbTempÂÂN®BlockStatementÍ'öÍ(£‘a¬TryStatementÍ(Í(˜N®BlockStatementÍ(	Í(p‘Q³ExpressionStatementÍ(Í(a[®CallExpressionÍ(Í(`S°MemberExpressionÍ(Í('MªIdentifierÍ(Í("¦sensorMªIdentifierÍ(#Í('¤onceÂÂ’S°MemberExpressionÍ((Í(KS°MemberExpressionÍ((Í(7MªIdentifierÍ((Í(.¦sensorMªIdentifierÍ(/Í(7¨SensorIdÂÂMªIdentifierÍ(8Í(K³AMBIENT_TEMPERATUREÂÂS°MemberExpressionÍ(MÍ(_T®ThisExpressionÍ(MÍ(QMªIdentifierÍ(RÍ(_­handleAmbTempÂÂÂb«CatchClauseÍ(~Í(˜MªIdentifierÍ(…Í(†¡eN®BlockStatementÍ(ˆÍ(˜ÀÀ^«IfStatementÍ(­Í)ZS°MemberExpressionÍ(±Í(½T®ThisExpressionÍ(±Í(µMªIdentifierÍ(¶Í(½§hasHallÂÂN®BlockStatementÍ(¿Í)Z‘a¬TryStatementÍ(ÎÍ)ON®BlockStatementÍ(ÒÍ)'‘Q³ExpressionStatementÍ(åÍ)[®CallExpressionÍ(åÍ)S°MemberExpressionÍ(åÍ(ğMªIdentifierÍ(åÍ(ë¦sensorMªIdentifierÍ(ìÍ(ğ¤onceÂÂ’S°MemberExpressionÍ(ñÍ)S°MemberExpressionÍ(ñÍ) MªIdentifierÍ(ñÍ(÷¦sensorMªIdentifierÍ(øÍ) ¨SensorIdÂÂMªIdentifierÍ)Í)¤HALLÂÂS°MemberExpressionÍ)Í)T®ThisExpressionÍ)Í)MªIdentifierÍ)Í)ªhandleHallÂÂÂb«CatchClauseÍ)5Í)OMªIdentifierÍ)<Í)=¡eN®BlockStatementÍ)?Í)OÀÀ^«IfStatementÍ)dÍ*S°MemberExpressionÍ)hÍ)yT®ThisExpressionÍ)hÍ)lMªIdentifierÍ)mÍ)y¬hasPedometerÂÂN®BlockStatementÍ){Í*‘a¬TryStatementÍ)ŠÍ*N®BlockStatementÍ)Í)è‘Q³ExpressionStatementÍ)¡Í)Ù[®CallExpressionÍ)¡Í)ØS°MemberExpressionÍ)¡Í)¬MªIdentifierÍ)¡Í)§¦sensorMªIdentifierÍ)¨Í)¬¤onceÂÂ’S°MemberExpressionÍ)­Í)ÆS°MemberExpressionÍ)­Í)¼MªIdentifierÍ)­Í)³¦sensorMªIdentifierÍ)´Í)¼¨SensorIdÂÂMªIdentifierÍ)½Í)Æ©PEDOMETERÂÂS°MemberExpressionÍ)ÈÍ)×T®ThisExpressionÍ)ÈÍ)ÌMªIdentifierÍ)ÍÍ)×ªhandlePedoÂÂÂb«CatchClauseÍ)öÍ*MªIdentifierÍ)ıÍ)ş¡eN®BlockStatementÍ* Í*ÀÀO°MethodDefinitionÍ*RÍ+íÂÂMªIdentifierÍ*RÍ*Y§pollLoc¦methodP²FunctionExpressionÍ*YÍ+íÀÂÂÂN®BlockStatementÍ*\Í+í‘a¬TryStatementÍ*gÍ+æN®BlockStatementÍ*kÍ+Æ’X³VariableDeclarationÍ*zÍ+‘Y²VariableDeclaratorÍ*€Í+MªIdentifierÍ*€Í*‡§oneShot\°ObjectExpressionÍ*ŠÍ+’]¨PropertyÍ*Í*äÂÂÂMªIdentifierÍ*Í*­°locatingPriorityS°MemberExpressionÍ*¯Í*äS°MemberExpressionÍ*¯Í*ÒMªIdentifierÍ*¯Í*Á²geoLocationManagerMªIdentifierÍ*ÂÍ*Ò°LocatingPriorityÂÂMªIdentifierÍ*ÓÍ*ä±PRIORITY_ACCURACYÂÂ¤init]¨PropertyÍ*÷Í+ÂÂÂMªIdentifierÍ*÷Í+±locatingTimeoutMsU§LiteralÍ+
+Í+Í ¤4000¤init¥constQ³ExpressionStatementÍ+,Í+»[®CallExpressionÍ+,Í+ºS°MemberExpressionÍ+,Í+¢[®CallExpressionÍ+,Í+œS°MemberExpressionÍ+,Í+_[®CallExpressionÍ+,Í+ZS°MemberExpressionÍ+,Í+QMªIdentifierÍ+,Í+>²geoLocationManagerMªIdentifierÍ+?Í+Q²getCurrentLocationÂÂ‘MªIdentifierÍ+RÍ+Y§oneShotÂMªIdentifierÍ+[Í+_¤thenÂÂ‘P·ArrowFunctionExpressionÍ+`Í+›ÀÂÂÂ‘MªIdentifierÍ+aÍ+b¡lN®BlockStatementÍ+gÍ+›‘Q³ExpressionStatementÍ+zÍ+Œ[®CallExpressionÍ+zÍ+‹S°MemberExpressionÍ+zÍ+ˆT®ThisExpressionÍ+zÍ+~MªIdentifierÍ+Í+ˆ©handleLocÂÂ‘MªIdentifierÍ+‰Í+Š¡lÂÂMªIdentifierÍ+Í+¢¥catchÂÂ‘P·ArrowFunctionExpressionÍ+£Í+¹ÀÂÂÂN®BlockStatementÍ+©Í+¹Âb«CatchClauseÍ+ĞÍ+æMªIdentifierÍ+×Í+Ø¡eN®BlockStatementÍ+ÚÍ+æÀO°MethodDefinitionÍ+óÍ<ÂÂMªIdentifierÍ+óÍ+ø¥start¦methodP²FunctionExpressionÍ+øÍ<ÀÂÂÂN®BlockStatementÍ+ûÍ<Ü ;^«IfStatementÍ,Í,9S°MemberExpressionÍ,
+Í,T®ThisExpressionÍ,
+Í,MªIdentifierÍ,Í,§startedÂÂN®BlockStatementÍ,Í,9‘`¯ReturnStatementÍ,'Í,.ÀÀQ³ExpressionStatementÍ,CÍ,WR´AssignmentExpressionÍ,CÍ,V¡=S°MemberExpressionÍ,CÍ,OT®ThisExpressionÍ,CÍ,GMªIdentifierÍ,HÍ,O§startedÂÂU§LiteralÍ,RÍ,VÃ¤trueQ³ExpressionStatementÍ,aÍ,[®CallExpressionÍ,aÍ,S°MemberExpressionÍ,aÍ,wMªIdentifierÍ,aÍ,kªAppStorageMªIdentifierÍ,lÍ,w«setOrCreateÂÂ’U§LiteralÍ,xÍ,‰¯rm_live_tick_ms±'rm_live_tick_ms'U§LiteralÍ,‹Í,Œ ¡0ÂQ³ExpressionStatementÍ,˜Í,É[®CallExpressionÍ,˜Í,ÈS°MemberExpressionÍ,˜Í,®MªIdentifierÍ,˜Í,¢ªAppStorageMªIdentifierÍ,£Í,®«setOrCreateÂÂ’U§LiteralÍ,¯Í,Ä³rm_live_pressure_msµ'rm_live_pressure_ms'U§LiteralÍ,ÆÍ,Ç ¡0ÂQ³ExpressionStatementÍ,ÓÍ,ÿ[®CallExpressionÍ,ÓÍ,şS°MemberExpressionÍ,ÓÍ,éMªIdentifierÍ,ÓÍ,İªAppStorageMªIdentifierÍ,ŞÍ,é«setOrCreateÂÂ’U§LiteralÍ,êÍ,ú®rm_live_mag_ms°'rm_live_mag_ms'U§LiteralÍ,üÍ,ı ¡0ÂQ³ExpressionStatementÍ-	Í-[®CallExpressionÍ-	Í-S°MemberExpressionÍ-	Í-T®ThisExpressionÍ-	Í-MªIdentifierÍ-Í-®scanSensorListÂÂÂX³VariableDeclarationÍ-)Í-Y‘Y²VariableDeclaratorÍ-/Í-XMªIdentifierÍ-/Í-1¢hp[®CallExpressionÍ-4Í-XMªIdentifierÍ-4Í-=©hasSensor‘S°MemberExpressionÍ->Í-WS°MemberExpressionÍ->Í-MMªIdentifierÍ->Í-D¦sensorMªIdentifierÍ-EÍ-M¨SensorIdÂÂMªIdentifierÍ-NÍ-W©BAROMETERÂÂÂ¥constX³VariableDeclarationÍ-cÍ-˜‘Y²VariableDeclaratorÍ-iÍ-—MªIdentifierÍ-iÍ-k¢hm[®CallExpressionÍ-nÍ-—MªIdentifierÍ-nÍ-w©hasSensor‘S°MemberExpressionÍ-xÍ-–S°MemberExpressionÍ-xÍ-‡MªIdentifierÍ-xÍ-~¦sensorMªIdentifierÍ-Í-‡¨SensorIdÂÂMªIdentifierÍ-ˆÍ-–®MAGNETIC_FIELDÂÂÂ¥constQ³ExpressionStatementÍ-¢Í-èR´AssignmentExpressionÍ-¢Í-ç¡=S°MemberExpressionÍ-¢Í-µT®ThisExpressionÍ-¢Í-¦MªIdentifierÍ-§Í-µ®hasLinearAccelÂÂ[®CallExpressionÍ-¸Í-çMªIdentifierÍ-¸Í-Á©hasSensor‘S°MemberExpressionÍ-ÂÍ-æS°MemberExpressionÍ-ÂÍ-ÑMªIdentifierÍ-ÂÍ-È¦sensorMªIdentifierÍ-ÉÍ-Ñ¨SensorIdÂÂMªIdentifierÍ-ÒÍ-æ´LINEAR_ACCELEROMETERÂÂÂQ³ExpressionStatementÍ-òÍ.'R´AssignmentExpressionÍ-òÍ.&¡=S°MemberExpressionÍ-òÍ.T®ThisExpressionÍ-òÍ-öMªIdentifierÍ-÷Í.ªhasGravityÂÂ[®CallExpressionÍ.Í.&MªIdentifierÍ.Í.©hasSensor‘S°MemberExpressionÍ.Í.%S°MemberExpressionÍ.Í.MªIdentifierÍ.Í.¦sensorMªIdentifierÍ.Í.¨SensorIdÂÂMªIdentifierÍ.Í.%§GRAVITYÂÂÂQ³ExpressionStatementÍ.1Í.eR´AssignmentExpressionÍ.1Í.d¡=S°MemberExpressionÍ.1Í.=T®ThisExpressionÍ.1Í.5MªIdentifierÍ.6Í.=§hasGyroÂÂ[®CallExpressionÍ.@Í.dMªIdentifierÍ.@Í.I©hasSensor‘S°MemberExpressionÍ.JÍ.cS°MemberExpressionÍ.JÍ.YMªIdentifierÍ.JÍ.P¦sensorMªIdentifierÍ.QÍ.Y¨SensorIdÂÂMªIdentifierÍ.ZÍ.c©GYROSCOPEÂÂÂQ³ExpressionStatementÍ.oÍ.«R´AssignmentExpressionÍ.oÍ.ª¡=S°MemberExpressionÍ.oÍ.}T®ThisExpressionÍ.oÍ.sMªIdentifierÍ.tÍ.}©hasRotVecÂÂ[®CallExpressionÍ.€Í.ªMªIdentifierÍ.€Í.‰©hasSensor‘S°MemberExpressionÍ.ŠÍ.©S°MemberExpressionÍ.ŠÍ.™MªIdentifierÍ.ŠÍ.¦sensorMªIdentifierÍ.‘Í.™¨SensorIdÂÂMªIdentifierÍ.šÍ.©¯ROTATION_VECTORÂÂÂQ³ExpressionStatementÍ.µÍ.íR´AssignmentExpressionÍ.µÍ.ì¡=S°MemberExpressionÍ.µÍ.ÃT®ThisExpressionÍ.µÍ.¹MªIdentifierÍ.ºÍ.Ã©hasOrientÂÂ[®CallExpressionÍ.ÆÍ.ìMªIdentifierÍ.ÆÍ.Ï©hasSensor‘S°MemberExpressionÍ.ĞÍ.ëS°MemberExpressionÍ.ĞÍ.ßMªIdentifierÍ.ĞÍ.Ö¦sensorMªIdentifierÍ.×Í.ß¨SensorIdÂÂMªIdentifierÍ.àÍ.ë«ORIENTATIONÂÂÂQ³ExpressionStatementÍ.÷Í/0R´AssignmentExpressionÍ.÷Í//¡=S°MemberExpressionÍ.÷Í/T®ThisExpressionÍ.÷Í.ûMªIdentifierÍ.üÍ/¨hasLightÂÂ[®CallExpressionÍ/Í//MªIdentifierÍ/Í/©hasSensor‘S°MemberExpressionÍ/Í/.S°MemberExpressionÍ/Í/ MªIdentifierÍ/Í/¦sensorMªIdentifierÍ/Í/ ¨SensorIdÂÂMªIdentifierÍ/!Í/.­AMBIENT_LIGHTÂÂÂQ³ExpressionStatementÍ/:Í/nR´AssignmentExpressionÍ/:Í/m¡=S°MemberExpressionÍ/:Í/FT®ThisExpressionÍ/:Í/>MªIdentifierÍ/?Í/F§hasProxÂÂ[®CallExpressionÍ/IÍ/mMªIdentifierÍ/IÍ/R©hasSensor‘S°MemberExpressionÍ/SÍ/lS°MemberExpressionÍ/SÍ/bMªIdentifierÍ/SÍ/Y¦sensorMªIdentifierÍ/ZÍ/b¨SensorIdÂÂMªIdentifierÍ/cÍ/l©PROXIMITYÂÂÂQ³ExpressionStatementÍ/xÍ/¯R´AssignmentExpressionÍ/xÍ/®¡=S°MemberExpressionÍ/xÍ/ˆT®ThisExpressionÍ/xÍ/|MªIdentifierÍ/}Í/ˆ«hasHumidityÂÂ[®CallExpressionÍ/‹Í/®MªIdentifierÍ/‹Í/”©hasSensor‘S°MemberExpressionÍ/•Í/­S°MemberExpressionÍ/•Í/¤MªIdentifierÍ/•Í/›¦sensorMªIdentifierÍ/œÍ/¤¨SensorIdÂÂMªIdentifierÍ/¥Í/­¨HUMIDITYÂÂÂQ³ExpressionStatementÍ/¹Í/úR´AssignmentExpressionÍ/¹Í/ù¡=S°MemberExpressionÍ/¹Í/ÈT®ThisExpressionÍ/¹Í/½MªIdentifierÍ/¾Í/ÈªhasAmbTempÂÂ[®CallExpressionÍ/ËÍ/ùMªIdentifierÍ/ËÍ/Ô©hasSensor‘S°MemberExpressionÍ/ÕÍ/øS°MemberExpressionÍ/ÕÍ/äMªIdentifierÍ/ÕÍ/Û¦sensorMªIdentifierÍ/ÜÍ/ä¨SensorIdÂÂMªIdentifierÍ/åÍ/ø³AMBIENT_TEMPERATUREÂÂÂQ³ExpressionStatementÍ0Í03R´AssignmentExpressionÍ0Í02¡=S°MemberExpressionÍ0Í0T®ThisExpressionÍ0Í0MªIdentifierÍ0	Í0§hasHallÂÂ[®CallExpressionÍ0Í02MªIdentifierÍ0Í0©hasSensor‘S°MemberExpressionÍ0Í01S°MemberExpressionÍ0Í0,MªIdentifierÍ0Í0#¦sensorMªIdentifierÍ0$Í0,¨SensorIdÂÂMªIdentifierÍ0-Í01¤HALLÂÂÂQ³ExpressionStatementÍ0=Í0vR´AssignmentExpressionÍ0=Í0u¡=S°MemberExpressionÍ0=Í0NT®ThisExpressionÍ0=Í0AMªIdentifierÍ0BÍ0N¬hasPedometerÂÂ[®CallExpressionÍ0QÍ0uMªIdentifierÍ0QÍ0Z©hasSensor‘S°MemberExpressionÍ0[Í0tS°MemberExpressionÍ0[Í0jMªIdentifierÍ0[Í0a¦sensorMªIdentifierÍ0bÍ0j¨SensorIdÂÂMªIdentifierÍ0kÍ0t©PEDOMETERÂÂÂQ³ExpressionStatementÍ0€Í0³[®CallExpressionÍ0€Í0²S°MemberExpressionÍ0€Í0–MªIdentifierÍ0€Í0ŠªAppStorageMªIdentifierÍ0‹Í0–«setOrCreateÂÂ’U§LiteralÍ0—Í0­´rm_live_has_pressure¶'rm_live_has_pressure'MªIdentifierÍ0¯Í0±¢hpÂQ³ExpressionStatementÍ0½Í0ğ[®CallExpressionÍ0½Í0ïS°MemberExpressionÍ0½Í0ÓMªIdentifierÍ0½Í0ÇªAppStorageMªIdentifierÍ0ÈÍ0Ó«setOrCreateÂÂ’U§LiteralÍ0ÔÍ0ê´rm_live_has_magnetic¶'rm_live_has_magnetic'MªIdentifierÍ0ìÍ0î¢hmÂQ³ExpressionStatementÍ0úÍ1P[®CallExpressionÍ0úÍ1OS°MemberExpressionÍ0úÍ1MªIdentifierÍ0úÍ1ªAppStorageMªIdentifierÍ1Í1«setOrCreateÂÂ’U§LiteralÍ1Í1$±rm_live_has_accel³'rm_live_has_accel'[®CallExpressionÍ1&Í1NMªIdentifierÍ1&Í1/©hasSensor‘S°MemberExpressionÍ10Í1MS°MemberExpressionÍ10Í1?MªIdentifierÍ10Í16¦sensorMªIdentifierÍ17Í1?¨SensorIdÂÂMªIdentifierÍ1@Í1M­ACCELEROMETERÂÂÂÂQ³ExpressionStatementÍ1ZÍ1œ[®CallExpressionÍ1ZÍ1›S°MemberExpressionÍ1ZÍ1pMªIdentifierÍ1ZÍ1dªAppStorageMªIdentifierÍ1eÍ1p«setOrCreateÂÂ’U§LiteralÍ1qÍ1…²rm_live_has_linear´'rm_live_has_linear'S°MemberExpressionÍ1‡Í1šT®ThisExpressionÍ1‡Í1‹MªIdentifierÍ1ŒÍ1š®hasLinearAccelÂÂÂQ³ExpressionStatementÍ1¦Í1å[®CallExpressionÍ1¦Í1äS°MemberExpressionÍ1¦Í1¼MªIdentifierÍ1¦Í1°ªAppStorageMªIdentifierÍ1±Í1¼«setOrCreateÂÂ’U§LiteralÍ1½Í1Ò³rm_live_has_gravityµ'rm_live_has_gravity'S°MemberExpressionÍ1ÔÍ1ãT®ThisExpressionÍ1ÔÍ1ØMªIdentifierÍ1ÙÍ1ãªhasGravityÂÂÂQ³ExpressionStatementÍ1ïÍ2([®CallExpressionÍ1ïÍ2'S°MemberExpressionÍ1ïÍ2MªIdentifierÍ1ïÍ1ùªAppStorageMªIdentifierÍ1úÍ2«setOrCreateÂÂ’U§LiteralÍ2Í2°rm_live_has_gyro²'rm_live_has_gyro'S°MemberExpressionÍ2Í2&T®ThisExpressionÍ2Í2MªIdentifierÍ2Í2&§hasGyroÂÂÂQ³ExpressionStatementÍ22Í2o[®CallExpressionÍ22Í2nS°MemberExpressionÍ22Í2HMªIdentifierÍ22Í2<ªAppStorageMªIdentifierÍ2=Í2H«setOrCreateÂÂ’U§LiteralÍ2IÍ2]²rm_live_has_rotvec´'rm_live_has_rotvec'S°MemberExpressionÍ2_Í2mT®ThisExpressionÍ2_Í2cMªIdentifierÍ2dÍ2m©hasRotVecÂÂÂQ³ExpressionStatementÍ2yÍ2¶[®CallExpressionÍ2yÍ2µS°MemberExpressionÍ2yÍ2MªIdentifierÍ2yÍ2ƒªAppStorageMªIdentifierÍ2„Í2«setOrCreateÂÂ’U§LiteralÍ2Í2¤²rm_live_has_orient´'rm_live_has_orient'S°MemberExpressionÍ2¦Í2´T®ThisExpressionÍ2¦Í2ªMªIdentifierÍ2«Í2´©hasOrientÂÂÂQ³ExpressionStatementÍ2ÀÍ2û[®CallExpressionÍ2ÀÍ2úS°MemberExpressionÍ2ÀÍ2ÖMªIdentifierÍ2ÀÍ2ÊªAppStorageMªIdentifierÍ2ËÍ2Ö«setOrCreateÂÂ’U§LiteralÍ2×Í2ê±rm_live_has_light³'rm_live_has_light'S°MemberExpressionÍ2ìÍ2ùT®ThisExpressionÍ2ìÍ2ğMªIdentifierÍ2ñÍ2ù¨hasLightÂÂÂQ³ExpressionStatementÍ3Í3C[®CallExpressionÍ3Í3BS°MemberExpressionÍ3Í3MªIdentifierÍ3Í3ªAppStorageMªIdentifierÍ3Í3«setOrCreateÂÂ’U§LiteralÍ3Í33µrm_live_has_proximity·'rm_live_has_proximity'S°MemberExpressionÍ35Í3AT®ThisExpressionÍ35Í39MªIdentifierÍ3:Í3A§hasProxÂÂÂQ³ExpressionStatementÍ3MÍ3[®CallExpressionÍ3MÍ3S°MemberExpressionÍ3MÍ3cMªIdentifierÍ3MÍ3WªAppStorageMªIdentifierÍ3XÍ3c«setOrCreateÂÂ’U§LiteralÍ3dÍ3z´rm_live_has_humidity¶'rm_live_has_humidity'S°MemberExpressionÍ3|Í3ŒT®ThisExpressionÍ3|Í3€MªIdentifierÍ3Í3Œ«hasHumidityÂÂÂQ³ExpressionStatementÍ3˜Í3×[®CallExpressionÍ3˜Í3ÖS°MemberExpressionÍ3˜Í3®MªIdentifierÍ3˜Í3¢ªAppStorageMªIdentifierÍ3£Í3®«setOrCreateÂÂ’U§LiteralÍ3¯Í3Ä³rm_live_has_ambtempµ'rm_live_has_ambtemp'S°MemberExpressionÍ3ÆÍ3ÕT®ThisExpressionÍ3ÆÍ3ÊMªIdentifierÍ3ËÍ3ÕªhasAmbTempÂÂÂQ³ExpressionStatementÍ3áÍ4[®CallExpressionÍ3áÍ4S°MemberExpressionÍ3áÍ3÷MªIdentifierÍ3áÍ3ëªAppStorageMªIdentifierÍ3ìÍ3÷«setOrCreateÂÂ’U§LiteralÍ3øÍ4
+°rm_live_has_hall²'rm_live_has_hall'S°MemberExpressionÍ4Í4T®ThisExpressionÍ4Í4MªIdentifierÍ4Í4§hasHallÂÂÂQ³ExpressionStatementÍ4$Í4g[®CallExpressionÍ4$Í4fS°MemberExpressionÍ4$Í4:MªIdentifierÍ4$Í4.ªAppStorageMªIdentifierÍ4/Í4:«setOrCreateÂÂ’U§LiteralÍ4;Í4Rµrm_live_has_pedometer·'rm_live_has_pedometer'S°MemberExpressionÍ4TÍ4eT®ThisExpressionÍ4TÍ4XMªIdentifierÍ4YÍ4e¬hasPedometerÂÂÂ^«IfStatementÍ4qÍ4ÕZ±LogicalExpressionÍ4uÍ4›S°MemberExpressionÍ4uÍ4‚T®ThisExpressionÍ4uÍ4yMªIdentifierÍ4zÍ4‚¨listenerÂÂ¢&&S°MemberExpressionÍ4†Í4›S°MemberExpressionÍ4†Í4“T®ThisExpressionÍ4†Í4ŠMªIdentifierÍ4‹Í4“¨listenerÂÂMªIdentifierÍ4”Í4›§onFlagsÂÂN®BlockStatementÍ4Í4Õ‘Q³ExpressionStatementÍ4¬Í4Ê[®CallExpressionÍ4¬Í4ÉS°MemberExpressionÍ4¬Í4ÁS°MemberExpressionÍ4¬Í4¹T®ThisExpressionÍ4¬Í4°MªIdentifierÍ4±Í4¹¨listenerÂÂMªIdentifierÍ4ºÍ4Á§onFlagsÂÂ’MªIdentifierÍ4ÂÍ4Ä¢hpMªIdentifierÍ4ÆÍ4È¢hmÂÀQ³ExpressionStatementÍ4ßÍ5[®CallExpressionÍ4ßÍ5S°MemberExpressionÍ4ßÍ4õMªIdentifierÍ4ßÍ4éªAppStorageMªIdentifierÍ4êÍ4õ«setOrCreateÂÂ’U§LiteralÍ4öÍ5°rm_live_location²'rm_live_location'U§LiteralÍ5
+Í5À¤nullÂQ³ExpressionStatementÍ5Í5K[®CallExpressionÍ5Í5JS°MemberExpressionÍ5Í50MªIdentifierÍ5Í5$ªAppStorageMªIdentifierÍ5%Í50«setOrCreateÂÂ’U§LiteralÍ51Í5C°rm_live_pressure²'rm_live_pressure'U§LiteralÍ5EÍ5IÀ¤nullÂQ³ExpressionStatementÍ5UÍ5†[®CallExpressionÍ5UÍ5…S°MemberExpressionÍ5UÍ5kMªIdentifierÍ5UÍ5_ªAppStorageMªIdentifierÍ5`Í5k«setOrCreateÂÂ’U§LiteralÍ5lÍ5~°rm_live_magnetic²'rm_live_magnetic'U§LiteralÍ5€Í5„À¤nullÂQ³ExpressionStatementÍ5Í5»[®CallExpressionÍ5Í5ºS°MemberExpressionÍ5Í5¦MªIdentifierÍ5Í5šªAppStorageMªIdentifierÍ5›Í5¦«setOrCreateÂÂ’U§LiteralÍ5§Í5µ¬rm_live_wifi®'rm_live_wifi'W¯ArrayExpressionÍ5·Í5¹ÂQ³ExpressionStatementÍ5ÅÍ5÷[®CallExpressionÍ5ÅÍ5öS°MemberExpressionÍ5ÅÍ5ÛMªIdentifierÍ5ÅÍ5ÏªAppStorageMªIdentifierÍ5ĞÍ5Û«setOrCreateÂÂ’U§LiteralÍ5ÜÍ5ò´rm_live_wifi_scan_ms¶'rm_live_wifi_scan_ms'U§LiteralÍ5ôÍ5õ ¡0ÂQ³ExpressionStatementÍ6Í6/[®CallExpressionÍ6Í6.S°MemberExpressionÍ6Í6MªIdentifierÍ6Í6ªAppStorageMªIdentifierÍ6Í6«setOrCreateÂÂ’U§LiteralÍ6Í6'­rm_live_accel¯'rm_live_accel'U§LiteralÍ6)Í6-À¤nullÂQ³ExpressionStatementÍ69Í6h[®CallExpressionÍ69Í6gS°MemberExpressionÍ69Í6OMªIdentifierÍ69Í6CªAppStorageMªIdentifierÍ6DÍ6O«setOrCreateÂÂ’U§LiteralÍ6PÍ6`®rm_live_linear°'rm_live_linear'U§LiteralÍ6bÍ6fÀ¤nullÂQ³ExpressionStatementÍ6rÍ6¢[®CallExpressionÍ6rÍ6¡S°MemberExpressionÍ6rÍ6ˆMªIdentifierÍ6rÍ6|ªAppStorageMªIdentifierÍ6}Í6ˆ«setOrCreateÂÂ’U§LiteralÍ6‰Í6š¯rm_live_gravity±'rm_live_gravity'U§LiteralÍ6œÍ6 À¤nullÂQ³ExpressionStatementÍ6¬Í6Ù[®CallExpressionÍ6¬Í6ØS°MemberExpressionÍ6¬Í6ÂMªIdentifierÍ6¬Í6¶ªAppStorageMªIdentifierÍ6·Í6Â«setOrCreateÂÂ’U§LiteralÍ6ÃÍ6Ñ¬rm_live_gyro®'rm_live_gyro'U§LiteralÍ6ÓÍ6×À¤nullÂQ³ExpressionStatementÍ6ãÍ7[®CallExpressionÍ6ãÍ7S°MemberExpressionÍ6ãÍ6ùMªIdentifierÍ6ãÍ6íªAppStorageMªIdentifierÍ6îÍ6ù«setOrCreateÂÂ’U§LiteralÍ6úÍ7
+®rm_live_rotvec°'rm_live_rotvec'U§LiteralÍ7Í7À¤nullÂQ³ExpressionStatementÍ7Í7K[®CallExpressionÍ7Í7JS°MemberExpressionÍ7Í72MªIdentifierÍ7Í7&ªAppStorageMªIdentifierÍ7'Í72«setOrCreateÂÂ’U§LiteralÍ73Í7C®rm_live_orient°'rm_live_orient'U§LiteralÍ7EÍ7IÀ¤nullÂQ³ExpressionStatementÍ7UÍ7[®CallExpressionÍ7UÍ7€S°MemberExpressionÍ7UÍ7kMªIdentifierÍ7UÍ7_ªAppStorageMªIdentifierÍ7`Í7k«setOrCreateÂÂ’U§LiteralÍ7lÍ7{­rm_live_light¯'rm_live_light'V¯UnaryExpressionÍ7}Í7¡-ÃU§LiteralÍ7~Í7¡1ÂQ³ExpressionStatementÍ7‹Í7»[®CallExpressionÍ7‹Í7ºS°MemberExpressionÍ7‹Í7¡MªIdentifierÍ7‹Í7•ªAppStorageMªIdentifierÍ7–Í7¡«setOrCreateÂÂ’U§LiteralÍ7¢Í7µ±rm_live_proximity³'rm_live_proximity'V¯UnaryExpressionÍ7·Í7¹¡-ÃU§LiteralÍ7¸Í7¹¡1ÂQ³ExpressionStatementÍ7ÅÍ7ô[®CallExpressionÍ7ÅÍ7óS°MemberExpressionÍ7ÅÍ7ÛMªIdentifierÍ7ÅÍ7ÏªAppStorageMªIdentifierÍ7ĞÍ7Û«setOrCreateÂÂ’U§LiteralÍ7ÜÍ7î°rm_live_humidity²'rm_live_humidity'V¯UnaryExpressionÍ7ğÍ7ò¡-ÃU§LiteralÍ7ñÍ7ò¡1ÂQ³ExpressionStatementÍ7şÍ8.[®CallExpressionÍ7şÍ8-S°MemberExpressionÍ7şÍ8MªIdentifierÍ7şÍ8ªAppStorageMªIdentifierÍ8	Í8«setOrCreateÂÂ’U§LiteralÍ8Í8&¯rm_live_ambtemp±'rm_live_ambtemp'V¯UnaryExpressionÍ8(Í8,¡-ÃU§LiteralÍ8)Í8,Íç£999ÂQ³ExpressionStatementÍ88Í8c[®CallExpressionÍ88Í8bS°MemberExpressionÍ88Í8NMªIdentifierÍ88Í8BªAppStorageMªIdentifierÍ8CÍ8N«setOrCreateÂÂ’U§LiteralÍ8OÍ8]¬rm_live_hall®'rm_live_hall'V¯UnaryExpressionÍ8_Í8a¡-ÃU§LiteralÍ8`Í8a¡1ÂQ³ExpressionStatementÍ8mÍ8[®CallExpressionÍ8mÍ8œS°MemberExpressionÍ8mÍ8ƒMªIdentifierÍ8mÍ8wªAppStorageMªIdentifierÍ8xÍ8ƒ«setOrCreateÂÂ’U§LiteralÍ8„Í8—±rm_live_pedometer³'rm_live_pedometer'V¯UnaryExpressionÍ8™Í8›¡-ÃU§LiteralÍ8šÍ8›¡1ÂQ³ExpressionStatementÍ9Í9([®CallExpressionÍ9Í9'S°MemberExpressionÍ9Í9%T®ThisExpressionÍ9Í9MªIdentifierÍ9Í9%¨onceReadÂÂÂQ³ExpressionStatementÍ92Í9ˆR´AssignmentExpressionÍ92Í9‡¡=S°MemberExpressionÍ92Í9BT®ThisExpressionÍ92Í96MªIdentifierÍ97Í9B«sensorTimerÂÂ[®CallExpressionÍ9EÍ9‡MªIdentifierÍ9EÍ9P«setInterval’P·ArrowFunctionExpressionÍ9QÍ9ÀÂÂÂN®BlockStatementÍ9WÍ9‘Q³ExpressionStatementÍ9fÍ9v[®CallExpressionÍ9fÍ9uS°MemberExpressionÍ9fÍ9sT®ThisExpressionÍ9fÍ9jMªIdentifierÍ9kÍ9s¨onceReadÂÂÂU§LiteralÍ9ƒÍ9†Ìú£250ÂX³VariableDeclarationÍ9°Í:5‘Y²VariableDeclaratorÍ9¶Í:4MªIdentifierÍ9¶Í9¹£req\°ObjectExpressionÍ9¼Í:4’]¨PropertyÍ9ËÍ9ÖÂÂÂMªIdentifierÍ9ËÍ9Ó¨intervalU§LiteralÍ9ÕÍ9Ö¡1¤init]¨PropertyÍ9åÍ:)ÂÂÂMªIdentifierÍ9åÍ9õ°locationScenarioS°MemberExpressionÍ9÷Í:)S°MemberExpressionÍ9÷Í:MªIdentifierÍ9÷Í:	²geoLocationManagerMªIdentifierÍ:
+Í:´UserActivityScenarioÂÂMªIdentifierÍ:Í:)ªNAVIGATIONÂÂ¤init¥consta¬TryStatementÍ:?Í;
+N®BlockStatementÍ:CÍ:š‘Q³ExpressionStatementÍ:RÍ:[®CallExpressionÍ:RÍ:S°MemberExpressionÍ:RÍ:gMªIdentifierÍ:RÍ:d²geoLocationManagerMªIdentifierÍ:eÍ:g¢onÂÂ“U§LiteralÍ:hÍ:x®locationChange°'locationChange'MªIdentifierÍ:zÍ:}£reqS°MemberExpressionÍ:Í:T®ThisExpressionÍ:Í:ƒMªIdentifierÍ:„Í:©handleLocÂÂÂb«CatchClauseÍ:¤Í;
+MªIdentifierÍ:«Í:¬¡eN®BlockStatementÍ:®Í;
+‘Q³ExpressionStatementÍ:½Í:ÿ[®CallExpressionÍ:½Í:şS°MemberExpressionÍ:½Í:ÈMªIdentifierÍ:½Í:Â¥hilogMªIdentifierÍ:ÃÍ:È¥errorÂÂ”U§LiteralÍ:ÉÍ:Ï ¦0x0000MªIdentifierÍ:ÑÍ:Ô£TAGU§LiteralÍ:ÖÍ:ê¾å®šä½è®¢é˜…å¤±è´¥: %{public}sÙ 'å®šä½è®¢é˜…å¤±è´¥: %{public}s'[®CallExpressionÍ:ìÍ:ıS°MemberExpressionÍ:ìÍ:úMªIdentifierÍ:ìÍ:ğ¤JSONMªIdentifierÍ:ñÍ:ú©stringifyÂÂ‘MªIdentifierÍ:ûÍ:ü¡eÂÂÀQ³ExpressionStatementÍ;Í;#[®CallExpressionÍ;Í;"S°MemberExpressionÍ;Í; T®ThisExpressionÍ;Í;MªIdentifierÍ;Í; §pollLocÂÂÂQ³ExpressionStatementÍ;-Í;€R´AssignmentExpressionÍ;-Í;¡=S°MemberExpressionÍ;-Í;:T®ThisExpressionÍ;-Í;1MªIdentifierÍ;2Í;:¨locTimerÂÂ[®CallExpressionÍ;=Í;MªIdentifierÍ;=Í;H«setInterval’P·ArrowFunctionExpressionÍ;IÍ;xÀÂÂÂN®BlockStatementÍ;OÍ;x‘Q³ExpressionStatementÍ;^Í;m[®CallExpressionÍ;^Í;lS°MemberExpressionÍ;^Í;jT®ThisExpressionÍ;^Í;bMªIdentifierÍ;cÍ;j§pollLocÂÂÂU§LiteralÍ;zÍ;~Íˆ¤5000ÂQ³ExpressionStatementÍ;ŠÍ;œ[®CallExpressionÍ;ŠÍ;›S°MemberExpressionÍ;ŠÍ;™T®ThisExpressionÍ;ŠÍ;MªIdentifierÍ;Í;™ªdoWifiScanÂÂÂQ³ExpressionStatementÍ;¦Í;şR´AssignmentExpressionÍ;¦Í;ı¡=S°MemberExpressionÍ;¦Í;´T®ThisExpressionÍ;¦Í;ªMªIdentifierÍ;«Í;´©wifiTimerÂÂ[®CallExpressionÍ;·Í;ıMªIdentifierÍ;·Í;Â«setInterval’P·ArrowFunctionExpressionÍ;ÃÍ;õÀÂÂÂN®BlockStatementÍ;ÉÍ;õ‘Q³ExpressionStatementÍ;ØÍ;ê[®CallExpressionÍ;ØÍ;éS°MemberExpressionÍ;ØÍ;çT®ThisExpressionÍ;ØÍ;ÜMªIdentifierÍ;İÍ;çªdoWifiScanÂÂÂU§LiteralÍ;÷Í;üÍu0¥30000ÂO°MethodDefinitionÍ<Í>úÂÂMªIdentifierÍ<Í<¤stop¦methodP²FunctionExpressionÍ<Í>úÀÂÂÂN®BlockStatementÍ<Í>ú—^«IfStatementÍ<Í<QV¯UnaryExpressionÍ<!Í<.¡!ÃS°MemberExpressionÍ<"Í<.T®ThisExpressionÍ<"Í<&MªIdentifierÍ<'Í<.§startedÂÂN®BlockStatementÍ<0Í<Q‘`¯ReturnStatementÍ<?Í<FÀÀQ³ExpressionStatementÍ<[Í<pR´AssignmentExpressionÍ<[Í<o¡=S°MemberExpressionÍ<[Í<gT®ThisExpressionÍ<[Í<_MªIdentifierÍ<`Í<g§startedÂÂU§LiteralÍ<jÍ<oÂ¥false^«IfStatementÍ<zÍ<óZ°BinaryExpressionÍ<~Í<“S°MemberExpressionÍ<~Í<T®ThisExpressionÍ<~Í<‚MªIdentifierÍ<ƒÍ<«sensorTimerÂÂ¢>=U§LiteralÍ<’Í<“ ¡0N®BlockStatementÍ<•Í<ó’Q³ExpressionStatementÍ<¤Í<Ä[®CallExpressionÍ<¤Í<ÃMªIdentifierÍ<¤Í<±­clearInterval‘S°MemberExpressionÍ<²Í<ÂT®ThisExpressionÍ<²Í<¶MªIdentifierÍ<·Í<Â«sensorTimerÂÂÂQ³ExpressionStatementÍ<ÒÍ<èR´AssignmentExpressionÍ<ÒÍ<ç¡=S°MemberExpressionÍ<ÒÍ<âT®ThisExpressionÍ<ÒÍ<ÖMªIdentifierÍ<×Í<â«sensorTimerÂÂV¯UnaryExpressionÍ<åÍ<ç¡-ÃU§LiteralÍ<æÍ<ç¡1À^«IfStatementÍ<ıÍ=mZ°BinaryExpressionÍ=Í=S°MemberExpressionÍ=Í=T®ThisExpressionÍ=Í=MªIdentifierÍ=Í=¨locTimerÂÂ¢>=U§LiteralÍ=Í= ¡0N®BlockStatementÍ=Í=m’Q³ExpressionStatementÍ=$Í=A[®CallExpressionÍ=$Í=@MªIdentifierÍ=$Í=1­clearInterval‘S°MemberExpressionÍ=2Í=?T®ThisExpressionÍ=2Í=6MªIdentifierÍ=7Í=?¨locTimerÂÂÂQ³ExpressionStatementÍ=OÍ=bR´AssignmentExpressionÍ=OÍ=a¡=S°MemberExpressionÍ=OÍ=\T®ThisExpressionÍ=OÍ=SMªIdentifierÍ=TÍ=\¨locTimerÂÂV¯UnaryExpressionÍ=_Í=a¡-ÃU§LiteralÍ=`Í=a¡1À^«IfStatementÍ=wÍ=êZ°BinaryExpressionÍ={Í=S°MemberExpressionÍ={Í=‰T®ThisExpressionÍ={Í=MªIdentifierÍ=€Í=‰©wifiTimerÂÂ¢>=U§LiteralÍ=Í= ¡0N®BlockStatementÍ=Í=ê’Q³ExpressionStatementÍ=ŸÍ=½[®CallExpressionÍ=ŸÍ=¼MªIdentifierÍ=ŸÍ=¬­clearInterval‘S°MemberExpressionÍ=­Í=»T®ThisExpressionÍ=­Í=±MªIdentifierÍ=²Í=»©wifiTimerÂÂÂQ³ExpressionStatementÍ=ËÍ=ßR´AssignmentExpressionÍ=ËÍ=Ş¡=S°MemberExpressionÍ=ËÍ=ÙT®ThisExpressionÍ=ËÍ=ÏMªIdentifierÍ=ĞÍ=Ù©wifiTimerÂÂV¯UnaryExpressionÍ=ÜÍ=Ş¡-ÃU§LiteralÍ=İÍ=Ş¡1À^«IfStatementÍ=ôÍ>rZ°BinaryExpressionÍ=øÍ>S°MemberExpressionÍ=øÍ>
+T®ThisExpressionÍ=øÍ=üMªIdentifierÍ=ıÍ>
+­wifiReadTimerÂÂ¢>=U§LiteralÍ>Í> ¡0N®BlockStatementÍ>Í>r’Q³ExpressionStatementÍ> Í>A[®CallExpressionÍ> Í>@MªIdentifierÍ> Í>,¬clearTimeout‘S°MemberExpressionÍ>-Í>?T®ThisExpressionÍ>-Í>1MªIdentifierÍ>2Í>?­wifiReadTimerÂÂÂQ³ExpressionStatementÍ>OÍ>gR´AssignmentExpressionÍ>OÍ>f¡=S°MemberExpressionÍ>OÍ>aT®ThisExpressionÍ>OÍ>SMªIdentifierÍ>TÍ>a­wifiReadTimerÂÂV¯UnaryExpressionÍ>dÍ>f¡-ÃU§LiteralÍ>eÍ>f¡1Àa¬TryStatementÍ>|Í>óN®BlockStatementÍ>€Í>Ó‘Q³ExpressionStatementÍ>Í>È[®CallExpressionÍ>Í>ÇS°MemberExpressionÍ>Í>¥MªIdentifierÍ>Í>¡²geoLocationManagerMªIdentifierÍ>¢Í>¥£offÂÂ’U§LiteralÍ>¦Í>¶®locationChange°'locationChange'S°MemberExpressionÍ>¸Í>ÆT®ThisExpressionÍ>¸Í>¼MªIdentifierÍ>½Í>Æ©handleLocÂÂÂb«CatchClauseÍ>İÍ>óMªIdentifierÍ>äÍ>å¡eN®BlockStatementÍ>çÍ>óÀO°MethodDefinitionÍ? Í@aÂÂMªIdentifierÍ? Í?
+ªdoWifiScan¦methodP²FunctionExpressionÍ?
+Í@aÀÂÂÂN®BlockStatementÍ?Í@a“a¬TryStatementÍ?Í?iN®BlockStatementÍ?Í?I‘Q³ExpressionStatementÍ?+Í?>[®CallExpressionÍ?+Í?=S°MemberExpressionÍ?+Í?;MªIdentifierÍ?+Í?6«wifiManagerMªIdentifierÍ?7Í?;¤scanÂÂÂb«CatchClauseÍ?SÍ?iMªIdentifierÍ?ZÍ?[¡eN®BlockStatementÍ?]Í?iÀ^«IfStatementÍ? Í?øZ°BinaryExpressionÍ?¤Í?»S°MemberExpressionÍ?¤Í?¶T®ThisExpressionÍ?¤Í?¨MªIdentifierÍ?©Í?¶­wifiReadTimerÂÂ¢>=U§LiteralÍ?ºÍ?» ¡0N®BlockStatementÍ?½Í?ø‘Q³ExpressionStatementÍ?ÌÍ?í[®CallExpressionÍ?ÌÍ?ìMªIdentifierÍ?ÌÍ?Ø¬clearTimeout‘S°MemberExpressionÍ?ÙÍ?ëT®ThisExpressionÍ?ÙÍ?İMªIdentifierÍ?ŞÍ?ë­wifiReadTimerÂÂÂÀQ³ExpressionStatementÍ@Í@ZR´AssignmentExpressionÍ@Í@Y¡=S°MemberExpressionÍ@Í@T®ThisExpressionÍ@Í@MªIdentifierÍ@Í@­wifiReadTimerÂÂ[®CallExpressionÍ@Í@YMªIdentifierÍ@Í@!ªsetTimeout’P·ArrowFunctionExpressionÍ@"Í@RÀÂÂÂN®BlockStatementÍ@(Í@R‘Q³ExpressionStatementÍ@7Í@G[®CallExpressionÍ@7Í@FS°MemberExpressionÍ@7Í@DT®ThisExpressionÍ@7Í@;MªIdentifierÍ@<Í@D¨readWifiÂÂÂU§LiteralÍ@TÍ@XÍÜ¤1500ÂO°MethodDefinitionÍ@gÍB®ÂÂMªIdentifierÍ@gÍ@o¨readWifi¦methodP²FunctionExpressionÍ@oÍB®ÀÂÂÂN®BlockStatementÍ@rÍB®‘a¬TryStatementÍ@}ÍB§N®BlockStatementÍ@ÍB‡–X³VariableDeclarationÍ@Í@»‘Y²VariableDeclaratorÍ@–Í@ºMªIdentifierÍ@–Í@š¤list[®CallExpressionÍ@Í@ºS°MemberExpressionÍ@Í@¸MªIdentifierÍ@Í@¨«wifiManagerMªIdentifierÍ@©Í@¸¯getScanInfoListÂÂÂ¥constX³VariableDeclarationÍ@ÉÍAR‘Y²VariableDeclaratorÍ@ÏÍAQMªIdentifierÍ@ÏÍ@Ò£out[®CallExpressionÍ@ÕÍAQS°MemberExpressionÍ@ÕÍ@İMªIdentifierÍ@ÕÍ@Ù¤listMªIdentifierÍ@ÚÍ@İ£mapÂÂ‘P·ArrowFunctionExpressionÍ@ŞÍAPÀÂÂÂ‘MªIdentifierÍ@ßÍ@à¡iN®BlockStatementÍ@åÍAP‘`¯ReturnStatementÍ@øÍAA\°ObjectExpressionÍ@ÿÍA@”]¨PropertyÍAÍAÂÂÂMªIdentifierÍAÍA¤ssidS°MemberExpressionÍAÍAMªIdentifierÍAÍA¡iMªIdentifierÍA	ÍA¤ssidÂÂ¤init]¨PropertyÍAÍAÂÂÂMªIdentifierÍAÍA¥bssidS°MemberExpressionÍAÍAMªIdentifierÍAÍA¡iMªIdentifierÍAÍA¥bssidÂÂ¤init]¨PropertyÍAÍA+ÂÂÂMªIdentifierÍAÍA#¤rssiS°MemberExpressionÍA%ÍA+MªIdentifierÍA%ÍA&¡iMªIdentifierÍA'ÍA+¤rssiÂÂ¤init]¨PropertyÍA-ÍA>ÂÂÂMªIdentifierÍA-ÍA1¤freqS°MemberExpressionÍA3ÍA>MªIdentifierÍA3ÍA4¡iMªIdentifierÍA5ÍA>©frequencyÂÂ¤initÂ¥constQ³ExpressionStatementÍA`ÍA„[®CallExpressionÍA`ÍAƒS°MemberExpressionÍA`ÍAhMªIdentifierÍA`ÍAc£outMªIdentifierÍAdÍAh¤sortÂÂ‘P·ArrowFunctionExpressionÍAiÍA‚ÀÃÂÂ’MªIdentifierÍAjÍAk¡aMªIdentifierÍAmÍAn¡bZ°BinaryExpressionÍAsÍA‚S°MemberExpressionÍAsÍAyMªIdentifierÍAsÍAt¡bMªIdentifierÍAuÍAy¤rssiÂÂ¡-S°MemberExpressionÍA|ÍA‚MªIdentifierÍA|ÍA}¡aMªIdentifierÍA~ÍA‚¤rssiÂÂÂQ³ExpressionStatementÍA’ÍA¾[®CallExpressionÍA’ÍA½S°MemberExpressionÍA’ÍA¨MªIdentifierÍA’ÍAœªAppStorageMªIdentifierÍAÍA¨«setOrCreateÂÂ’U§LiteralÍA©ÍA·¬rm_live_wifi®'rm_live_wifi'MªIdentifierÍA¹ÍA¼£outÂQ³ExpressionStatementÍAÌÍB[®CallExpressionÍAÌÍBS°MemberExpressionÍAÌÍAâMªIdentifierÍAÌÍAÖªAppStorageMªIdentifierÍA×ÍAâ«setOrCreateÂÂ’U§LiteralÍAãÍAù´rm_live_wifi_scan_ms¶'rm_live_wifi_scan_ms'[®CallExpressionÍAûÍBS°MemberExpressionÍAûÍBMªIdentifierÍAûÍAÿ¤DateMªIdentifierÍB ÍB£nowÂÂÂÂ^«IfStatementÍBÍB|Z±LogicalExpressionÍBÍB>S°MemberExpressionÍBÍB&T®ThisExpressionÍBÍBMªIdentifierÍBÍB&¨listenerÂÂ¢&&S°MemberExpressionÍB*ÍB>S°MemberExpressionÍB*ÍB7T®ThisExpressionÍB*ÍB.MªIdentifierÍB/ÍB7¨listenerÂÂMªIdentifierÍB8ÍB>¦onWifiÂÂN®BlockStatementÍB@ÍB|‘Q³ExpressionStatementÍBSÍBm[®CallExpressionÍBSÍBlS°MemberExpressionÍBSÍBgS°MemberExpressionÍBSÍB`T®ThisExpressionÍBSÍBWMªIdentifierÍBXÍB`¨listenerÂÂMªIdentifierÍBaÍBg¦onWifiÂÂ‘MªIdentifierÍBhÍBk£outÂÀb«CatchClauseÍB‘ÍB§MªIdentifierÍB˜ÍB™¡eN®BlockStatementÍB›ÍB§ÀÀ•Ôrf•¤type¥start£endªspecifiers¦source±ImportDeclaration "‘Ôrg”¤type¥start£end¥local¶ImportDefaultSpecifierMªIdentifier¦sensorU§Literal!¬@ohos.sensor®"@ohos.sensor"f±ImportDeclaration$Ì^‘g¶ImportDefaultSpecifier+=MªIdentifier+=²geoLocationManagerU§LiteralÌCÌ]¸@ohos.geoLocationManagerº"@ohos.geoLocationManager"f±ImportDeclarationÌ`ÌŒ‘g¶ImportDefaultSpecifierÌgÌrMªIdentifierÌgÌr«wifiManagerU§LiteralÌxÌ‹±@ohos.wifiManager³"@ohos.wifiManager"f±ImportDeclarationÌÌ®‘g¶ImportDefaultSpecifierÌ•ÌšMªIdentifierÌ•Ìš¥hilogU§LiteralÌ Ì­«@ohos.hilog­"@ohos.hilog"f±ImportDeclarationÌ°Ìß‘Ôrh•¤type¥start£end¨imported¥local¯ImportSpecifierÌ¹ÌÅMªIdentifierÌ¹ÌÅ¬fusedAzimuthMªIdentifierÌ¹ÌÅ¬fusedAzimuthU§LiteralÌÍÌŞ¯../common/Utils±'../common/Utils'

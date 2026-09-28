@@ -1,0 +1,149 @@
+{
+  "ohos-module-entry": {
+    "SELECT_TARGET": "default",
+    "MODULE_BUILD_DIR": "D:\\CityUproject\\CampusNavigation\\RoomMarkerHarmony\\entry\\build",
+    "TARGETS": {
+      "default": {
+        "SOURCE_ROOT": "D:\\CityUproject\\CampusNavigation\\RoomMarkerHarmony\\entry\\src\\main",
+        "RESOURCES_PATH": [
+          "D:\\CityUproject\\CampusNavigation\\RoomMarkerHarmony\\entry\\src\\main\\resources"
+        ],
+        "BUILD_PATH": {
+          "OUTPUT_PATH": "D:\\CityUproject\\CampusNavigation\\RoomMarkerHarmony\\entry\\build\\default\\outputs\\default",
+          "INTERMEDIA_PATH": "D:\\CityUproject\\CampusNavigation\\RoomMarkerHarmony\\entry\\build\\default\\intermediates",
+          "JS_ASSETS_PATH": "D:\\CityUproject\\CampusNavigation\\RoomMarkerHarmony\\entry\\build\\default\\intermediates\\loader_out\\default",
+          "JS_LITE_ASSETS_PATH": "D:\\CityUproject\\CampusNavigation\\RoomMarkerHarmony\\entry\\build\\default\\intermediates\\loader_out_lite\\default",
+          "RES_PATH": "D:\\CityUproject\\CampusNavigation\\RoomMarkerHarmony\\entry\\build\\default\\intermediates\\res\\default",
+          "RES_PROFILE_PATH": "D:\\CityUproject\\CampusNavigation\\RoomMarkerHarmony\\entry\\build\\default\\intermediates\\res\\default\\resources\\base\\profile",
+          "ETS_SUPER_VISUAL_PATH": "D:\\CityUproject\\CampusNavigation\\RoomMarkerHarmony\\entry\\build\\default\\cache\\default\\default@CompileArkTS\\esmodule",
+          "JS_SUPER_VISUAL_PATH": "D:\\CityUproject\\CampusNavigation\\RoomMarkerHarmony\\entry\\build\\default\\cache\\default\\default@CompileJS\\jsbundle",
+          "WORKER_LOADER": "D:\\CityUproject\\CampusNavigation\\RoomMarkerHarmony\\entry\\build\\default\\intermediates\\loader\\default\\loader.json",
+          "MANIFEST_JSON": "D:\\CityUproject\\CampusNavigation\\RoomMarkerHarmony\\entry\\build\\default\\intermediates\\manifest\\default",
+          "OUTPUT_METADATA_JSON": "D:\\CityUproject\\CampusNavigation\\RoomMarkerHarmony\\entry\\build\\default\\intermediates\\hap_metadata\\default\\output_metadata.json",
+          "SOURCE_MAP_DIR": "D:\\CityUproject\\CampusNavigation\\RoomMarkerHarmony\\entry\\build\\default\\intermediates\\source_map\\default"
+        },
+        "BUILD_OPTION": {
+          "debuggable": true
+        }
+      }
+    },
+    "BUILD_OPTION": {
+      "default-default": {
+        "debuggable": true,
+        "copyFrom": "default",
+        "name": "debug"
+      }
+    },
+    "BUILD_PROFILE_OPT": {
+      "apiType": "stageMode",
+      "buildOption": {},
+      "buildOptionSet": [
+        {
+          "name": "release",
+          "arkOptions": {
+            "obfuscation": {
+              "ruleOptions": {
+                "enable": false
+              }
+            }
+          }
+        },
+        {
+          "name": "default"
+        },
+        {
+          "name": "debug"
+        }
+      ],
+      "targets": [
+        {
+          "name": "default"
+        }
+      ]
+    },
+    "BUILD_CACHE_DIR": ""
+  },
+  "ohos-project": {
+    "SELECT_PRODUCT_NAME": "default",
+    "MODULE_BUILD_DIR": "D:\\CityUproject\\CampusNavigation\\RoomMarkerHarmony\\build",
+    "BUNDLE_NAME": "com.example.roommarker",
+    "BUILD_PATH": {
+      "OUTPUT_PATH": "D:\\CityUproject\\CampusNavigation\\RoomMarkerHarmony\\build\\outputs\\default"
+    },
+    "MODULES": [
+      {
+        "name": "entry",
+        "srcPath": "D:\\CityUproject\\CampusNavigation\\RoomMarkerHarmony\\entry",
+        "targets": [
+          {
+            "name": "default",
+            "applyToProducts": [
+              "default"
+            ]
+          }
+        ],
+        "belongProjectPath": "D:\\CityUproject\\CampusNavigation\\RoomMarkerHarmony"
+      }
+    ],
+    "PROFILE_OPT": {
+      "app": {
+        "signingConfigs": [
+          {
+            "name": "default",
+            "type": "HarmonyOS",
+            "material": {
+              "certpath": "C:\\Users\\23285\\.ohos\\config\\default_RoomMarkerHarmony_8-UkI_-5Ml4C9rZHTmYgpVvtR64Q_NJI_7h33KFhWh0=.cer",
+              "keyAlias": "debugKey",
+              "keyPassword": "0000001B0C1106099C222450236B421C429726B8DEBF5A3823B6A906A1D83C8311A1FA22C54A8A1DB0A064",
+              "profile": "C:\\Users\\23285\\.ohos\\config\\default_RoomMarkerHarmony_8-UkI_-5Ml4C9rZHTmYgpVvtR64Q_NJI_7h33KFhWh0=.p7b",
+              "signAlg": "SHA256withECDSA",
+              "storeFile": "C:\\Users\\23285\\.ohos\\config\\default_RoomMarkerHarmony_8-UkI_-5Ml4C9rZHTmYgpVvtR64Q_NJI_7h33KFhWh0=.p12",
+              "storePassword": "0000001BA5506BB9D0C88FA2BEB57C0E5B92CC081549CCF68A41AD86182BF1CF1E9177125C00492FE17654"
+            }
+          }
+        ],
+        "products": [
+          {
+            "name": "default",
+            "compatibleSdkVersion": "5.0.0(12)",
+            "targetSdkVersion": "5.0.0(12)",
+            "signingConfig": "default",
+            "runtimeOS": "HarmonyOS"
+          }
+        ],
+        "buildModeSet": [
+          {
+            "name": "debug"
+          },
+          {
+            "name": "release"
+          }
+        ]
+      },
+      "modules": [
+        {
+          "name": "entry",
+          "srcPath": "./entry",
+          "targets": [
+            {
+              "name": "default",
+              "applyToProducts": [
+                "default"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "CONFIG_PROPERTIES": {
+      "enableSignTask": true,
+      "skipNativeIncremental": false,
+      "hvigor.keepDependency": true
+    },
+    "OVERALL_PROJECT_PATHS": [
+      "D:\\CityUproject\\CampusNavigation\\RoomMarkerHarmony"
+    ],
+    "BUILD_CACHE_DIR": ""
+  },
+  "version": 1
+}

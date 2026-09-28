@@ -1,0 +1,722 @@
+Ôr@Ÿªassertions¤code´customTransformCache¬dependencies¢id¤meta±moduleSideEffects¬originalCode±originalSourcemap«resolvedIds®sourcemapChainµsyntheticNamedExportsµtransformDependencies®transformFiles¨cacheAstÔrAÚ#²import sensor from "@ohos.sensor";
+import geoLocationManager from "@ohos.geoLocationManager";
+import wifiManager from "@ohos.wifiManager";
+import notificationManager from "@ohos.notificationManager";
+import backgroundTaskManager from "@ohos.resourceschedule.backgroundTaskManager";
+import wantAgent from "@ohos.app.ability.wantAgent";
+import { Store } from '../data/Store';
+import { Ctx, fusedAzimuth } from '../common/Utils';
+const NOTIF_ID = 1001;
+/**
+ * è½¨è¿¹è®°å½•å™¨ï¼ˆâ‰ˆ Android ç‰ˆ TrackRecorder + RecordingServiceï¼‰ï¼š
+ * æ¯ç§’é‡‡æ ·ä¸€æ¬¡ å®šä½+æ°”å‹+åœ°ç£+WiFi æ‘˜è¦ï¼Œæ¯ 5 ç§’æ‰¹é‡è½åº“ï¼›
+ * ç”¨ LOCATION å‹é•¿æ—¶ä»»åŠ¡ + å¸¸é©»é€šçŸ¥ä¿æŒåå°è®°å½•ã€‚å•ä¾‹ï¼Œé¡µé¢é—´å…±äº«ã€‚
+ */
+export class TrackRecorder {
+    constructor() {
+        this.running = false;
+        this.trackId = -1;
+        this.t0 = 0;
+        this.pointCount = 0;
+        this.buffer = [];
+        this.sampleTimer = -1;
+        this.elapsedTimer = -1;
+        this.wifiTimer = -1;
+        this.lastLoc = null;
+        this.lastPressure = undefined;
+        this.lastMag = [0, 0, 0];
+        this.hasMag = false;
+        this.lastAccel = [0, 0, 0];
+        this.hasAccel = false;
+        this.lastHeading = undefined;
+        this.lastWifi = '';
+        this.lastWifiCount = 0;
+        this.pressureCb = (d) => {
+            this.lastPressure = d.pressure;
+        };
+        this.magCb = (d) => {
+            this.lastMag = [d.x, d.y, d.z];
+            this.hasMag = true;
+        };
+        this.accelCb = (d) => {
+            this.lastAccel = [d.x, d.y, d.z];
+            this.hasAccel = true;
+        };
+        this.locCb = (loc) => {
+            this.lastLoc = loc;
+        };
+    }
+    static get() {
+        if (!TrackRecorder.inst) {
+            TrackRecorder.inst = new TrackRecorder();
+        }
+        return TrackRecorder.inst;
+    }
+    isRunning() {
+        return this.running;
+    }
+    /** å½“å‰è½¨è¿¹ idï¼›æœªåœ¨è®°å½•æ—¶è¿”å› -1 */
+    getTrackId() {
+        return this.trackId;
+    }
+    /** å½“å‰ä¼ æ„Ÿå™¨å¿«ç…§ï¼ˆä¾›è½¨è¿¹é€”ä¸­æ‹ç…§/æ‰“æ ‡ç­¾æ—¶å…³è”å®šä½ä¸æœå‘ï¼‰ */
+    getSnapshot() {
+        const loc = this.lastLoc;
+        const snap = {
+            latitude: loc ? loc.latitude : undefined,
+            longitude: loc ? loc.longitude : undefined,
+            altitude: loc ? loc.altitude : undefined,
+            headingDeg: this.lastHeading,
+            pressureHpa: this.lastPressure
+        };
+        return snap;
+    }
+    async start(name, areaId) {
+        if (this.running) {
+            return;
+        }
+        this.trackId = await Store.insertTrack(name, areaId);
+        this.t0 = Date.now();
+        this.pointCount = 0;
+        this.buffer = [];
+        this.running = true;
+        AppStorage.setOrCreate('rm_recording', true);
+        AppStorage.setOrCreate('rm_rec_track_name', name);
+        AppStorage.setOrCreate('rm_elapsed', 0);
+        try {
+            sensor.on(sensor.SensorId.BAROMETER, this.pressureCb);
+        }
+        catch (e) {
+        }
+        try {
+            sensor.on(sensor.SensorId.MAGNETIC_FIELD, this.magCb);
+        }
+        catch (e) {
+        }
+        try {
+            sensor.on(sensor.SensorId.ACCELEROMETER, this.accelCb);
+        }
+        catch (e) {
+        }
+        const req = {
+            interval: 1,
+            locationScenario: geoLocationManager.UserActivityScenario.NAVIGATION
+        };
+        try {
+            geoLocationManager.on('locationChange', req, this.locCb);
+        }
+        catch (e) {
+        }
+        this.refreshWifi();
+        this.wifiTimer = setInterval(() => {
+            this.refreshWifi();
+        }, 30000);
+        this.sampleTimer = setInterval(() => {
+            this.sample();
+        }, 1000);
+        this.elapsedTimer = setInterval(() => {
+            AppStorage.setOrCreate('rm_elapsed', Math.floor((Date.now() - this.t0) / 1000));
+        }, 1000);
+        this.startBackground(name);
+    }
+    async stop() {
+        if (!this.running) {
+            return;
+        }
+        this.running = false;
+        if (this.sampleTimer >= 0) {
+            clearInterval(this.sampleTimer);
+            this.sampleTimer = -1;
+        }
+        if (this.elapsedTimer >= 0) {
+            clearInterval(this.elapsedTimer);
+            this.elapsedTimer = -1;
+        }
+        if (this.wifiTimer >= 0) {
+            clearInterval(this.wifiTimer);
+            this.wifiTimer = -1;
+        }
+        try {
+            sensor.off(sensor.SensorId.BAROMETER, this.pressureCb);
+        }
+        catch (e) {
+        }
+        try {
+            sensor.off(sensor.SensorId.MAGNETIC_FIELD, this.magCb);
+        }
+        catch (e) {
+        }
+        try {
+            sensor.off(sensor.SensorId.ACCELEROMETER, this.accelCb);
+        }
+        catch (e) {
+        }
+        try {
+            geoLocationManager.off('locationChange', this.locCb);
+        }
+        catch (e) {
+        }
+        const batch = this.buffer;
+        this.buffer = [];
+        try {
+            await Store.insertPoints(batch);
+        }
+        catch (e) {
+        }
+        try {
+            await Store.finishTrack(this.trackId, Date.now(), this.pointCount);
+        }
+        catch (e) {
+        }
+        AppStorage.setOrCreate('rm_recording', false);
+        AppStorage.setOrCreate('rm_rec_track_name', '');
+        AppStorage.setOrCreate('rm_elapsed', 0);
+        this.stopBackground();
+    }
+    sample() {
+        const loc = this.lastLoc;
+        // æœå‘ï¼šåŠ é€Ÿåº¦+åœ°ç£èåˆæ–¹ä½è§’ï¼ŒGPS direction å…œåº•
+        let headingDeg = undefined;
+        if (this.hasAccel && this.hasMag) {
+            headingDeg = fusedAzimuth(this.lastAccel, this.lastMag);
+        }
+        if (headingDeg === undefined && loc && loc.direction !== undefined) {
+            headingDeg = loc.direction;
+        }
+        this.lastHeading = headingDeg;
+        const pt = {
+            trackId: this.trackId,
+            timeMs: Date.now(),
+            latitude: loc ? loc.latitude : undefined,
+            longitude: loc ? loc.longitude : undefined,
+            altitude: loc ? loc.altitude : undefined,
+            accuracy: loc ? loc.accuracy : undefined,
+            pressureHpa: this.lastPressure,
+            magneticX: this.hasMag ? this.lastMag[0] : undefined,
+            magneticY: this.hasMag ? this.lastMag[1] : undefined,
+            magneticZ: this.hasMag ? this.lastMag[2] : undefined,
+            headingDeg: headingDeg,
+            wifiCount: this.lastWifiCount,
+            wifiTop: this.lastWifi
+        };
+        this.buffer.push(pt);
+        this.pointCount++;
+        if (this.buffer.length >= 5) {
+            const batch = this.buffer;
+            this.buffer = [];
+            Store.insertPoints(batch).catch(() => {
+            });
+        }
+    }
+    refreshWifi() {
+        try {
+            wifiManager.scan();
+        }
+        catch (e) {
+        }
+        setTimeout(() => {
+            try {
+                const list = wifiManager.getScanInfoList();
+                const top = list.slice()
+                    .sort((a, b) => b.rssi - a.rssi)
+                    .slice(0, 5);
+                this.lastWifi = top.map((i) => `${i.bssid}:${i.rssi}`).join(';');
+                this.lastWifiCount = list.length;
+            }
+            catch (e) {
+            }
+        }, 1500);
+    }
+    async startBackground(name) {
+        try {
+            const context = Ctx.ui;
+            if (!context) {
+                return;
+            }
+            const info = {
+                wants: [{ bundleName: 'com.example.roommarker', abilityName: 'EntryAbility' }],
+                actionType: wantAgent.OperationType.START_ABILITY,
+                requestCode: 0,
+                wantAgentFlags: [wantAgent.WantAgentFlags.UPDATE_PRESENT_FLAG]
+            };
+            const agent = await wantAgent.getWantAgent(info);
+            // HarmonyOS 6ï¼ˆAPI 21ï¼‰ï¼šLOCATION é•¿æ—¶ä»»åŠ¡æ”¹ç”¨å­—ç¬¦ä¸²æ•°ç»„å½¢å¼ç”³è¯·
+            await backgroundTaskManager.startBackgroundRunning(context, ['location'], agent);
+        }
+        catch (e) {
+        }
+        try {
+            await notificationManager.publish({
+                id: NOTIF_ID,
+                content: {
+                    notificationContentType: notificationManager.ContentType.NOTIFICATION_CONTENT_BASIC_TEXT,
+                    normal: { title: 'æ­£åœ¨è®°å½•è½¨è¿¹', text: `ã€Œ${name}ã€Â· ç‚¹å‡»è¿”å›åº”ç”¨` }
+                }
+            });
+        }
+        catch (e) {
+        }
+    }
+    stopBackground() {
+        try {
+            notificationManager.cancel(NOTIF_ID);
+        }
+        catch (e) {
+        }
+        try {
+            if (Ctx.ui) {
+                backgroundTaskManager.stopBackgroundRunning(Ctx.ui);
+            }
+        }
+        catch (e) {
+        }
+    }
+}
+TrackRecorder.inst = null;
+//# sourceMappingURL=TrackRecorder.js.mapÂ˜ÙX hvigor_ignore_D:_DevEco_DevEco Studio_sdk_default_openharmony_ets_api_@ohos.sensor.d.tsÙd hvigor_ignore_D:_DevEco_DevEco Studio_sdk_default_openharmony_ets_api_@ohos.geoLocationManager.d.tsÙ] hvigor_ignore_D:_DevEco_DevEco Studio_sdk_default_openharmony_ets_api_@ohos.wifiManager.d.tsÙe hvigor_ignore_D:_DevEco_DevEco Studio_sdk_default_openharmony_ets_api_@ohos.notificationManager.d.tsÙx hvigor_ignore_D:_DevEco_DevEco Studio_sdk_default_openharmony_ets_api_@ohos.resourceschedule.backgroundTaskManager.d.tsÙg hvigor_ignore_D:_DevEco_DevEco Studio_sdk_default_openharmony_ets_api_@ohos.app.ability.wantAgent.d.tsÙTD:\CityUproject\CampusNavigation\RoomMarkerHarmony\entry\src\main\ets\data\Store.etsÙVD:\CityUproject\CampusNavigation\RoomMarkerHarmony\entry\src\main\ets\common\Utils.etsÙ_D:\CityUproject\CampusNavigation\RoomMarkerHarmony\entry\src\main\ets\sensors\TrackRecorder.etsÔrBœªmoduleName±isLocalDependency¯isNodeEntryFile§pkgPath±belongProjectPath§pkgNameªpkgVersion±dependencyPkgInfo¯hostModulesInfo°belongModulePath§checker¬shouldEmitJs¥entryÃÂÙ8D:\CityUproject\CampusNavigation\RoomMarkerHarmony\entryÙ2D:\CityUproject\CampusNavigation\RoomMarkerHarmony¥entry¥1.0.0Ô  ”ÔrC’²hostDependencyName®hostModuleName¸../sensors/TrackRecorder¥entryC¸../sensors/TrackRecorder¥entryC¸../sensors/TrackRecorder¥entryC¸../sensors/TrackRecorder¥entryÙ8D:\CityUproject\CampusNavigation\RoomMarkerHarmony\entryÔrDÜ ®¬getNodeCount²getIdentifierCount®getSymbolCount¬getTypeCountµgetInstantiationCountµgetRelationCacheSizes±isUndefinedSymbol±isArgumentsSymbol¯isUnknownSymbol¯getMergedSymbol®getDiagnostics´getGlobalDiagnostics´getRecursionIdentity¶getUnmatchedProperties¹getTypeOfSymbolAtLocation¯getTypeOfSymbolÙ(getSymbolsOfParameterPropertyDeclaration·getDeclaredTypeOfSymbol³getPropertiesOfType±getPropertyOfTypeÙ"getPrivateIdentifierPropertyOfType·getTypeOfPropertyOfType²getIndexInfoOfType³getIndexInfosOfTypeºgetIndexInfosOfIndexSymbol³getSignaturesOfType²getIndexTypeOfType¬getIndexType¬getBaseTypes¸getBaseTypeOfLiteralType®getWidenedType³getTypeFromTypeNode°getParameterTypeÙ$getParameterIdentifierNameAtPosition¸getPromisedTypeOfPromise®getAwaitedType¸getReturnTypeOfSignature®isNullableType¯getNullableType²getNonNullableType²getNonOptionalType°getTypeArguments®typeToTypeNodeÙ$indexInfoToIndexSignatureDeclaration¿signatureToSignatureDeclaration²symbolToEntityName²symbolToExpression¬symbolToNodeÙ!symbolToTypeParameterDeclarations¼symbolToParameterDeclarationºtypeParameterToDeclaration±getSymbolsInScope³getSymbolAtLocation·getIndexInfosAtLocationÙ!getShorthandAssignmentValueSymbolÙ#getExportSpecifierLocalTargetSymbol·getExportSymbolOfSymbol±getTypeAtLocationºgetTypeAtLocationForLinterÙ tryGetTypeAtLocationWithoutCheckºgetTypeOfAssignmentPatternÙ*getPropertySymbolOfDestructuringAssignment±signatureToString¬typeToString®symbolToStringµtypePredicateToString®writeSignature©writeType«writeSymbol²writeTypePredicate¼getAugmentedPropertiesOfType®getRootSymbols²getSymbolOfExpando±getContextualTypeÙ(getContextualTypeForObjectLiteralElementÙ#getContextualTypeForArgumentAtIndexÙ getContextualTypeForJsxAttribute²isContextSensitiveÙ!getTypeOfPropertyOfContextualTypeµgetFullyQualifiedNameÙ#tryGetResolvedSignatureWithoutCheck´getResolvedSignatureÙ/getResolvedSignatureForStringLiteralCompletionsÙ$getResolvedSignatureForSignatureHelpµgetExpandedParameters¹hasEffectiveRestParameterºcontainsArgumentsReference°getConstantValueµisValidPropertyAccessÙ#isValidPropertyAccessForCompletions»getSignatureFromDeclarationºisImplementationOfOverload¹getImmediateAliasedSymbol°getAliasedSymbol¯getEmitResolver²getExportsOfModule¿getExportsAndPropertiesOfModuleÙ forEachExportAndPropertyOfModule¯getSymbolWalker±getAmbientModules¹getJsxIntrinsicTagNamesAt³isOptionalParameter»tryGetMemberInModuleExportsÙ(tryGetMemberInModuleExportsAndProperties´tryFindAmbientModuleÙ(tryFindAmbientModuleWithoutAugmentations¯getApparentType¬getUnionType²isTypeAssignableTo³createAnonymousType¯createSignature¬createSymbol¯createIndexInfoªgetAnyType­getStringType­getNumberType±createPromiseType¯createArrayType¹getElementTypeOfArrayType®getBooleanType¬getFalseType«getTrueType«getVoidType°getUndefinedType«getNullType¯getESSymbolType¬getNeverType¯getOptionalType®getPromiseType²getPromiseLikeType´getAsyncIterableType²isSymbolAccessible«isArrayType«isTupleType¯isArrayLikeTypeÙ#isTypeInvalidDueToUnionDiscriminantºgetExactOptionalProperties¿getAllPossiblePropertiesOfTypesÙ(getSuggestedSymbolForNonexistentPropertyÙ#getSuggestionForNonexistentPropertyÙ,getSuggestedSymbolForNonexistentJSXAttributeÙ&getSuggestedSymbolForNonexistentSymbolÙ!getSuggestionForNonexistentSymbolÙ&getSuggestedSymbolForNonexistentModuleÙ!getSuggestionForNonexistentExportÙ+getSuggestedSymbolForNonexistentClassMember·getBaseConstraintOfType»getDefaultFromTypeParameter«resolveName¯getJsxNamespaceµgetJsxFragmentFactory¸getAccessibleSymbolChain»getTypePredicateOfSignature¹resolveExternalModuleName»resolveExternalModuleSymbol°tryGetThisTypeAt¹getTypeArgumentConstraint¸getSuggestionDiagnostics¸runWithCancellationTokenÙ3getLocalTypeParametersOfClassOrInterfaceOrTypeAlias´isDeclarationVisible´isPropertyAccessible»getTypeOnlyAliasDeclaration¿getMemberOverrideModifierStatusÙ!isTypeParameterPossiblyReferenced²getConstEnumRelate´clearConstEnumRelateµdeleteConstEnumRelateÙ$getTypeArgumentsForResolvedSignatureµgetCheckedSourceFilesÙ"collectHaveTsNoCheckFilesForLinter·clearQualifiedNameCache®isStaticRecord²isStaticSourceFileÔ  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  Ô  ÃÃÚ!import { sensor } from '@kit.SensorServiceKit';
+import { geoLocationManager } from '@kit.LocationKit';
+import { wifiManager } from '@kit.ConnectivityKit';
+import { notificationManager } from '@kit.NotificationKit';
+import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
+import { wantAgent } from '@kit.AbilityKit';
+import { Store } from '../data/Store';
+import { TrackPointDraft } from '../data/Entities';
+import { Ctx, fusedAzimuth } from '../common/Utils';
+
+const NOTIF_ID = 1001;
+
+/** è®°å½•ä¸­çš„å½“å‰ä¼ æ„Ÿå™¨å¿«ç…§ï¼ˆä¾›æ‹ç…§/æ ‡ç­¾å…³è”ï¼‰ */
+export interface RecSnapshot {
+  latitude?: number;
+  longitude?: number;
+  altitude?: number;
+  headingDeg?: number;
+  pressureHpa?: number;
+}
+
+/**
+ * è½¨è¿¹è®°å½•å™¨ï¼ˆâ‰ˆ Android ç‰ˆ TrackRecorder + RecordingServiceï¼‰ï¼š
+ * æ¯ç§’é‡‡æ ·ä¸€æ¬¡ å®šä½+æ°”å‹+åœ°ç£+WiFi æ‘˜è¦ï¼Œæ¯ 5 ç§’æ‰¹é‡è½åº“ï¼›
+ * ç”¨ LOCATION å‹é•¿æ—¶ä»»åŠ¡ + å¸¸é©»é€šçŸ¥ä¿æŒåå°è®°å½•ã€‚å•ä¾‹ï¼Œé¡µé¢é—´å…±äº«ã€‚
+ */
+export class TrackRecorder {
+  private static inst: TrackRecorder | null = null;
+  static get(): TrackRecorder {
+    if (!TrackRecorder.inst) {
+      TrackRecorder.inst = new TrackRecorder();
+    }
+    return TrackRecorder.inst;
+  }
+
+  private running = false;
+  private trackId = -1;
+  private t0 = 0;
+  private pointCount = 0;
+  private buffer: TrackPointDraft[] = [];
+  private sampleTimer = -1;
+  private elapsedTimer = -1;
+  private wifiTimer = -1;
+
+  private lastLoc: geoLocationManager.Location | null = null;
+  private lastPressure: number | undefined = undefined;
+  private lastMag: number[] = [0, 0, 0];
+  private hasMag = false;
+  private lastAccel: number[] = [0, 0, 0];
+  private hasAccel = false;
+  private lastHeading: number | undefined = undefined;
+  private lastWifi = '';
+  private lastWifiCount = 0;
+
+  private pressureCb = (d: sensor.BarometerResponse): void => {
+    this.lastPressure = d.pressure;
+  };
+  private magCb = (d: sensor.MagneticFieldResponse): void => {
+    this.lastMag = [d.x, d.y, d.z];
+    this.hasMag = true;
+  };
+  private accelCb = (d: sensor.AccelerometerResponse): void => {
+    this.lastAccel = [d.x, d.y, d.z];
+    this.hasAccel = true;
+  };
+  private locCb = (loc: geoLocationManager.Location): void => {
+    this.lastLoc = loc;
+  };
+
+  isRunning(): boolean {
+    return this.running;
+  }
+
+  /** å½“å‰è½¨è¿¹ idï¼›æœªåœ¨è®°å½•æ—¶è¿”å› -1 */
+  getTrackId(): number {
+    return this.trackId;
+  }
+
+  /** å½“å‰ä¼ æ„Ÿå™¨å¿«ç…§ï¼ˆä¾›è½¨è¿¹é€”ä¸­æ‹ç…§/æ‰“æ ‡ç­¾æ—¶å…³è”å®šä½ä¸æœå‘ï¼‰ */
+  getSnapshot(): RecSnapshot {
+    const loc = this.lastLoc;
+    const snap: RecSnapshot = {
+      latitude: loc ? loc.latitude : undefined,
+      longitude: loc ? loc.longitude : undefined,
+      altitude: loc ? loc.altitude : undefined,
+      headingDeg: this.lastHeading,
+      pressureHpa: this.lastPressure
+    };
+    return snap;
+  }
+
+  async start(name: string, areaId: number): Promise<void> {
+    if (this.running) {
+      return;
+    }
+    this.trackId = await Store.insertTrack(name, areaId);
+    this.t0 = Date.now();
+    this.pointCount = 0;
+    this.buffer = [];
+    this.running = true;
+
+    AppStorage.setOrCreate('rm_recording', true);
+    AppStorage.setOrCreate('rm_rec_track_name', name);
+    AppStorage.setOrCreate('rm_elapsed', 0);
+
+    try {
+      sensor.on(sensor.SensorId.BAROMETER, this.pressureCb);
+    } catch (e) {
+    }
+    try {
+      sensor.on(sensor.SensorId.MAGNETIC_FIELD, this.magCb);
+    } catch (e) {
+    }
+    try {
+      sensor.on(sensor.SensorId.ACCELEROMETER, this.accelCb);
+    } catch (e) {
+    }
+    const req: geoLocationManager.ContinuousLocationRequest = {
+      interval: 1,
+      locationScenario: geoLocationManager.UserActivityScenario.NAVIGATION
+    };
+    try {
+      geoLocationManager.on('locationChange', req, this.locCb);
+    } catch (e) {
+    }
+
+    this.refreshWifi();
+    this.wifiTimer = setInterval(() => {
+      this.refreshWifi();
+    }, 30000);
+    this.sampleTimer = setInterval(() => {
+      this.sample();
+    }, 1000);
+    this.elapsedTimer = setInterval(() => {
+      AppStorage.setOrCreate('rm_elapsed', Math.floor((Date.now() - this.t0) / 1000));
+    }, 1000);
+
+    this.startBackground(name);
+  }
+
+  async stop(): Promise<void> {
+    if (!this.running) {
+      return;
+    }
+    this.running = false;
+    if (this.sampleTimer >= 0) {
+      clearInterval(this.sampleTimer);
+      this.sampleTimer = -1;
+    }
+    if (this.elapsedTimer >= 0) {
+      clearInterval(this.elapsedTimer);
+      this.elapsedTimer = -1;
+    }
+    if (this.wifiTimer >= 0) {
+      clearInterval(this.wifiTimer);
+      this.wifiTimer = -1;
+    }
+    try {
+      sensor.off(sensor.SensorId.BAROMETER, this.pressureCb);
+    } catch (e) {
+    }
+    try {
+      sensor.off(sensor.SensorId.MAGNETIC_FIELD, this.magCb);
+    } catch (e) {
+    }
+    try {
+      sensor.off(sensor.SensorId.ACCELEROMETER, this.accelCb);
+    } catch (e) {
+    }
+    try {
+      geoLocationManager.off('locationChange', this.locCb);
+    } catch (e) {
+    }
+
+    const batch = this.buffer;
+    this.buffer = [];
+    try {
+      await Store.insertPoints(batch);
+    } catch (e) {
+    }
+    try {
+      await Store.finishTrack(this.trackId, Date.now(), this.pointCount);
+    } catch (e) {
+    }
+
+    AppStorage.setOrCreate('rm_recording', false);
+    AppStorage.setOrCreate('rm_rec_track_name', '');
+    AppStorage.setOrCreate('rm_elapsed', 0);
+    this.stopBackground();
+  }
+
+  private sample(): void {
+    const loc = this.lastLoc;
+    // æœå‘ï¼šåŠ é€Ÿåº¦+åœ°ç£èåˆæ–¹ä½è§’ï¼ŒGPS direction å…œåº•
+    let headingDeg: number | undefined = undefined;
+    if (this.hasAccel && this.hasMag) {
+      headingDeg = fusedAzimuth(this.lastAccel, this.lastMag);
+    }
+    if (headingDeg === undefined && loc && loc.direction !== undefined) {
+      headingDeg = loc.direction;
+    }
+    this.lastHeading = headingDeg;
+    const pt: TrackPointDraft = {
+      trackId: this.trackId,
+      timeMs: Date.now(),
+      latitude: loc ? loc.latitude : undefined,
+      longitude: loc ? loc.longitude : undefined,
+      altitude: loc ? loc.altitude : undefined,
+      accuracy: loc ? loc.accuracy : undefined,
+      pressureHpa: this.lastPressure,
+      magneticX: this.hasMag ? this.lastMag[0] : undefined,
+      magneticY: this.hasMag ? this.lastMag[1] : undefined,
+      magneticZ: this.hasMag ? this.lastMag[2] : undefined,
+      headingDeg: headingDeg,
+      wifiCount: this.lastWifiCount,
+      wifiTop: this.lastWifi
+    };
+    this.buffer.push(pt);
+    this.pointCount++;
+    if (this.buffer.length >= 5) {
+      const batch = this.buffer;
+      this.buffer = [];
+      Store.insertPoints(batch).catch(() => {
+      });
+    }
+  }
+
+  private refreshWifi(): void {
+    try {
+      wifiManager.scan();
+    } catch (e) {
+    }
+    setTimeout(() => {
+      try {
+        const list = wifiManager.getScanInfoList();
+        const top = list.slice()
+          .sort((a: wifiManager.WifiScanInfo, b: wifiManager.WifiScanInfo) => b.rssi - a.rssi)
+          .slice(0, 5);
+        this.lastWifi = top.map((i: wifiManager.WifiScanInfo) => `${i.bssid}:${i.rssi}`).join(';');
+        this.lastWifiCount = list.length;
+      } catch (e) {
+      }
+    }, 1500);
+  }
+
+  private async startBackground(name: string): Promise<void> {
+    try {
+      const context = Ctx.ui;
+      if (!context) {
+        return;
+      }
+      const info: wantAgent.WantAgentInfo = {
+        wants: [{ bundleName: 'com.example.roommarker', abilityName: 'EntryAbility' }],
+        actionType: wantAgent.OperationType.START_ABILITY,
+        requestCode: 0,
+        wantAgentFlags: [wantAgent.WantAgentFlags.UPDATE_PRESENT_FLAG]
+      };
+      const agent = await wantAgent.getWantAgent(info);
+      // HarmonyOS 6ï¼ˆAPI 21ï¼‰ï¼šLOCATION é•¿æ—¶ä»»åŠ¡æ”¹ç”¨å­—ç¬¦ä¸²æ•°ç»„å½¢å¼ç”³è¯·
+      await backgroundTaskManager.startBackgroundRunning(context, ['location'], agent);
+    } catch (e) {
+    }
+    try {
+      await notificationManager.publish({
+        id: NOTIF_ID,
+        content: {
+          notificationContentType: notificationManager.ContentType.NOTIFICATION_CONTENT_BASIC_TEXT,
+          normal: { title: 'æ­£åœ¨è®°å½•è½¨è¿¹', text: `ã€Œ${name}ã€Â· ç‚¹å‡»è¿”å›åº”ç”¨` }
+        }
+      });
+    } catch (e) {
+    }
+  }
+
+  private stopBackground(): void {
+    try {
+      notificationManager.cancel(NOTIF_ID);
+    } catch (e) {
+    }
+    try {
+      if (Ctx.ui) {
+        backgroundTaskManager.stopBackgroundRunning(Ctx.ui);
+      }
+    } catch (e) {
+    }
+  }
+}
+ÀÔrE˜¬@ohos.sensor¸@ohos.geoLocationManager±@ohos.wifiManager¹@ohos.notificationManagerÙ,@ohos.resourceschedule.backgroundTaskManager»@ohos.app.ability.wantAgent­../data/Store¯../common/UtilsÔrF—ªassertions¨external¢id¤meta±moduleSideEffectsªresolvedByµsyntheticNamedExportsAÃÙX hvigor_ignore_D:_DevEco_DevEco Studio_sdk_default_openharmony_ets_api_@ohos.sensor.d.tsÔrG‘¯hostModulesInfo“C¬@ohos.sensor¥entryC¬@ohos.sensor¥entryC¬@ohos.sensor¥entryÃªoh-resolveÂFAÃÙd hvigor_ignore_D:_DevEco_DevEco Studio_sdk_default_openharmony_ets_api_@ohos.geoLocationManager.d.tsG“C¸@ohos.geoLocationManager¥entryC¸@ohos.geoLocationManager¥entryC¸@ohos.geoLocationManager¥entryÃªoh-resolveÂFAÃÙ] hvigor_ignore_D:_DevEco_DevEco Studio_sdk_default_openharmony_ets_api_@ohos.wifiManager.d.tsG’C±@ohos.wifiManager¥entryC±@ohos.wifiManager¥entryÃªoh-resolveÂFAÃÙe hvigor_ignore_D:_DevEco_DevEco Studio_sdk_default_openharmony_ets_api_@ohos.notificationManager.d.tsG‘C¹@ohos.notificationManager¥entryÃªoh-resolveÂFAÃÙx hvigor_ignore_D:_DevEco_DevEco Studio_sdk_default_openharmony_ets_api_@ohos.resourceschedule.backgroundTaskManager.d.tsG‘CÙ,@ohos.resourceschedule.backgroundTaskManager¥entryÃªoh-resolveÂFAÃÙg hvigor_ignore_D:_DevEco_DevEco Studio_sdk_default_openharmony_ets_api_@ohos.app.ability.wantAgent.d.tsG‘C»@ohos.app.ability.wantAgent¥entryÃªoh-resolveÂFAÂÙTD:\CityUproject\CampusNavigation\RoomMarkerHarmony\entry\src\main\ets\data\Store.etsAÃªoh-resolveÂFAÂÙVD:\CityUproject\CampusNavigation\RoomMarkerHarmony\entry\src\main\ets\common\Utils.etsAÃªoh-resolveÂ“ÔrH–§version¤fileªsourceRoot§sources¥names¨mappings°TrackRecorder.js ‘±TrackRecorder.etsÜ–”    ”  	”  ”  ”!  .”"  /–”   ” 	” ” #”9 5”: 6–”   ” 	” ” ”+ 2”, 3–”   ” 	” ”  $”; :”< ;–”   ” 	” ”" &”ÌP ?”ÌQ Ì@–”   ” 	” ” ”3 +”4 ,˜”   ” ”	 	” ” ” ”% %”& &š”   ” ”	 	” ” ” ” ”" "”3 3”4 4–”  
+ ” 
+” 
+” 
+” 
+” 
+‘”   ‘” ””   ” ” ” ‘”  •” #
+” #” #” #” #–” $
+” $” $” $” $” $•” %
+” %” %” %” %•” &
+” &” &” &” &•” '
+” '” '&” '(” ')–” (
+” (” (” (” (” (–” )
+” )” )” )” )” )–” *
+” *” *” *” *” *•” ,
+” ,” ,8” ,<” ,=•” -
+” -” --”% -6”& -7›” .
+” .” .” .” . ” ."” .#” .%” .&”  .'”! .(•” /
+” /” /” /” /›” 0
+” 0” 0 ” 0!” 0"” 0$” 0%”  0'”! 0(”" 0)”# 0*•” 1
+” 1” 1” 1” 1•” 2
+” 2” 2,”$ 25”% 26•” 3
+” 3” 3” 3” 3•” 4
+” 4” 4” 4” 4—” 6
+” 6” 6” 6” 63” 6;”  6=™” 7” 7” 7	” 7”  7”! 7”" 7”* 7"”+ 7#“” 8”	 8”
+ 8—” 9
+” 9” 9” 9” 92” 9:” 9<Ü ” :” :” :	” :” :” :” :” :” :”! :”" :”# :”$ :”& :”' :”( : ”) :!”* :"”+ :#—” ;” ;” ;	” ;” ;” ;” ;“” <”	 <”
+ <—” =
+” =” =” =” =4” =<” =>Ü ” >” >” >	” >” >” >” >”  >”! >”# >”$ >”% >”& >”( > ”) >!”* >"”+ >#”, >$”- >%—” ?” ?” ?	” ?” ?”  ?”! ?“” Ì@”	 Ì@”
+ Ì@—” ÌA
+” ÌA” ÌA” ÌA” ÌA3” ÌA;” ÌA=—” ÌB” ÌB” ÌB	” ÌB” ÌB” ÌB” ÌB“” ÌC”	 ÌC”
+ ÌC’” Í ” Í”” ”
+ ” 	” —” ” ” 	” ” ” ”! ™” ” ” ” ”! ”% ”2 ,”4 .”5 /‘”	 –”  ”  ”  ”  ”!  ”"  ’” !” !’” ÌE” ÌE–” ÌF” ÌF” ÌF” ÌF” ÌF” ÌF’” ÌG” ÌG’” ÌI” ÌI’” ÌJ” ÌJ–” ÌK” ÌK” ÌK” ÌK” ÌK” ÌK’” ÌL” ÌL’” ÌN”' ÌN%’” ÌO” ÌO˜” ÌP” ÌP
+” ÌP” ÌP” ÌP” ÌP”  ÌP”! ÌP”” ÌQ” ÌQ
+” ÌQ” ÌQ” ÌR” ÌR” ÌR” ÌR” ÌR” ÌR” ÌR” ÌR”  ÌR”( ÌR"”) ÌR#”* ÌR$”+ ÌR%”4 ÌR.” ÌS” ÌS” ÌS” ÌS” ÌS” ÌS” ÌS”  ÌS”! ÌS”* ÌS$”+ ÌS%”, ÌS&”- ÌS'”6 ÌS0” ÌT” ÌT” ÌT” ÌT” ÌT” ÌT” ÌT” ÌT”  ÌT”( ÌT"”) ÌT#”* ÌT$”+ ÌT%”4 ÌT.–” ÌU” ÌU” ÌU” ÌU” ÌU”( ÌU"–” ÌV” ÌV” ÌV” ÌV” ÌV”* ÌV$’”	 ÌW”
+ ÌW”” ÌX” ÌX” ÌX” ÌX’” ÌY” ÌY˜” Ì[”	 Ì[”
+ Ì[” Ì[” Ì[” Ì[” Ì[” Ì[*–” Ì\” Ì\” Ì\” Ì\” Ì\” Ì\’” Ì]” Ì]‘”	 Ì^Ÿ” Ì_” Ì_” Ì_	” Ì_” Ì_” Ì_”" Ì_”# Ì_”. Ì_*”/ Ì_+”3 Ì_/”5 Ì_1”; Ì_7”< Ì_8”= Ì_9š” Ì`” Ì`” Ì`	” Ì`” Ì`” Ì`” Ì`” Ì`” Ì`” Ì`—” Ìa” Ìa” Ìa	” Ìa” Ìa” Ìa” Ìa—” Ìb” Ìb” Ìb	” Ìb” Ìb” Ìb” Ìb—” Ìc” Ìc” Ìc	” Ìc” Ìc” Ìc” Ìcš” Ìe” Ìe” Ìe” Ìe” Ìe”- Ìe)”/ Ìe+”3 Ìe/”4 Ìe0”5 Ìe1š” Ìf” Ìf” Ìf” Ìf” Ìf”2 Ìf.”4 Ìf0”8 Ìf4”9 Ìf5”: Ìf6š” Ìg” Ìg” Ìg” Ìg” Ìg”+ Ìg'”- Ìg)”. Ìg*”/ Ìg+”0 Ìg,’” Ìi” ÌiÜ ” Ìj” Ìj” Ìj” Ìj” Ìj” Ìj” Ìj”% Ìj”& Ìj ”/ Ìj)”1 Ìj+”5 Ìj/”6 Ìj0”Ì@ Ìj:”ÌA Ìj;”ÌB Ìj<‘”	 Ìk”” Ìk” Ìk” Ìk” Ìk‘”	 Ìl’” Ìm” ÌmÜ ” Ìn” Ìn” Ìn” Ìn” Ìn” Ìn” Ìn”% Ìn”& Ìn ”4 Ìn.”6 Ìn0”: Ìn4”; Ìn5”Ì@ Ìn:”ÌA Ìn;”ÌB Ìn<‘”	 Ìo”” Ìo” Ìo” Ìo” Ìo‘”	 Ìp’” Ìq” ÌqÜ ” Ìr” Ìr” Ìr” Ìr” Ìr” Ìr” Ìr”% Ìr”& Ìr ”3 Ìr-”5 Ìr/”9 Ìr3”: Ìr4”ÌA Ìr;”ÌB Ìr<”ÌC Ìr=‘”	 Ìs”” Ìs” Ìs” Ìs” Ìs‘”	 Ìt”” Ìu” Ìu
+” Ìu” Ìu>”” Ìv” Ìv” Ìv” Ìv˜” Ìw” Ìw” Ìw”0 Ìw*”1 Ìw+”ÌE Ìw?”ÌF ÌwÌ@”ÌP ÌwÌJ’”	 Ìx”
+ Ìx’” Ìy” Ìy” Ìz” Ìz” Ìz”! Ìz”" Ìz”2 Ìz,”4 Ìz.”7 Ìz1”9 Ìz3”= Ìz7”> Ìz8”ÌC Ìz=”ÌD Ìz>”ÌE Ìz?‘”	 Ì{”” Ì{” Ì{” Ì{” Ì{‘”	 Ì|–” Ì~” Ì~” Ì~	” Ì~” Ì~” Ì~™” Ì” Ì” Ì	” Ì” Ì”$ Ì ”% Ì!”( Ì$”* Ì&–” Ì€” Ì€
+” Ì€” Ì€” Ì€” Ì€–” Ì”	 Ì” Ì” Ì” Ì” Ì™” Ì‚” Ì‚” Ì‚	” Ì‚” Ì‚”& Ì‚"”' Ì‚#”* Ì‚&”, Ì‚(–” Ìƒ” Ìƒ
+” Ìƒ” Ìƒ” Ìƒ” Ìƒ–” Ì„”	 Ì„” Ì„” Ì„” Ì„” Ì„™” Ì…” Ì…” Ì…	” Ì…” Ì…”' Ì…#”( Ì…$”+ Ì…'”- Ì…)Ü ” Ì†” Ì†” Ì†”" Ì†”# Ì†”/ Ì†)”1 Ì†+”5 Ì†/”6 Ì†0”; Ì†5”< Ì†6”= Ì†7”ÌA Ì†;”ÌB Ì†<”ÌE Ì†?”ÌG Ì†ÌA”ÌJ Ì†ÌD”ÌN Ì†ÌH”ÌO Ì†ÌI”ÌQ Ì†ÌK”ÌR Ì†ÌL”ÌU Ì†ÌO”ÌY Ì†ÌS”ÌZ Ì†ÌT”Ì[ Ì†ÌU”Ì\ Ì†ÌV–” Ì‡”	 Ì‡” Ì‡” Ì‡” Ì‡” Ì‡˜” Ì‰” Ì‰” Ì‰	” Ì‰” Ì‰”! Ì‰”" Ì‰”# Ì‰’” ÌŠ” ÌŠ”” ÌŒ”	 ÌŒ”
+ ÌŒ” ÌŒ—” Ì” Ì” Ì	” Ì” Ì” Ì” Ì’” Ì” Ì‘”	 Ì—” Ì” Ì” Ì	” Ì” Ì” Ì” Ì˜” Ì‘” Ì‘” Ì‘” Ì‘” Ì‘”  Ì‘”! Ì‘”# Ì‘˜” Ì’” Ì’” Ì’” Ì’” Ì’”* Ì’$”+ Ì’%”, Ì’&˜” Ì“” Ì“
+” Ì“” Ì“” Ì“”  Ì“”! Ì“”" Ì“‘”	 Ì”˜” Ì•” Ì•” Ì•” Ì•” Ì•”! Ì•”" Ì•”$ Ì• ˜” Ì–” Ì–” Ì–” Ì–” Ì–”+ Ì–%”, Ì–&”- Ì–'˜” Ì—” Ì—
+” Ì—” Ì—”  Ì—”! Ì—”" Ì—”# Ì—‘”	 Ì˜˜” Ì™” Ì™” Ì™” Ì™” Ì™” Ì™” Ì™”! Ì™˜” Ìš” Ìš” Ìš” Ìš” Ìš”( Ìš"”) Ìš#”* Ìš$˜” Ì›” Ì›
+” Ì›” Ì›” Ì›” Ì›” Ì›”  Ì›‘”	 Ìœ’” Ì” ÌÜ ” Ì” Ì” Ì” Ì” Ì” Ì” Ì”& Ì ”' Ì!”0 Ì*”2 Ì,”6 Ì0”7 Ì1”ÌA Ì;”ÌB Ì<”ÌC Ì=‘”	 ÌŸ”” ÌŸ” ÌŸ” ÌŸ” ÌŸ‘”	 Ì ’” Ì¡” Ì¡Ü ” Ì¢” Ì¢” Ì¢” Ì¢” Ì¢” Ì¢” Ì¢”& Ì¢ ”' Ì¢!”5 Ì¢/”7 Ì¢1”; Ì¢5”< Ì¢6”ÌA Ì¢;”ÌB Ì¢<”ÌC Ì¢=‘”	 Ì£”” Ì£” Ì£” Ì£” Ì£‘”	 Ì¤’” Ì¥” Ì¥Ü ” Ì¦” Ì¦” Ì¦” Ì¦” Ì¦” Ì¦” Ì¦”& Ì¦ ”' Ì¦!”4 Ì¦.”6 Ì¦0”: Ì¦4”; Ì¦5”ÌB Ì¦<”ÌC Ì¦=”ÌD Ì¦>‘”	 Ì§”” Ì§” Ì§” Ì§” Ì§‘”	 Ì¨’” Ì©” Ì©œ” Ìª” Ìª” Ìª”" Ìª”# Ìª”3 Ìª-”5 Ìª/”9 Ìª3”: Ìª4”? Ìª9”Ì@ Ìª:”ÌA Ìª;‘”	 Ì«”” Ì«” Ì«” Ì«” Ì«‘”	 Ì¬˜” Ì®” Ì®
+” Ì®” Ì®” Ì®” Ì®”! Ì®”" Ì®—” Ì¯” Ì¯” Ì¯	” Ì¯” Ì¯” Ì¯” Ì¯’” Ì°” Ì°™” Ì±” Ì±” Ì±” Ì±”$ Ì±”% Ì±”* Ì±$”+ Ì±%”, Ì±&‘”	 Ì²”” Ì²” Ì²” Ì²” Ì²‘”	 Ì³’” Ì´” Ì´Ü ” Ìµ” Ìµ” Ìµ” Ìµ”# Ìµ”$ Ìµ”( Ìµ"”) Ìµ#”0 Ìµ*”2 Ìµ,”6 Ìµ0”7 Ìµ1”: Ìµ4”< Ìµ6”> Ìµ8”ÌB Ìµ<”ÌC Ìµ=”ÌM ÌµÌG”ÌN ÌµÌH”ÌO ÌµÌI‘”	 Ì¶”” Ì¶” Ì¶” Ì¶” Ì¶‘”	 Ì·š” Ì¹” Ì¹” Ì¹” Ì¹” Ì¹”- Ì¹)”/ Ì¹+”4 Ì¹0”5 Ì¹1”6 Ì¹2š” Ìº” Ìº” Ìº” Ìº” Ìº”2 Ìº.”4 Ìº0”6 Ìº2”7 Ìº3”8 Ìº4š” Ì»” Ì»” Ì»” Ì»” Ì»”+ Ì»'”- Ì»)”. Ì»*”/ Ì»+”0 Ì»,–” Ì¼” Ì¼” Ì¼	” Ì¼” Ì¼” Ì¼’” Ì½” Ì½’” Ì¿
+”
+ Ì¿˜” ÌÀ” ÌÀ
+” ÌÀ” ÌÀ” ÌÀ” ÌÀ”  ÌÀ”! ÌÀ’” ÌÁ”* ÌÁ&–” ÌÂ” ÌÂ” ÌÂ” ÌÂ)”" ÌÂ2”# ÌÂ3š” ÌÃ” ÌÃ” ÌÃ” ÌÃ” ÌÃ” ÌÃ”! ÌÃ”" ÌÃ”( ÌÃ$”* ÌÃ&” ÌÄ” ÌÄ” ÌÄ”% ÌÄ”& ÌÄ ”* ÌÄ$”+ ÌÄ%”4 ÌÄ.”6 ÌÄ0”: ÌÄ4”; ÌÄ5”ÌB ÌÄ<”ÌC ÌÄ=”ÌD ÌÄ>‘”	 ÌÅ” ÌÆ” ÌÆ” ÌÆ” ÌÆ”$ ÌÆ ”( ÌÆ$”+ ÌÆ'”/ ÌÆ+”2 ÌÆ.”3 ÌÆ/”< ÌÆ8”ÌA ÌÆ=”ÌJ ÌÆÌF”ÌL ÌÆÌH—” ÌÇ” ÌÇ” ÌÇ” ÌÇ” ÌÇ”& ÌÇ ”' ÌÇ!‘”	 ÌÈ—” ÌÉ” ÌÉ” ÌÉ	” ÌÉ” ÌÉ”% ÌÉ!”& ÌÉ"”” ÌÊ” ÌÊ
+” ÌÊ” ÌÊ –” ÌË” ÌË” ÌË” ÌË” ÌË”! ÌË—” ÌÌ” ÌÌ” ÌÌ” ÌÌ” ÌÌ” ÌÌ” ÌÌ” ÌÍ” ÌÍ” ÌÍ” ÌÍ” ÌÍ” ÌÍ” ÌÍ” ÌÍ”  ÌÍ”( ÌÍ"”) ÌÍ#”* ÌÍ$”+ ÌÍ%”4 ÌÍ.” ÌÎ” ÌÎ” ÌÎ” ÌÎ” ÌÎ” ÌÎ” ÌÎ”  ÌÎ”! ÌÎ”* ÌÎ$”+ ÌÎ%”, ÌÎ&”- ÌÎ'”6 ÌÎ0” ÌÏ” ÌÏ” ÌÏ” ÌÏ” ÌÏ” ÌÏ” ÌÏ” ÌÏ”  ÌÏ”( ÌÏ"”) ÌÏ#”* ÌÏ$”+ ÌÏ%”4 ÌÏ.” ÌĞ” ÌĞ” ÌĞ” ÌĞ” ÌĞ” ÌĞ” ÌĞ” ÌĞ”  ÌĞ”( ÌĞ"”) ÌĞ#”* ÌĞ$”+ ÌĞ%”4 ÌĞ.–” ÌÑ” ÌÑ” ÌÑ” ÌÑ” ÌÑ”* ÌÑ$Ü ” ÌÒ” ÌÒ” ÌÒ” ÌÒ” ÌÒ”" ÌÒ”# ÌÒ”$ ÌÒ”% ÌÒ”) ÌÒ#”* ÌÒ$”1 ÌÒ+”2 ÌÒ,”3 ÌÒ-”4 ÌÒ.”5 ÌÒ/”6 ÌÒ0”7 ÌÒ1”Ì@ ÌÒ:Ü ” ÌÓ” ÌÓ” ÌÓ” ÌÓ” ÌÓ”" ÌÓ”# ÌÓ”$ ÌÓ”% ÌÓ”) ÌÓ#”* ÌÓ$”1 ÌÓ+”2 ÌÓ,”3 ÌÓ-”4 ÌÓ.”5 ÌÓ/”6 ÌÓ0”7 ÌÓ1”Ì@ ÌÓ:Ü ” ÌÔ” ÌÔ” ÌÔ” ÌÔ” ÌÔ”" ÌÔ”# ÌÔ”$ ÌÔ”% ÌÔ”) ÌÔ#”* ÌÔ$”1 ÌÔ+”2 ÌÔ,”3 ÌÔ-”4 ÌÔ.”5 ÌÔ/”6 ÌÔ0”7 ÌÔ1”Ì@ ÌÔ:”” ÌÕ” ÌÕ” ÌÕ”" ÌÕ–” ÌÖ” ÌÖ” ÌÖ” ÌÖ” ÌÖ”) ÌÖ#–” Ì×” Ì×” Ì×” Ì×” Ì×”" Ì×’”	 ÌØ”
+ ÌØš” ÌÙ” ÌÙ” ÌÙ	” ÌÙ” ÌÙ” ÌÙ” ÌÙ” ÌÙ” ÌÙ” ÌÙ–” ÌÚ” ÌÚ” ÌÚ	” ÌÚ” ÌÚ” ÌÚš” ÌÛ” ÌÛ” ÌÛ” ÌÛ” ÌÛ” ÌÛ” ÌÛ”" ÌÛ”# ÌÛ”% ÌÛ!˜” ÌÜ” ÌÜ” ÌÜ” ÌÜ” ÌÜ” ÌÜ”% ÌÜ”& ÌÜ —” Ìİ” Ìİ
+” Ìİ” Ìİ” Ìİ” Ìİ” Ìİœ” ÌŞ” ÌŞ” ÌŞ” ÌŞ” ÌŞ”$ ÌŞ”% ÌŞ”& ÌŞ ”+ ÌŞ%”, ÌŞ&”/ ÌŞ)”1 ÌŞ+”” Ìß” Ìß” Ìß” Ìß	‘”	 Ìà’” Ìá” Ìá’” Ìã
+” Ìã’” Ìä” Ìä–” Ìå” Ìå” Ìå” Ìå” Ìå” Ìå‘”	 Ìæ”” Ìæ” Ìæ” Ìæ” Ìæ‘”	 Ìç•” Ìè” Ìè” Ìè” Ìè” Ìè’” Ìé” Ìé
+™” Ìê” Ìê” Ìê” Ìê”( Ìê ”) Ìê!”8 Ìê0”: Ìê2”; Ìê3˜” Ìë” Ìë” Ìë” Ìë”  Ìë”! Ìë”& Ìë”( Ìë Ü ” Ìì” Ìì” Ìì” Ìì” Ìì,” Ìì.” ÌìÌI”! ÌìÌK”# ÌìÌM”$ ÌìÌN”% ÌìÌO”& ÌìÌP”* ÌìÌT”- ÌìÌW”. ÌìÌX”/ ÌìÌY”3 ÌìÌ]”4 ÌìÌ^˜” Ìí” Ìí” Ìí” Ìí” Ìí” Ìí”  Ìí”! ÌíÜ ” Ìî” Ìî” Ìî” Ìî”  Ìî”# Ìî”$ Ìî”' Ìî”( Ìî ”) Ìî!”* Ìî<”, Ìî>”. ÌîÌ@”/ ÌîÌA”2 ÌîÌD”3 ÌîÌE”4 ÌîÌF”9 ÌîÌK”= ÌîÌO”> ÌîÌP”? ÌîÌQ”ÌC ÌîÌU”ÌE ÌîÌW”ÌF ÌîÌX”ÌG ÌîÌY”ÌK ÌîÌ]”ÌL ÌîÌ^”ÌO ÌîÌa”ÌP ÌîÌb”ÌQ ÌîÌc™” Ìï” Ìï” Ìï”" Ìï”% Ìï”) Ìï!”* Ìï"”0 Ìï(”1 Ìï)‘” Ìğ”” Ìğ” Ìğ” Ìğ” Ìğ‘” Ìñ–” Ìò”	 Ìò” Ìò” Ìò” Ìò” Ìò’” Ìó” Ìó–” Ìõ
+”	 Ìõ”
+ Ìõ” Ìõ” Ìõ ” Ìõ,’” Ìö” Ìö˜” Ì÷” Ì÷” Ì÷” Ì÷” Ì÷”  Ì÷”" Ì÷”# Ì÷•” Ìø” Ìø
+” Ìø” Ìø” Ìø’” Ìù” Ìù‘” Ìú”” Ìû” Ìû” Ìû” Ìû,” Ìü” Ìü” Ìü” Ìü” Ìü”$ Ìü”& Ìü”> Ìü6”Ì@ Ìü8”ÌK ÌüÌC”ÌM ÌüÌE”Ì[ ÌüÌS”Ì] ÌüÌU”Ì^ ÌüÌV˜” Ìı” Ìı” Ìı”% Ìı”& Ìı”3 Ìı+”4 Ìı,”ÌA Ìı9”” Ìş” Ìş” Ìş” Ìşš” Ìÿ” Ìÿ”  Ìÿ”! Ìÿ”* Ìÿ"”+ Ìÿ#”9 Ìÿ1”: Ìÿ2”ÌM ÌÿÌE”ÌN ÌÿÌF’” Í ” Í œ” Í” Í” Í” Í”  Í”) Í#”* Í$”6 Í0”7 Í1”; Í5”< Í6”= Í7’” Í”; Í5Ÿ” Í” Í”' Í!”( Í"”> Í8”? Í9”ÌF ÍÌ@”ÌH ÍÌB”ÌI ÍÌC”ÌS ÍÌM”ÌT ÍÌN”ÌV ÍÌP”Ì[ ÍÌU”Ì\ ÍÌV”Ì] ÍÌW‘”	 Í”” Í” Í” Í” Í‘”	 Í’” Í” Í–” Í” Í”% Í”& Í ”- Í'”. Í(”” Í” Í
+” Í” Í“” Í	” Í	” Í	˜” Í
+
+”+ Í
+!”- Í
+#”Ì@ Í
+6”ÌA Í
+7”ÌL Í
+ÌB”ÌM Í
+ÌC”Ìl Í
+Ìb” Í
+” Í” Í” Í”# Í”% Í”- Í#”/ Í%”3 Í)”5 Í+”9 Í/”= Í3”ÌH Í>”ÌJ ÍÌ@‘” Í	“” Í” Í” Í	‘”	 Í”” Í” Í” Í” Í‘”	 Í’” Í” Í’” Í
+” Í’” Í” Í˜” Í” Í”  Í”& Í ”' Í!”/ Í)”0 Í*”1 Í+‘”	 Í”” Í” Í” Í” Í‘”	 Í’” Í” Í–” Í” Í
+” Í” Í” Í” Íš” Í”% Í”& Í”; Í3”< Í4”? Í7”Ì@ Í8”ÌB Í:”ÌC Í;”ÌD Í<‘” Í‘”	 Í”” Í” Í” Í” Í‘”	 Í’” Í” Í•”  ” ” .” 2” 3ÔrI–§version¤file§sources®sourcesContent¥names¨mappingsÀ‘À‘ÀÜ‘”    ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”  	 ‘”  
+ ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”   ‘”    ‘”  ! ‘”  " ‘”  # ‘”  $ ‘”  % ‘”  & ‘”  ' ‘”  ( ‘”  ) ‘”  * ‘”  + ‘”  , ‘”  - ‘”  . ‘”  / ‘”  0 ‘”  1 ‘”  2 ‘”  3 ‘”  4 ‘”  5 ‘”  6 ‘”  7 ‘”  8 ‘”  9 ‘”  : ‘”  ; ‘”  < ‘”  = ‘”  > ‘”  ? ‘”  Ì@ ‘”  ÌA ‘”  ÌB ‘”  ÌC ‘”  ÌD ‘”  ÌE ‘”  ÌF ‘”  ÌG ‘”  ÌH ‘”  ÌI ‘”  ÌJ ‘”  ÌK ‘”  ÌL ‘”  ÌM ‘”  ÌN ‘”  ÌO ‘”  ÌP ‘”  ÌQ ‘”  ÌR ‘”  ÌS ‘”  ÌT ‘”  ÌU ‘”  ÌV ‘”  ÌW ‘”  ÌX ‘”  ÌY ‘”  ÌZ ‘”  Ì[ ‘”  Ì\ ‘”  Ì] ‘”  Ì^ ‘”  Ì_ ‘”  Ì` ‘”  Ìa ‘”  Ìb ‘”  Ìc ‘”  Ìd ‘”  Ìe ‘”  Ìf ‘”  Ìg ‘”  Ìh ‘”  Ìi ‘”  Ìj ‘”  Ìk ‘”  Ìl ‘”  Ìm ‘”  Ìn ‘”  Ìo ‘”  Ìp ‘”  Ìq ‘”  Ìr ‘”  Ìs ‘”  Ìt ‘”  Ìu ‘”  Ìv ‘”  Ìw ‘”  Ìx ‘”  Ìy ‘”  Ìz ‘”  Ì{ ‘”  Ì| ‘”  Ì} ‘”  Ì~ ‘”  Ì ‘”  Ì€ ‘”  Ì ‘”  Ì‚ ‘”  Ìƒ ‘”  Ì„ ‘”  Ì… ‘”  Ì† ‘”  Ì‡ ‘”  Ìˆ ‘”  Ì‰ ‘”  ÌŠ ‘”  Ì‹ ‘”  ÌŒ ‘”  Ì ‘”  Ì ‘”  Ì ‘”  Ì ‘”  Ì‘ ‘”  Ì’ ‘”  Ì“ ‘”  Ì” ‘”  Ì• ‘”  Ì– ‘”  Ì— ‘”  Ì˜ ‘”  Ì™ ‘”  Ìš ‘”  Ì› ‘”  Ìœ ‘”  Ì ‘”  Ì ‘”  ÌŸ ‘”  Ì  ‘”  Ì¡ ‘”  Ì¢ ‘”  Ì£ ‘”  Ì¤ ‘”  Ì¥ ‘”  Ì¦ ‘”  Ì§ ‘”  Ì¨ ‘”  Ì© ‘”  Ìª ‘”  Ì« ‘”  Ì¬ ‘”  Ì­ ‘”  Ì® ‘”  Ì¯ ‘”  Ì° ‘”  Ì± ‘”  Ì² ‘”  Ì³ ‘”  Ì´ ‘”  Ìµ ‘”  Ì¶ ‘”  Ì· ‘”  Ì¸ ‘”  Ì¹ ‘”  Ìº ‘”  Ì» ‘”  Ì¼ ‘”  Ì½ ‘”  Ì¾ ‘”  Ì¿ ‘”  ÌÀ ‘”  ÌÁ ‘”  ÌÂ ‘”  ÌÃ ‘”  ÌÄ ‘”  ÌÅ ‘”  ÌÆ ‘”  ÌÇ ‘”  ÌÈ ‘”  ÌÉ ‘”  ÌÊ ‘”  ÌË ‘”  ÌÌ ‘”  ÌÍ ‘”  ÌÎ ‘”  ÌÏ ‘”  ÌĞ ‘”  ÌÑ ‘”  ÌÒ ‘”  ÌÓ ‘”  ÌÔ ‘”  ÌÕ ‘”  ÌÖ ‘”  Ì× ‘”  ÌØ ‘”  ÌÙ ‘”  ÌÚ ‘”  ÌÛ ‘”  ÌÜ ‘”  Ìİ ‘”  ÌŞ ‘”  Ìß ‘”  Ìà ‘”  Ìá ‘”  Ìâ ‘”  Ìã ‘”  Ìä ‘”  Ìå ‘”  Ìæ ‘”  Ìç ‘”  Ìè ‘”  Ìé ‘”  Ìê ‘”  Ìë ‘”  Ìì ‘”  Ìí ‘”  Ìî ‘”  Ìï ‘”  Ìğ ‘”  Ìñ ‘”  Ìò ‘”  Ìó ‘”  Ìô ‘”  Ìõ ‘”  Ìö ‘”  Ì÷ ‘”  Ìø ‘”  Ìù ‘”  Ìú ‘”  Ìû ‘”  Ìü ‘”  Ìı ‘”  Ìş ‘”  Ìÿ ‘”  Í  ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í	 ‘”  Í
+ ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ‘”  Í ÔrJ’§missing¦pluginÃ¦genAbcÂÔ  ÔrK”²dynamicImportCache¹exportAllDeclarationCache»exportNamedDeclarationCache«importCache‘ÔrL–¤type¥start£end«declarationªspecifiers¦source¶ExportNamedDeclarationÍaÍ"HÔrM–¤type¥start£end¢idªsuperClass¤body°ClassDeclarationÍhÍ"HÔrN”¤type¥start£end¤nameªIdentifierÍnÍ{­TrackRecorderÀÔrO”¤type¥start£end¤body©ClassBodyÍ|Í"H›ÔrP˜¤type¥start£end¦static¨computed£key¤kind¥value°MethodDefinitionÍƒÍVÂÂNªIdentifierÍƒÍ«constructor«constructorÔrQ™¤type¥start£end¢idªexpression©generator¥async¦params¤body²FunctionExpressionÍÍVÀÂÂÂO®BlockStatementÍ‘ÍVÜ ÔrR”¤type¥start£endªexpression³ExpressionStatementÍœÍ±ÔrS–¤type¥start£end¨operator¤left¥right´AssignmentExpressionÍœÍ°¡=ÔrT—¤type¥start£end¦object¨property¨computed¨optional°MemberExpressionÍœÍ¨ÔrU“¤type¥start£end®ThisExpressionÍœÍ NªIdentifierÍ¡Í¨§runningÂÂÔrV•¤type¥start£end¥value£raw§LiteralÍ«Í°Â¥falseR³ExpressionStatementÍ»ÍÍS´AssignmentExpressionÍ»ÍÌ¡=T°MemberExpressionÍ»ÍÇU®ThisExpressionÍ»Í¿NªIdentifierÍÀÍÇ§trackIdÂÂÔrW–¤type¥start£end¨operator¦prefix¨argument¯UnaryExpressionÍÊÍÌ¡-ÃV§LiteralÍËÍÌ¡1R³ExpressionStatementÍ×ÍãS´AssignmentExpressionÍ×Íâ¡=T°MemberExpressionÍ×ÍŞU®ThisExpressionÍ×ÍÛNªIdentifierÍÜÍŞ¢t0ÂÂV§LiteralÍáÍâ ¡0R³ExpressionStatementÍíÍS´AssignmentExpressionÍíÍ ¡=T°MemberExpressionÍíÍüU®ThisExpressionÍíÍñNªIdentifierÍòÍüªpointCountÂÂV§LiteralÍÿÍ  ¡0R³ExpressionStatementÍÍS´AssignmentExpressionÍÍ¡=T°MemberExpressionÍÍU®ThisExpressionÍÍNªIdentifierÍÍ¦bufferÂÂÔrX”¤type¥start£end¨elements¯ArrayExpressionÍÍR³ExpressionStatementÍ&Í<S´AssignmentExpressionÍ&Í;¡=T°MemberExpressionÍ&Í6U®ThisExpressionÍ&Í*NªIdentifierÍ+Í6«sampleTimerÂÂW¯UnaryExpressionÍ9Í;¡-ÃV§LiteralÍ:Í;¡1R³ExpressionStatementÍFÍ]S´AssignmentExpressionÍFÍ\¡=T°MemberExpressionÍFÍWU®ThisExpressionÍFÍJNªIdentifierÍKÍW¬elapsedTimerÂÂW¯UnaryExpressionÍZÍ\¡-ÃV§LiteralÍ[Í\¡1R³ExpressionStatementÍgÍ{S´AssignmentExpressionÍgÍz¡=T°MemberExpressionÍgÍuU®ThisExpressionÍgÍkNªIdentifierÍlÍu©wifiTimerÂÂW¯UnaryExpressionÍxÍz¡-ÃV§LiteralÍyÍz¡1R³ExpressionStatementÍ…Í™S´AssignmentExpressionÍ…Í˜¡=T°MemberExpressionÍ…Í‘U®ThisExpressionÍ…Í‰NªIdentifierÍŠÍ‘§lastLocÂÂV§LiteralÍ”Í˜À¤nullR³ExpressionStatementÍ£ÍÁS´AssignmentExpressionÍ£ÍÀ¡=T°MemberExpressionÍ£Í´U®ThisExpressionÍ£Í§NªIdentifierÍ¨Í´¬lastPressureÂÂNªIdentifierÍ·ÍÀ©undefinedR³ExpressionStatementÍËÍäS´AssignmentExpressionÍËÍã¡=T°MemberExpressionÍËÍ×U®ThisExpressionÍËÍÏNªIdentifierÍĞÍ×§lastMagÂÂX¯ArrayExpressionÍÚÍã“V§LiteralÍÛÍÜ ¡0V§LiteralÍŞÍß ¡0V§LiteralÍáÍâ ¡0R³ExpressionStatementÍîÍS´AssignmentExpressionÍîÍ¡=T°MemberExpressionÍîÍùU®ThisExpressionÍîÍòNªIdentifierÍóÍù¦hasMagÂÂV§LiteralÍüÍÂ¥falseR³ExpressionStatementÍÍ'S´AssignmentExpressionÍÍ&¡=T°MemberExpressionÍÍU®ThisExpressionÍÍNªIdentifierÍÍ©lastAccelÂÂX¯ArrayExpressionÍÍ&“V§LiteralÍÍ ¡0V§LiteralÍ!Í" ¡0V§LiteralÍ$Í% ¡0R³ExpressionStatementÍ1ÍGS´AssignmentExpressionÍ1ÍF¡=T°MemberExpressionÍ1Í>U®ThisExpressionÍ1Í5NªIdentifierÍ6Í>¨hasAccelÂÂV§LiteralÍAÍFÂ¥falseR³ExpressionStatementÍQÍnS´AssignmentExpressionÍQÍm¡=T°MemberExpressionÍQÍaU®ThisExpressionÍQÍUNªIdentifierÍVÍa«lastHeadingÂÂNªIdentifierÍdÍm©undefinedR³ExpressionStatementÍxÍ‹S´AssignmentExpressionÍxÍŠ¡=T°MemberExpressionÍxÍ…U®ThisExpressionÍxÍ|NªIdentifierÍ}Í…¨lastWifiÂÂV§LiteralÍˆÍŠ ¢''R³ExpressionStatementÍ•Í¬S´AssignmentExpressionÍ•Í«¡=T°MemberExpressionÍ•Í§U®ThisExpressionÍ•Í™NªIdentifierÍšÍ§­lastWifiCountÂÂV§LiteralÍªÍ« ¡0R³ExpressionStatementÍ¶Í	S´AssignmentExpressionÍ¶Í¡=T°MemberExpressionÍ¶ÍÅU®ThisExpressionÍ¶ÍºNªIdentifierÍ»ÍÅªpressureCbÂÂQ·ArrowFunctionExpressionÍÈÍÀÂÂÂ‘NªIdentifierÍÉÍÊ¡dO®BlockStatementÍÏÍ‘R³ExpressionStatementÍŞÍıS´AssignmentExpressionÍŞÍü¡=T°MemberExpressionÍŞÍïU®ThisExpressionÍŞÍâNªIdentifierÍãÍï¬lastPressureÂÂT°MemberExpressionÍòÍüNªIdentifierÍòÍó¡dNªIdentifierÍôÍü¨pressureÂÂR³ExpressionStatementÍÍ‚S´AssignmentExpressionÍÍ¡=T°MemberExpressionÍÍU®ThisExpressionÍÍNªIdentifierÍÍ¥magCbÂÂQ·ArrowFunctionExpressionÍ ÍÀÂÂÂ‘NªIdentifierÍ!Í"¡dO®BlockStatementÍ'Í’R³ExpressionStatementÍ6ÍUS´AssignmentExpressionÍ6ÍT¡=T°MemberExpressionÍ6ÍBU®ThisExpressionÍ6Í:NªIdentifierÍ;ÍB§lastMagÂÂX¯ArrayExpressionÍEÍT“T°MemberExpressionÍFÍINªIdentifierÍFÍG¡dNªIdentifierÍHÍI¡xÂÂT°MemberExpressionÍKÍNNªIdentifierÍKÍL¡dNªIdentifierÍMÍN¡yÂÂT°MemberExpressionÍPÍSNªIdentifierÍPÍQ¡dNªIdentifierÍRÍS¡zÂÂR³ExpressionStatementÍcÍvS´AssignmentExpressionÍcÍu¡=T°MemberExpressionÍcÍnU®ThisExpressionÍcÍgNªIdentifierÍhÍn¦hasMagÂÂV§LiteralÍqÍuÃ¤trueR³ExpressionStatementÍŒÍS´AssignmentExpressionÍŒÍ ¡=T°MemberExpressionÍŒÍ˜U®ThisExpressionÍŒÍNªIdentifierÍ‘Í˜§accelCbÂÂQ·ArrowFunctionExpressionÍ›Í ÀÂÂÂ‘NªIdentifierÍœÍ¡dO®BlockStatementÍ¢Í ’R³ExpressionStatementÍ±ÍÒS´AssignmentExpressionÍ±ÍÑ¡=T°MemberExpressionÍ±Í¿U®ThisExpressionÍ±ÍµNªIdentifierÍ¶Í¿©lastAccelÂÂX¯ArrayExpressionÍÂÍÑ“T°MemberExpressionÍÃÍÆNªIdentifierÍÃÍÄ¡dNªIdentifierÍÅÍÆ¡xÂÂT°MemberExpressionÍÈÍËNªIdentifierÍÈÍÉ¡dNªIdentifierÍÊÍË¡yÂÂT°MemberExpressionÍÍÍĞNªIdentifierÍÍÍÎ¡dNªIdentifierÍÏÍĞ¡zÂÂR³ExpressionStatementÍàÍõS´AssignmentExpressionÍàÍô¡=T°MemberExpressionÍàÍíU®ThisExpressionÍàÍäNªIdentifierÍåÍí¨hasAccelÂÂV§LiteralÍğÍôÃ¤trueR³ExpressionStatementÍÍOS´AssignmentExpressionÍÍN¡=T°MemberExpressionÍÍU®ThisExpressionÍÍNªIdentifierÍÍ¥locCbÂÂQ·ArrowFunctionExpressionÍÍNÀÂÂÂ‘NªIdentifierÍÍ£locO®BlockStatementÍ!ÍN‘R³ExpressionStatementÍ0ÍCS´AssignmentExpressionÍ0ÍB¡=T°MemberExpressionÍ0Í<U®ThisExpressionÍ0Í4NªIdentifierÍ5Í<§lastLocÂÂNªIdentifierÍ?ÍB£locP°MethodDefinitionÍ\ÍûÃÂNªIdentifierÍcÍf£get¦methodQ²FunctionExpressionÍfÍûÀÂÂÂO®BlockStatementÍiÍû’ÔrY–¤type¥start£end¤testªconsequent©alternate«IfStatementÍtÍĞW¯UnaryExpressionÍxÍ‹¡!ÃT°MemberExpressionÍyÍ‹NªIdentifierÍyÍ†­TrackRecorderNªIdentifierÍ‡Í‹¤instÂÂO®BlockStatementÍÍĞ‘R³ExpressionStatementÍœÍÅS´AssignmentExpressionÍœÍÄ¡=T°MemberExpressionÍœÍ®NªIdentifierÍœÍ©­TrackRecorderNªIdentifierÍªÍ®¤instÂÂÔrZ•¤type¥start£end¦callee©arguments­NewExpressionÍ±ÍÄNªIdentifierÍµÍÂ­TrackRecorderÀÔr[”¤type¥start£end¨argument¯ReturnStatementÍÚÍôT°MemberExpressionÍáÍóNªIdentifierÍáÍî­TrackRecorderNªIdentifierÍïÍó¤instÂÂP°MethodDefinitionÍÍ3ÂÂNªIdentifierÍÍ
+©isRunning¦methodQ²FunctionExpressionÍ
+Í3ÀÂÂÂO®BlockStatementÍÍ3‘[¯ReturnStatementÍÍ,T°MemberExpressionÍÍ+U®ThisExpressionÍÍ#NªIdentifierÍ$Í+§runningÂÂP°MethodDefinitionÍXÍ‹ÂÂNªIdentifierÍXÍbªgetTrackId¦methodQ²FunctionExpressionÍbÍ‹ÀÂÂÂO®BlockStatementÍeÍ‹‘[¯ReturnStatementÍpÍ„T°MemberExpressionÍwÍƒU®ThisExpressionÍwÍ{NªIdentifierÍ|Íƒ§trackIdÂÂP°MethodDefinitionÍºÍ	+ÂÂNªIdentifierÍºÍÅ«getSnapshot¦methodQ²FunctionExpressionÍÅÍ	+ÀÂÂÂO®BlockStatementÍÈÍ	+“Ôr\•¤type¥start£end¬declarations¤kind³VariableDeclarationÍÓÍì‘Ôr]•¤type¥start£end¢id¤init²VariableDeclaratorÍÙÍëNªIdentifierÍÙÍÜ£locT°MemberExpressionÍßÍëU®ThisExpressionÍßÍãNªIdentifierÍäÍë§lastLocÂÂ¥const\³VariableDeclarationÍöÍ	‘]²VariableDeclaratorÍüÍ	NªIdentifierÍüÍ ¤snapÔr^”¤type¥start£endªproperties°ObjectExpressionÍÍ	•Ôr_™¤type¥start£end¦method©shorthand¨computed£key¥value¤kind¨PropertyÍÍ:ÂÂÂNªIdentifierÍÍ¨latitudeYµConditionalExpressionÍÍ:NªIdentifierÍÍ£locT°MemberExpressionÍ"Í.NªIdentifierÍ"Í%£locNªIdentifierÍ&Í.¨latitudeÂÂNªIdentifierÍ1Í:©undefined¤init_¨PropertyÍIÍsÂÂÂNªIdentifierÍIÍR©longitudeYµConditionalExpressionÍTÍsNªIdentifierÍTÍW£locT°MemberExpressionÍZÍgNªIdentifierÍZÍ]£locNªIdentifierÍ^Íg©longitudeÂÂNªIdentifierÍjÍs©undefined¤init_¨PropertyÍ‚ÍªÂÂÂNªIdentifierÍ‚ÍŠ¨altitudeYµConditionalExpressionÍŒÍªNªIdentifierÍŒÍ£locT°MemberExpressionÍ’ÍNªIdentifierÍ’Í•£locNªIdentifierÍ–Í¨altitudeÂÂNªIdentifierÍ¡Íª©undefined¤init_¨PropertyÍ¹ÍÕÂÂÂNªIdentifierÍ¹ÍÃªheadingDegT°MemberExpressionÍÅÍÕU®ThisExpressionÍÅÍÉNªIdentifierÍÊÍÕ«lastHeadingÂÂ¤init_¨PropertyÍäÍ	ÂÂÂNªIdentifierÍäÍï«pressureHpaT°MemberExpressionÍñÍ	U®ThisExpressionÍñÍõNªIdentifierÍöÍ	¬lastPressureÂÂ¤init¥const[¯ReturnStatementÍ	Í	$NªIdentifierÍ	Í	#¤snapP°MethodDefinitionÍ	1ÍÂÂNªIdentifierÍ	7Í	<¥start¦methodQ²FunctionExpressionÍ	<ÍÀÂÂÃ’NªIdentifierÍ	=Í	A¤nameNªIdentifierÍ	CÍ	I¦areaIdO®BlockStatementÍ	KÍÜ Y«IfStatementÍ	VÍ	‰T°MemberExpressionÍ	ZÍ	fU®ThisExpressionÍ	ZÍ	^NªIdentifierÍ	_Í	f§runningÂÂO®BlockStatementÍ	hÍ	‰‘[¯ReturnStatementÍ	wÍ	~ÀÀR³ExpressionStatementÍ	“Í	ÈS´AssignmentExpressionÍ	“Í	Ç¡=T°MemberExpressionÍ	“Í	ŸU®ThisExpressionÍ	“Í	—NªIdentifierÍ	˜Í	Ÿ§trackIdÂÂ[¯AwaitExpressionÍ	¢Í	ÇÔr`–¤type¥start£end¦callee©arguments¨optional®CallExpressionÍ	¨Í	ÇT°MemberExpressionÍ	¨Í	¹NªIdentifierÍ	¨Í	­¥StoreNªIdentifierÍ	®Í	¹«insertTrackÂÂ’NªIdentifierÍ	ºÍ	¾¤nameNªIdentifierÍ	ÀÍ	Æ¦areaIdÂR³ExpressionStatementÍ	ÒÍ	çS´AssignmentExpressionÍ	ÒÍ	æ¡=T°MemberExpressionÍ	ÒÍ	ÙU®ThisExpressionÍ	ÒÍ	ÖNªIdentifierÍ	×Í	Ù¢t0ÂÂ`®CallExpressionÍ	ÜÍ	æT°MemberExpressionÍ	ÜÍ	äNªIdentifierÍ	ÜÍ	à¤DateNªIdentifierÍ	áÍ	ä£nowÂÂÂR³ExpressionStatementÍ	ñÍ
+S´AssignmentExpressionÍ	ñÍ
+¡=T°MemberExpressionÍ	ñÍ
+ U®ThisExpressionÍ	ñÍ	õNªIdentifierÍ	öÍ
+ ªpointCountÂÂV§LiteralÍ
+Í
+ ¡0R³ExpressionStatementÍ
+Í
+ S´AssignmentExpressionÍ
+Í
+¡=T°MemberExpressionÍ
+Í
+U®ThisExpressionÍ
+Í
+NªIdentifierÍ
+Í
+¦bufferÂÂX¯ArrayExpressionÍ
+Í
+R³ExpressionStatementÍ
+*Í
+>S´AssignmentExpressionÍ
+*Í
+=¡=T°MemberExpressionÍ
+*Í
+6U®ThisExpressionÍ
+*Í
+.NªIdentifierÍ
+/Í
+6§runningÂÂV§LiteralÍ
+9Í
+=Ã¤trueR³ExpressionStatementÍ
+HÍ
+u`®CallExpressionÍ
+HÍ
+tT°MemberExpressionÍ
+HÍ
+^NªIdentifierÍ
+HÍ
+RªAppStorageNªIdentifierÍ
+SÍ
+^«setOrCreateÂÂ’V§LiteralÍ
+_Í
+m¬rm_recording®'rm_recording'V§LiteralÍ
+oÍ
+sÃ¤trueÂR³ExpressionStatementÍ
+Í
+±`®CallExpressionÍ
+Í
+°T°MemberExpressionÍ
+Í
+•NªIdentifierÍ
+Í
+‰ªAppStorageNªIdentifierÍ
+ŠÍ
+•«setOrCreateÂÂ’V§LiteralÍ
+–Í
+©±rm_rec_track_name³'rm_rec_track_name'NªIdentifierÍ
+«Í
+¯¤nameÂR³ExpressionStatementÍ
+»Í
+ã`®CallExpressionÍ
+»Í
+âT°MemberExpressionÍ
+»Í
+ÑNªIdentifierÍ
+»Í
+ÅªAppStorageNªIdentifierÍ
+ÆÍ
+Ñ«setOrCreateÂÂ’V§LiteralÍ
+ÒÍ
+Şªrm_elapsed¬'rm_elapsed'V§LiteralÍ
+àÍ
+á ¡0ÂÔra–¤type¥start£end¥block§handler©finalizer¬TryStatementÍ
+íÍaO®BlockStatementÍ
+ñÍA‘R³ExpressionStatementÍ Í6`®CallExpressionÍ Í5T°MemberExpressionÍ Í	NªIdentifierÍ Í¦sensorNªIdentifierÍÍ	¢onÂÂ’T°MemberExpressionÍ
+Í#T°MemberExpressionÍ
+ÍNªIdentifierÍ
+Í¦sensorNªIdentifierÍÍ¨SensorIdÂÂNªIdentifierÍÍ#©BAROMETERÂÂT°MemberExpressionÍ%Í4U®ThisExpressionÍ%Í)NªIdentifierÍ*Í4ªpressureCbÂÂÂÔrb•¤type¥start£end¥param¤body«CatchClauseÍKÍaNªIdentifierÍRÍS¡eO®BlockStatementÍUÍaÀa¬TryStatementÍkÍßO®BlockStatementÍoÍ¿‘R³ExpressionStatementÍ~Í´`®CallExpressionÍ~Í³T°MemberExpressionÍ~Í‡NªIdentifierÍ~Í„¦sensorNªIdentifierÍ…Í‡¢onÂÂ’T°MemberExpressionÍˆÍ¦T°MemberExpressionÍˆÍ—NªIdentifierÍˆÍ¦sensorNªIdentifierÍÍ—¨SensorIdÂÂNªIdentifierÍ˜Í¦®MAGNETIC_FIELDÂÂT°MemberExpressionÍ¨Í²U®ThisExpressionÍ¨Í¬NªIdentifierÍ­Í²¥magCbÂÂÂb«CatchClauseÍÉÍßNªIdentifierÍĞÍÑ¡eO®BlockStatementÍÓÍßÀa¬TryStatementÍéÍ^O®BlockStatementÍíÍ>‘R³ExpressionStatementÍüÍ3`®CallExpressionÍüÍ2T°MemberExpressionÍüÍNªIdentifierÍüÍ¦sensorNªIdentifierÍÍ¢onÂÂ’T°MemberExpressionÍÍ#T°MemberExpressionÍÍNªIdentifierÍÍ¦sensorNªIdentifierÍÍ¨SensorIdÂÂNªIdentifierÍÍ#­ACCELEROMETERÂÂT°MemberExpressionÍ%Í1U®ThisExpressionÍ%Í)NªIdentifierÍ*Í1§accelCbÂÂÂb«CatchClauseÍHÍ^NªIdentifierÍOÍP¡eO®BlockStatementÍRÍ^À\³VariableDeclarationÍhÍí‘]²VariableDeclaratorÍnÍìNªIdentifierÍnÍq£req^°ObjectExpressionÍtÍì’_¨PropertyÍƒÍÂÂÂNªIdentifierÍƒÍ‹¨intervalV§LiteralÍÍ¡1¤init_¨PropertyÍÍáÂÂÂNªIdentifierÍÍ­°locationScenarioT°MemberExpressionÍ¯ÍáT°MemberExpressionÍ¯ÍÖNªIdentifierÍ¯ÍÁ²geoLocationManagerNªIdentifierÍÂÍÖ´UserActivityScenarioÂÂNªIdentifierÍ×ÍáªNAVIGATIONÂÂ¤init¥consta¬TryStatementÍ÷ÍnO®BlockStatementÍûÍN‘R³ExpressionStatementÍ
+ÍC`®CallExpressionÍ
+ÍBT°MemberExpressionÍ
+ÍNªIdentifierÍ
+Í²geoLocationManagerNªIdentifierÍÍ¢onÂÂ“V§LiteralÍ Í0®locationChange°'locationChange'NªIdentifierÍ2Í5£reqT°MemberExpressionÍ7ÍAU®ThisExpressionÍ7Í;NªIdentifierÍ<ÍA¥locCbÂÂÂb«CatchClauseÍXÍnNªIdentifierÍ_Í`¡eO®BlockStatementÍbÍnÀR³ExpressionStatementÍxÍ‹`®CallExpressionÍxÍŠT°MemberExpressionÍxÍˆU®ThisExpressionÍxÍ|NªIdentifierÍ}Íˆ«refreshWifiÂÂÂR³ExpressionStatementÍ•ÍîS´AssignmentExpressionÍ•Íí¡=T°MemberExpressionÍ•Í£U®ThisExpressionÍ•Í™NªIdentifierÍšÍ£©wifiTimerÂÂ`®CallExpressionÍ¦ÍíNªIdentifierÍ¦Í±«setInterval’Q·ArrowFunctionExpressionÍ²ÍåÀÂÂÂO®BlockStatementÍ¸Íå‘R³ExpressionStatementÍÇÍÚ`®CallExpressionÍÇÍÙT°MemberExpressionÍÇÍ×U®ThisExpressionÍÇÍËNªIdentifierÍÌÍ×«refreshWifiÂÂÂV§LiteralÍçÍìÍu0¥30000ÂR³ExpressionStatementÍøÍMS´AssignmentExpressionÍøÍL¡=T°MemberExpressionÍøÍU®ThisExpressionÍøÍüNªIdentifierÍıÍ«sampleTimerÂÂ`®CallExpressionÍÍLNªIdentifierÍÍ«setInterval’Q·ArrowFunctionExpressionÍÍEÀÂÂÂO®BlockStatementÍÍE‘R³ExpressionStatementÍ,Í:`®CallExpressionÍ,Í9T°MemberExpressionÍ,Í7U®ThisExpressionÍ,Í0NªIdentifierÍ1Í7¦sampleÂÂÂV§LiteralÍGÍKÍè¤1000ÂR³ExpressionStatementÍWÍïS´AssignmentExpressionÍWÍî¡=T°MemberExpressionÍWÍhU®ThisExpressionÍWÍ[NªIdentifierÍ\Íh¬elapsedTimerÂÂ`®CallExpressionÍkÍîNªIdentifierÍkÍv«setInterval’Q·ArrowFunctionExpressionÍwÍçÀÂÂÂO®BlockStatementÍ}Íç‘R³ExpressionStatementÍŒÍÜ`®CallExpressionÍŒÍÛT°MemberExpressionÍŒÍ¢NªIdentifierÍŒÍ–ªAppStorageNªIdentifierÍ—Í¢«setOrCreateÂÂ’V§LiteralÍ£Í¯ªrm_elapsed¬'rm_elapsed'`®CallExpressionÍ±ÍÚT°MemberExpressionÍ±Í»NªIdentifierÍ±Íµ¤MathNªIdentifierÍ¶Í»¥floorÂÂ‘Ôrc–¤type¥start£end¤left¨operator¥right°BinaryExpressionÍ¼ÍÙc°BinaryExpressionÍ½ÍÑ`®CallExpressionÍ½ÍÇT°MemberExpressionÍ½ÍÅNªIdentifierÍ½ÍÁ¤DateNªIdentifierÍÂÍÅ£nowÂÂÂ¡-T°MemberExpressionÍÊÍÑU®ThisExpressionÍÊÍÎNªIdentifierÍÏÍÑ¢t0ÂÂ¡/V§LiteralÍÕÍÙÍè¤1000ÂÂV§LiteralÍéÍíÍè¤1000ÂR³ExpressionStatementÍùÍ`®CallExpressionÍùÍT°MemberExpressionÍùÍU®ThisExpressionÍùÍıNªIdentifierÍşÍ¯startBackgroundÂÂ‘NªIdentifierÍÍ¤nameÂP°MethodDefinitionÍ!Í
+ÂÂNªIdentifierÍ'Í+¤stop¦methodQ²FunctionExpressionÍ+Í
+ÀÂÂÃO®BlockStatementÍ.Í
+Ü Y«IfStatementÍ9ÍmW¯UnaryExpressionÍ=ÍJ¡!ÃT°MemberExpressionÍ>ÍJU®ThisExpressionÍ>ÍBNªIdentifierÍCÍJ§runningÂÂO®BlockStatementÍLÍm‘[¯ReturnStatementÍ[ÍbÀÀR³ExpressionStatementÍwÍŒS´AssignmentExpressionÍwÍ‹¡=T°MemberExpressionÍwÍƒU®ThisExpressionÍwÍ{NªIdentifierÍ|Íƒ§runningÂÂV§LiteralÍ†Í‹Â¥falseY«IfStatementÍ–Íc°BinaryExpressionÍšÍ¯T°MemberExpressionÍšÍªU®ThisExpressionÍšÍNªIdentifierÍŸÍª«sampleTimerÂÂ¢>=V§LiteralÍ®Í¯ ¡0O®BlockStatementÍ±Í’R³ExpressionStatementÍÀÍà`®CallExpressionÍÀÍßNªIdentifierÍÀÍÍ­clearInterval‘T°MemberExpressionÍÎÍŞU®ThisExpressionÍÎÍÒNªIdentifierÍÓÍŞ«sampleTimerÂÂÂR³ExpressionStatementÍîÍS´AssignmentExpressionÍîÍ¡=T°MemberExpressionÍîÍşU®ThisExpressionÍîÍòNªIdentifierÍóÍş«sampleTimerÂÂW¯UnaryExpressionÍÍ¡-ÃV§LiteralÍÍ¡1ÀY«IfStatementÍÍ•c°BinaryExpressionÍÍ3T°MemberExpressionÍÍ.U®ThisExpressionÍÍ!NªIdentifierÍ"Í.¬elapsedTimerÂÂ¢>=V§LiteralÍ2Í3 ¡0O®BlockStatementÍ5Í•’R³ExpressionStatementÍDÍe`®CallExpressionÍDÍdNªIdentifierÍDÍQ­clearInterval‘T°MemberExpressionÍRÍcU®ThisExpressionÍRÍVNªIdentifierÍWÍc¬elapsedTimerÂÂÂR³ExpressionStatementÍsÍŠS´AssignmentExpressionÍsÍ‰¡=T°MemberExpressionÍsÍ„U®ThisExpressionÍsÍwNªIdentifierÍxÍ„¬elapsedTimerÂÂW¯UnaryExpressionÍ‡Í‰¡-ÃV§LiteralÍˆÍ‰¡1ÀY«IfStatementÍŸÍc°BinaryExpressionÍ£Í¶T°MemberExpressionÍ£Í±U®ThisExpressionÍ£Í§NªIdentifierÍ¨Í±©wifiTimerÂÂ¢>=V§LiteralÍµÍ¶ ¡0O®BlockStatementÍ¸Í’R³ExpressionStatementÍÇÍå`®CallExpressionÍÇÍäNªIdentifierÍÇÍÔ­clearInterval‘T°MemberExpressionÍÕÍãU®ThisExpressionÍÕÍÙNªIdentifierÍÚÍã©wifiTimerÂÂÂR³ExpressionStatementÍóÍS´AssignmentExpressionÍóÍ¡=T°MemberExpressionÍóÍU®ThisExpressionÍóÍ÷NªIdentifierÍøÍ©wifiTimerÂÂW¯UnaryExpressionÍÍ¡-ÃV§LiteralÍÍ¡1Àa¬TryStatementÍÍ‘O®BlockStatementÍ Íq‘R³ExpressionStatementÍ/Íf`®CallExpressionÍ/ÍeT°MemberExpressionÍ/Í9NªIdentifierÍ/Í5¦sensorNªIdentifierÍ6Í9£offÂÂ’T°MemberExpressionÍ:ÍST°MemberExpressionÍ:ÍINªIdentifierÍ:Í@¦sensorNªIdentifierÍAÍI¨SensorIdÂÂNªIdentifierÍJÍS©BAROMETERÂÂT°MemberExpressionÍUÍdU®ThisExpressionÍUÍYNªIdentifierÍZÍdªpressureCbÂÂÂb«CatchClauseÍ{Í‘NªIdentifierÍ‚Íƒ¡eO®BlockStatementÍ…Í‘Àa¬TryStatementÍ›ÍO®BlockStatementÍŸÍğ‘R³ExpressionStatementÍ®Íå`®CallExpressionÍ®ÍäT°MemberExpressionÍ®Í¸NªIdentifierÍ®Í´¦sensorNªIdentifierÍµÍ¸£offÂÂ’T°MemberExpressionÍ¹Í×T°MemberExpressionÍ¹ÍÈNªIdentifierÍ¹Í¿¦sensorNªIdentifierÍÀÍÈ¨SensorIdÂÂNªIdentifierÍÉÍ×®MAGNETIC_FIELDÂÂT°MemberExpressionÍÙÍãU®ThisExpressionÍÙÍİNªIdentifierÍŞÍã¥magCbÂÂÂb«CatchClauseÍúÍNªIdentifierÍÍ¡eO®BlockStatementÍÍÀa¬TryStatementÍÍO®BlockStatementÍÍp‘R³ExpressionStatementÍ-Íe`®CallExpressionÍ-ÍdT°MemberExpressionÍ-Í7NªIdentifierÍ-Í3¦sensorNªIdentifierÍ4Í7£offÂÂ’T°MemberExpressionÍ8ÍUT°MemberExpressionÍ8ÍGNªIdentifierÍ8Í>¦sensorNªIdentifierÍ?ÍG¨SensorIdÂÂNªIdentifierÍHÍU­ACCELEROMETERÂÂT°MemberExpressionÍWÍcU®ThisExpressionÍWÍ[NªIdentifierÍ\Íc§accelCbÂÂÂb«CatchClauseÍzÍNªIdentifierÍÍ‚¡eO®BlockStatementÍ„ÍÀa¬TryStatementÍšÍO®BlockStatementÍÍí‘R³ExpressionStatementÍ­Íâ`®CallExpressionÍ­ÍáT°MemberExpressionÍ­ÍÃNªIdentifierÍ­Í¿²geoLocationManagerNªIdentifierÍÀÍÃ£offÂÂ’V§LiteralÍÄÍÔ®locationChange°'locationChange'T°MemberExpressionÍÖÍàU®ThisExpressionÍÖÍÚNªIdentifierÍÛÍà¥locCbÂÂÂb«CatchClauseÍ÷ÍNªIdentifierÍşÍÿ¡eO®BlockStatementÍÍÀ\³VariableDeclarationÍÍ1‘]²VariableDeclaratorÍÍ0NªIdentifierÍÍ"¥batchT°MemberExpressionÍ%Í0U®ThisExpressionÍ%Í)NªIdentifierÍ*Í0¦bufferÂÂ¥constR³ExpressionStatementÍ;ÍLS´AssignmentExpressionÍ;ÍK¡=T°MemberExpressionÍ;ÍFU®ThisExpressionÍ;Í?NªIdentifierÍ@ÍF¦bufferÂÂX¯ArrayExpressionÍIÍKa¬TryStatementÍVÍ´O®BlockStatementÍZÍ”‘R³ExpressionStatementÍiÍ‰[¯AwaitExpressionÍiÍˆ`®CallExpressionÍoÍˆT°MemberExpressionÍoÍNªIdentifierÍoÍt¥StoreNªIdentifierÍuÍ¬insertPointsÂÂ‘NªIdentifierÍ‚Í‡¥batchÂb«CatchClauseÍÍ´NªIdentifierÍ¥Í¦¡eO®BlockStatementÍ¨Í´Àa¬TryStatementÍ¾Í?O®BlockStatementÍÂÍ‘R³ExpressionStatementÍÑÍ[¯AwaitExpressionÍÑÍ`®CallExpressionÍ×ÍT°MemberExpressionÍ×ÍèNªIdentifierÍ×ÍÜ¥StoreNªIdentifierÍİÍè«finishTrackÂÂ“T°MemberExpressionÍéÍõU®ThisExpressionÍéÍíNªIdentifierÍîÍõ§trackIdÂÂ`®CallExpressionÍ÷ÍT°MemberExpressionÍ÷ÍÿNªIdentifierÍ÷Íû¤DateNªIdentifierÍüÍÿ£nowÂÂÂT°MemberExpressionÍÍU®ThisExpressionÍÍNªIdentifierÍÍªpointCountÂÂÂb«CatchClauseÍ)Í?NªIdentifierÍ0Í1¡eO®BlockStatementÍ3Í?ÀR³ExpressionStatementÍIÍw`®CallExpressionÍIÍvT°MemberExpressionÍIÍ_NªIdentifierÍIÍSªAppStorageNªIdentifierÍTÍ_«setOrCreateÂÂ’V§LiteralÍ`Ín¬rm_recording®'rm_recording'V§LiteralÍpÍuÂ¥falseÂR³ExpressionStatementÍÍ±`®CallExpressionÍÍ°T°MemberExpressionÍÍ—NªIdentifierÍÍ‹ªAppStorageNªIdentifierÍŒÍ—«setOrCreateÂÂ’V§LiteralÍ˜Í«±rm_rec_track_name³'rm_rec_track_name'V§LiteralÍ­Í¯ ¢''ÂR³ExpressionStatementÍ»Íã`®CallExpressionÍ»ÍâT°MemberExpressionÍ»ÍÑNªIdentifierÍ»ÍÅªAppStorageNªIdentifierÍÆÍÑ«setOrCreateÂÂ’V§LiteralÍÒÍŞªrm_elapsed¬'rm_elapsed'V§LiteralÍàÍá ¡0ÂR³ExpressionStatementÍíÍ`®CallExpressionÍíÍT°MemberExpressionÍíÍ U®ThisExpressionÍíÍñNªIdentifierÍòÍ ®stopBackgroundÂÂÂP°MethodDefinitionÍÍiÂÂNªIdentifierÍÍ¦sample¦methodQ²FunctionExpressionÍÍiÀÂÂÂO®BlockStatementÍÍi™\³VariableDeclarationÍ$Í=‘]²VariableDeclaratorÍ*Í<NªIdentifierÍ*Í-£locT°MemberExpressionÍ0Í<U®ThisExpressionÍ0Í4NªIdentifierÍ5Í<§lastLocÂÂ¥const\³VariableDeclarationÍsÍ‘]²VariableDeclaratorÍwÍNªIdentifierÍwÍªheadingDegNªIdentifierÍ„Í©undefined£letY«IfStatementÍ˜Íc±LogicalExpressionÍœÍ¸T°MemberExpressionÍœÍ©U®ThisExpressionÍœÍ NªIdentifierÍ¡Í©¨hasAccelÂÂ¢&&T°MemberExpressionÍ­Í¸U®ThisExpressionÍ­Í±NªIdentifierÍ²Í¸¦hasMagÂÂO®BlockStatementÍºÍ‘R³ExpressionStatementÍÉÍS´AssignmentExpressionÍÉÍ ¡=NªIdentifierÍÉÍÓªheadingDeg`®CallExpressionÍÖÍ NªIdentifierÍÖÍâ¬fusedAzimuth’T°MemberExpressionÍãÍñU®ThisExpressionÍãÍçNªIdentifierÍèÍñ©lastAccelÂÂT°MemberExpressionÍóÍÿU®ThisExpressionÍóÍ÷NªIdentifierÍøÍÿ§lastMagÂÂÂÀY«IfStatementÍÍc±LogicalExpressionÍÍXc±LogicalExpressionÍÍ9c°BinaryExpressionÍÍ2NªIdentifierÍÍ$ªheadingDeg£===NªIdentifierÍ)Í2©undefined¢&&NªIdentifierÍ6Í9£loc¢&&c°BinaryExpressionÍ=ÍXT°MemberExpressionÍ=ÍJNªIdentifierÍ=Í@£locNªIdentifierÍAÍJ©directionÂÂ£!==NªIdentifierÍOÍX©undefinedO®BlockStatementÍZÍ‘R³ExpressionStatementÍiÍ„S´AssignmentExpressionÍiÍƒ¡=NªIdentifierÍiÍsªheadingDegT°MemberExpressionÍvÍƒNªIdentifierÍvÍy£locNªIdentifierÍzÍƒ©directionÂÂÀR³ExpressionStatementÍ™Í·S´AssignmentExpressionÍ™Í¶¡=T°MemberExpressionÍ™Í©U®ThisExpressionÍ™ÍNªIdentifierÍÍ©«lastHeadingÂÂNªIdentifierÍ¬Í¶ªheadingDeg\³VariableDeclarationÍÁÍg‘]²VariableDeclaratorÍÇÍfNªIdentifierÍÇÍÉ¢pt^°ObjectExpressionÍÌÍf_¨PropertyÍÛÍğÂÂÂNªIdentifierÍÛÍâ§trackIdT°MemberExpressionÍäÍğU®ThisExpressionÍäÍèNªIdentifierÍéÍğ§trackIdÂÂ¤init_¨PropertyÍÿÍÂÂÂNªIdentifierÍÿÍ¦timeMs`®CallExpressionÍÍT°MemberExpressionÍÍNªIdentifierÍÍ¤DateNªIdentifierÍÍ£nowÂÂÂ¤init_¨PropertyÍ ÍHÂÂÂNªIdentifierÍ Í(¨latitudeYµConditionalExpressionÍ*ÍHNªIdentifierÍ*Í-£locT°MemberExpressionÍ0Í<NªIdentifierÍ0Í3£locNªIdentifierÍ4Í<¨latitudeÂÂNªIdentifierÍ?ÍH©undefined¤init_¨PropertyÍWÍÂÂÂNªIdentifierÍWÍ`©longitudeYµConditionalExpressionÍbÍNªIdentifierÍbÍe£locT°MemberExpressionÍhÍuNªIdentifierÍhÍk£locNªIdentifierÍlÍu©longitudeÂÂNªIdentifierÍxÍ©undefined¤init_¨PropertyÍÍ¸ÂÂÂNªIdentifierÍÍ˜¨altitudeYµConditionalExpressionÍšÍ¸NªIdentifierÍšÍ£locT°MemberExpressionÍ Í¬NªIdentifierÍ Í££locNªIdentifierÍ¤Í¬¨altitudeÂÂNªIdentifierÍ¯Í¸©undefined¤init_¨PropertyÍÇÍïÂÂÂNªIdentifierÍÇÍÏ¨accuracyYµConditionalExpressionÍÑÍïNªIdentifierÍÑÍÔ£locT°MemberExpressionÍ×ÍãNªIdentifierÍ×ÍÚ£locNªIdentifierÍÛÍã¨accuracyÂÂNªIdentifierÍæÍï©undefined¤init_¨PropertyÍşÍÂÂÂNªIdentifierÍşÍ	«pressureHpaT°MemberExpressionÍÍU®ThisExpressionÍÍNªIdentifierÍÍ¬lastPressureÂÂ¤init_¨PropertyÍ+Í_ÂÂÂNªIdentifierÍ+Í4©magneticXYµConditionalExpressionÍ6Í_T°MemberExpressionÍ6ÍAU®ThisExpressionÍ6Í:NªIdentifierÍ;ÍA¦hasMagÂÂT°MemberExpressionÍDÍST°MemberExpressionÍDÍPU®ThisExpressionÍDÍHNªIdentifierÍIÍP§lastMagÂÂV§LiteralÍQÍR ¡0ÃÂNªIdentifierÍVÍ_©undefined¤init_¨PropertyÍnÍ¢ÂÂÂNªIdentifierÍnÍw©magneticYYµConditionalExpressionÍyÍ¢T°MemberExpressionÍyÍ„U®ThisExpressionÍyÍ}NªIdentifierÍ~Í„¦hasMagÂÂT°MemberExpressionÍ‡Í–T°MemberExpressionÍ‡Í“U®ThisExpressionÍ‡Í‹NªIdentifierÍŒÍ“§lastMagÂÂV§LiteralÍ”Í•¡1ÃÂNªIdentifierÍ™Í¢©undefined¤init_¨PropertyÍ±ÍåÂÂÂNªIdentifierÍ±Íº©magneticZYµConditionalExpressionÍ¼ÍåT°MemberExpressionÍ¼ÍÇU®ThisExpressionÍ¼ÍÀNªIdentifierÍÁÍÇ¦hasMagÂÂT°MemberExpressionÍÊÍÙT°MemberExpressionÍÊÍÖU®ThisExpressionÍÊÍÎNªIdentifierÍÏÍÖ§lastMagÂÂV§LiteralÍ×ÍØ¡2ÃÂNªIdentifierÍÜÍå©undefined¤init_¨PropertyÍôÍ
+ÂÂÂNªIdentifierÍôÍşªheadingDegNªIdentifierÍ Í
+ªheadingDeg¤init_¨PropertyÍÍ6ÂÂÂNªIdentifierÍÍ"©wifiCountT°MemberExpressionÍ$Í6U®ThisExpressionÍ$Í(NªIdentifierÍ)Í6­lastWifiCountÂÂ¤init_¨PropertyÍEÍ[ÂÂÂNªIdentifierÍEÍL§wifiTopT°MemberExpressionÍNÍ[U®ThisExpressionÍNÍRNªIdentifierÍSÍ[¨lastWifiÂÂ¤init¥constR³ExpressionStatementÍqÍ†`®CallExpressionÍqÍ…T°MemberExpressionÍqÍT°MemberExpressionÍqÍ|U®ThisExpressionÍqÍuNªIdentifierÍvÍ|¦bufferÂÂNªIdentifierÍ}Í¤pushÂÂ‘NªIdentifierÍ‚Í„¢ptÂR³ExpressionStatementÍÍ¢W°UpdateExpressionÍÍ¡¢++ÂT°MemberExpressionÍÍŸU®ThisExpressionÍÍ”NªIdentifierÍ•ÍŸªpointCountÂÂY«IfStatementÍ¬Íbc°BinaryExpressionÍ°ÍÇT°MemberExpressionÍ°ÍÂT°MemberExpressionÍ°Í»U®ThisExpressionÍ°Í´NªIdentifierÍµÍ»¦bufferÂÂNªIdentifierÍ¼ÍÂ¦lengthÂÂ¢>=V§LiteralÍÆÍÇ¡5O®BlockStatementÍÉÍb“\³VariableDeclarationÍØÍò‘]²VariableDeclaratorÍŞÍñNªIdentifierÍŞÍã¥batchT°MemberExpressionÍæÍñU®ThisExpressionÍæÍêNªIdentifierÍëÍñ¦bufferÂÂ¥constR³ExpressionStatementÍ ÍS´AssignmentExpressionÍ Í¡=T°MemberExpressionÍ ÍU®ThisExpressionÍ ÍNªIdentifierÍÍ¦bufferÂÂX¯ArrayExpressionÍÍR³ExpressionStatementÍÍW`®CallExpressionÍÍVT°MemberExpressionÍÍ>`®CallExpressionÍÍ8T°MemberExpressionÍÍ1NªIdentifierÍÍ$¥StoreNªIdentifierÍ%Í1¬insertPointsÂÂ‘NªIdentifierÍ2Í7¥batchÂNªIdentifierÍ9Í>¥catchÂÂ‘Q·ArrowFunctionExpressionÍ?ÍUÀÂÂÂO®BlockStatementÍEÍUÂÀP°MethodDefinitionÍoÍŸÂÂNªIdentifierÍoÍz«refreshWifi¦methodQ²FunctionExpressionÍzÍŸÀÂÂÂO®BlockStatementÍ}ÍŸ’a¬TryStatementÍˆÍÙO®BlockStatementÍŒÍ¹‘R³ExpressionStatementÍ›Í®`®CallExpressionÍ›Í­T°MemberExpressionÍ›Í«NªIdentifierÍ›Í¦«wifiManagerNªIdentifierÍ§Í«¤scanÂÂÂb«CatchClauseÍÃÍÙNªIdentifierÍÊÍË¡eO®BlockStatementÍÍÍÙÀR³ExpressionStatementÍãÍ˜`®CallExpressionÍãÍ—NªIdentifierÍãÍíªsetTimeout’Q·ArrowFunctionExpressionÍîÍÀÂÂÂO®BlockStatementÍôÍ‘a¬TryStatementÍÍ…O®BlockStatementÍÍ]”\³VariableDeclarationÍÍE‘]²VariableDeclaratorÍ ÍDNªIdentifierÍ Í$¤list`®CallExpressionÍ'ÍDT°MemberExpressionÍ'ÍBNªIdentifierÍ'Í2«wifiManagerNªIdentifierÍ3ÍB¯getScanInfoListÂÂÂ¥const\³VariableDeclarationÍWÍÈ‘]²VariableDeclaratorÍ]ÍÇNªIdentifierÍ]Í`£top`®CallExpressionÍcÍÇT°MemberExpressionÍcÍÁ`®CallExpressionÍcÍ¥T°MemberExpressionÍcÍŠ`®CallExpressionÍcÍoT°MemberExpressionÍcÍmNªIdentifierÍcÍg¤listNªIdentifierÍhÍm¥sliceÂÂÂNªIdentifierÍ†ÍŠ¤sortÂÂ‘Q·ArrowFunctionExpressionÍ‹Í¤ÀÃÂÂ’NªIdentifierÍŒÍ¡aNªIdentifierÍÍ¡bc°BinaryExpressionÍ•Í¤T°MemberExpressionÍ•Í›NªIdentifierÍ•Í–¡bNªIdentifierÍ—Í›¤rssiÂÂ¡-T°MemberExpressionÍÍ¤NªIdentifierÍÍŸ¡aNªIdentifierÍ Í¤¤rssiÂÂÂNªIdentifierÍ¼ÍÁ¥sliceÂÂ’V§LiteralÍÂÍÃ ¡0V§LiteralÍÅÍÆ¡5Â¥constR³ExpressionStatementÍÚÍS´AssignmentExpressionÍÚÍ¡=T°MemberExpressionÍÚÍçU®ThisExpressionÍÚÍŞNªIdentifierÍßÍç¨lastWifiÂÂ`®CallExpressionÍêÍT°MemberExpressionÍêÍ`®CallExpressionÍêÍT°MemberExpressionÍêÍñNªIdentifierÍêÍí£topNªIdentifierÍîÍñ£mapÂÂ‘Q·ArrowFunctionExpressionÍòÍÀÃÂÂ‘NªIdentifierÍóÍô¡iÔrd•¤type¥start£end«expressions¦quasis¯TemplateLiteralÍùÍ’T°MemberExpressionÍüÍNªIdentifierÍüÍı¡iNªIdentifierÍşÍ¥bssidÂÂT°MemberExpressionÍÍNªIdentifierÍÍ¡iNªIdentifierÍ	Í¤rssiÂÂ“Ôre•¤type¥start£end¥value¤tail¯TemplateElementÍúÍúÔrf’£raw¦cooked  Âe¯TemplateElementÍÍf¡:¡:Âe¯TemplateElementÍÍf  ÃÂNªIdentifierÍÍ¤joinÂÂ‘V§LiteralÍÍ¡;£';'ÂR³ExpressionStatementÍ-ÍNS´AssignmentExpressionÍ-ÍM¡=T°MemberExpressionÍ-Í?U®ThisExpressionÍ-Í1NªIdentifierÍ2Í?­lastWifiCountÂÂT°MemberExpressionÍBÍMNªIdentifierÍBÍF¤listNªIdentifierÍGÍM¦lengthÂÂb«CatchClauseÍkÍ…NªIdentifierÍrÍs¡eO®BlockStatementÍuÍ…ÀV§LiteralÍ’Í–ÍÜ¤1500ÂP°MethodDefinitionÍ¥Í!ÂÂNªIdentifierÍ«Íº¯startBackground¦methodQ²FunctionExpressionÍºÍ!ÀÂÂÃ‘NªIdentifierÍ»Í¿¤nameO®BlockStatementÍÁÍ!’a¬TryStatementÍÌÍƒO®BlockStatementÍĞÍc•\³VariableDeclarationÍßÍö‘]²VariableDeclaratorÍåÍõNªIdentifierÍåÍì§contextT°MemberExpressionÍïÍõNªIdentifierÍïÍò£CtxNªIdentifierÍóÍõ¢uiÂÂ¥constY«IfStatementÍÍ;W¯UnaryExpressionÍÍ¡!ÃNªIdentifierÍ	Í§contextO®BlockStatementÍÍ;‘[¯ReturnStatementÍ%Í,ÀÀ\³VariableDeclarationÍIÍ}‘]²VariableDeclaratorÍOÍ|NªIdentifierÍOÍS¤info^°ObjectExpressionÍVÍ|”_¨PropertyÍiÍ·ÂÂÂNªIdentifierÍiÍn¥wantsX¯ArrayExpressionÍpÍ·‘^°ObjectExpressionÍqÍ¶’_¨PropertyÍsÍ—ÂÂÂNªIdentifierÍsÍ}ªbundleNameV§LiteralÍÍ—¶com.example.roommarker¸'com.example.roommarker'¤init_¨PropertyÍ™Í´ÂÂÂNªIdentifierÍ™Í¤«abilityNameV§LiteralÍ¦Í´¬EntryAbility®'EntryAbility'¤init¤init_¨PropertyÍÊÍûÂÂÂNªIdentifierÍÊÍÔªactionTypeT°MemberExpressionÍÖÍûT°MemberExpressionÍÖÍíNªIdentifierÍÖÍß©wantAgentNªIdentifierÍàÍí­OperationTypeÂÂNªIdentifierÍîÍû­START_ABILITYÂÂ¤init_¨PropertyÍÍÂÂÂNªIdentifierÍÍ«requestCodeV§LiteralÍÍ ¡0¤init_¨PropertyÍ/ÍmÂÂÂNªIdentifierÍ/Í=®wantAgentFlagsX¯ArrayExpressionÍ?Ím‘T°MemberExpressionÍ@ÍlT°MemberExpressionÍ@ÍXNªIdentifierÍ@ÍI©wantAgentNªIdentifierÍJÍX®WantAgentFlagsÂÂNªIdentifierÍYÍl³UPDATE_PRESENT_FLAGÂÂ¤init¥const\³VariableDeclarationÍ‹Í¼‘]²VariableDeclaratorÍ‘Í»NªIdentifierÍ‘Í–¥agent[¯AwaitExpressionÍ™Í»`®CallExpressionÍŸÍ»T°MemberExpressionÍŸÍµNªIdentifierÍŸÍ¨©wantAgentNªIdentifierÍ©Íµ¬getWantAgentÂÂ‘NªIdentifierÍ¶Íº¤infoÂ¥constR³ExpressionStatementÍÍX[¯AwaitExpressionÍÍW`®CallExpressionÍÍWT°MemberExpressionÍÍ9NªIdentifierÍÍ"µbackgroundTaskManagerNªIdentifierÍ#Í9¶startBackgroundRunningÂÂ“NªIdentifierÍ:ÍA§contextX¯ArrayExpressionÍCÍO‘V§LiteralÍDÍN¨locationª'location'NªIdentifierÍQÍV¥agentÂb«CatchClauseÍmÍƒNªIdentifierÍtÍu¡eO®BlockStatementÍwÍƒÀa¬TryStatementÍÍ!O®BlockStatementÍ‘Í è‘R³ExpressionStatementÍ Í İ[¯AwaitExpressionÍ Í Ü`®CallExpressionÍ¦Í ÜT°MemberExpressionÍ¦ÍÁNªIdentifierÍ¦Í¹³notificationManagerNªIdentifierÍºÍÁ§publishÂÂ‘^°ObjectExpressionÍÂÍ Û’_¨PropertyÍÕÍáÂÂÂNªIdentifierÍÕÍ×¢idNªIdentifierÍÙÍá¨NOTIF_ID¤init_¨PropertyÍôÍ ÌÂÂÂNªIdentifierÍôÍû§content^°ObjectExpressionÍıÍ Ì’_¨PropertyÍ Í lÂÂÂNªIdentifierÍ Í +·notificationContentTypeT°MemberExpressionÍ -Í lT°MemberExpressionÍ -Í LNªIdentifierÍ -Í @³notificationManagerNªIdentifierÍ AÍ L«ContentTypeÂÂNªIdentifierÍ MÍ l¿NOTIFICATION_CONTENT_BASIC_TEXTÂÂ¤init_¨PropertyÍ ƒÍ ¹ÂÂÂNªIdentifierÍ ƒÍ ‰¦normal^°ObjectExpressionÍ ‹Í ¹’_¨PropertyÍ Í œÂÂÂNªIdentifierÍ Í ’¥titleV§LiteralÍ ”Í œ²æ­£åœ¨è®°å½•è½¨è¿¹´'æ­£åœ¨è®°å½•è½¨è¿¹'¤init_¨PropertyÍ Í ·ÂÂÂNªIdentifierÍ Í ¢¤textd¯TemplateLiteralÍ ¤Í ·‘NªIdentifierÍ ¨Í ¬¤name’e¯TemplateElementÍ ¥Í ¦f£ã€Œ£ã€ŒÂe¯TemplateElementÍ ­Í ¶f¸ã€Â· ç‚¹å‡»è¿”å›åº”ç”¨¸ã€Â· ç‚¹å‡»è¿”å›åº”ç”¨Ã¤init¤init¤initÂb«CatchClauseÍ òÍ!NªIdentifierÍ ùÍ ú¡eO®BlockStatementÍ üÍ!ÀP°MethodDefinitionÍ!Í"EÂÂNªIdentifierÍ!Í!#®stopBackground¦methodQ²FunctionExpressionÍ!#Í"EÀÂÂÂO®BlockStatementÍ!&Í"E’a¬TryStatementÍ!1Í!”O®BlockStatementÍ!5Í!t‘R³ExpressionStatementÍ!DÍ!i`®CallExpressionÍ!DÍ!hT°MemberExpressionÍ!DÍ!^NªIdentifierÍ!DÍ!W³notificationManagerNªIdentifierÍ!XÍ!^¦cancelÂÂ‘NªIdentifierÍ!_Í!g¨NOTIF_IDÂb«CatchClauseÍ!~Í!”NªIdentifierÍ!…Í!†¡eO®BlockStatementÍ!ˆÍ!”Àa¬TryStatementÍ!Í">O®BlockStatementÍ!¢Í"‘Y«IfStatementÍ!±Í"T°MemberExpressionÍ!µÍ!»NªIdentifierÍ!µÍ!¸£CtxNªIdentifierÍ!¹Í!»¢uiÂÂO®BlockStatementÍ!½Í"‘R³ExpressionStatementÍ!ĞÍ"`®CallExpressionÍ!ĞÍ"T°MemberExpressionÍ!ĞÍ!ûNªIdentifierÍ!ĞÍ!åµbackgroundTaskManagerNªIdentifierÍ!æÍ!ûµstopBackgroundRunningÂÂ‘T°MemberExpressionÍ!üÍ"NªIdentifierÍ!üÍ!ÿ£CtxNªIdentifierÍ" Í"¢uiÂÂÂÀb«CatchClauseÍ"(Í">NªIdentifierÍ"/Í"0¡eO®BlockStatementÍ"2Í">ÀÀ˜Ôrg•¤type¥start£endªspecifiers¦source±ImportDeclaration "‘Ôrh”¤type¥start£end¥local¶ImportDefaultSpecifierNªIdentifier¦sensorV§Literal!¬@ohos.sensor®"@ohos.sensor"g±ImportDeclaration$Ì^‘h¶ImportDefaultSpecifier+=NªIdentifier+=²geoLocationManagerV§LiteralÌCÌ]¸@ohos.geoLocationManagerº"@ohos.geoLocationManager"g±ImportDeclarationÌ`ÌŒ‘h¶ImportDefaultSpecifierÌgÌrNªIdentifierÌgÌr«wifiManagerV§LiteralÌxÌ‹±@ohos.wifiManager³"@ohos.wifiManager"g±ImportDeclarationÌÌÊ‘h¶ImportDefaultSpecifierÌ•Ì¨NªIdentifierÌ•Ì¨³notificationManagerV§LiteralÌ®ÌÉ¹@ohos.notificationManager»"@ohos.notificationManager"g±ImportDeclarationÌÌÍ‘h¶ImportDefaultSpecifierÌÓÌèNªIdentifierÌÓÌèµbackgroundTaskManagerV§LiteralÌîÍÙ,@ohos.resourceschedule.backgroundTaskManagerÙ."@ohos.resourceschedule.backgroundTaskManager"g±ImportDeclarationÍÍS‘h¶ImportDefaultSpecifierÍ&Í/NªIdentifierÍ&Í/©wantAgentV§LiteralÍ5ÍR»@ohos.app.ability.wantAgent½"@ohos.app.ability.wantAgent"g±ImportDeclarationÍUÍ{‘Ôri•¤type¥start£end¨imported¥local¯ImportSpecifierÍ^ÍcNªIdentifierÍ^Íc¥StoreNªIdentifierÍ^Íc¥StoreV§LiteralÍkÍz­../data/Store¯'../data/Store'g±ImportDeclarationÍ}Í±’i¯ImportSpecifierÍ†Í‰NªIdentifierÍ†Í‰£CtxNªIdentifierÍ†Í‰£Ctxi¯ImportSpecifierÍ‹Í—NªIdentifierÍ‹Í—¬fusedAzimuthNªIdentifierÍ‹Í—¬fusedAzimuthV§LiteralÍŸÍ°¯../common/Utils±'../common/Utils'
