@@ -7,14 +7,30 @@ import { wantAgent } from '@kit.AbilityKit';
 import { Store } from '../data/Store';
 import { TrackPointDraft } from '../data/Entities';
 import { Ctx, fusedAzimuth } from '../common/Utils';
+import { wifiSummary } from '../common/WifiSummary';
 
 const NOTIF_ID = 1001;
+
+/**
+ * 每个采样点保留多少个 AP（按 RSSI 降序、bssid 升序确定取前 N 个）。
+ *
+ * 2026-09-30 由 5 改成 40：原因是实测发现「最强 5 个」在同一地点相隔 30 秒的两次扫描之间
+ * 重合 0 个（现场 150~200 个 AP、RSSI 大量并列），指纹完全不可复现。理由详见 refreshWifi()。
+ * 想调可以只改这一个数；调小了会退回「随机抽几个」的老毛病。
+ */
+const WIFI_KEEP = 40;
 
 /** 记录中的当前传感器快照（供拍照/标签关联） */
 export interface RecSnapshot {
   latitude?: number;
   longitude?: number;
   altitude?: number;
+  /**
+   * 这次定位的精度（米）—— 2026-09-29 新增（第二十五轮）。室内拿到的常常是误差一两百米的
+   * 网络定位，节点必须把这个精度一并存下来，否则它会和实测坐标长得一样地摆在图上：
+   * 而节点正是航位推算要当锚点用的东西，锚点不干净后面就全错。
+   */
+  accuracy?: number;
   headingDeg?: number;
   pressureHpa?: number;
 }
@@ -88,6 +104,7 @@ export class TrackRecorder {
       latitude: loc ? loc.latitude : undefined,
       longitude: loc ? loc.longitude : undefined,
       altitude: loc ? loc.altitude : undefined,
+      accuracy: loc ? loc.accuracy : undefined,
       headingDeg: this.lastHeading,
       pressureHpa: this.lastPressure
     };
@@ -238,10 +255,17 @@ export class TrackRecorder {
     setTimeout(() => {
       try {
         const list = wifiManager.getScanInfoList();
-        const top = list.slice()
-          .sort((a: wifiManager.WifiScanInfo, b: wifiManager.WifiScanInfo) => b.rssi - a.rssi)
-          .slice(0, 5);
-        this.lastWifi = top.map((i: wifiManager.WifiScanInfo) => `${i.bssid}:${i.rssi}`).join(';');
+        // 2026-09-30（第二十九轮）：从「取最强的 5 个」改成「取 40 个」。
+        // 实测证据（独树阳光里两条同路线轨迹）：**同一个地方、相隔 30 秒的两次扫描，
+        // 最强的 5 个 AP 重合 0 个** —— 现场可见 150~200 个 AP、RSSI 大量并列，
+        // 「前 5 名」等于随机抓 5 个，指纹因此完全不可复现。
+        // 取哪几个、怎么排序的规则抽到了 common/WifiSummary.ets（这样能离线单测）：
+        // **按 (rssi 降序, bssid 升序) 确定地取前 N 个**，bssid 兜底不能省。
+        // 代价：这条摘要从 ~100 字符涨到 ~900 字符（一条 400 点的轨迹约 350 KB），
+        // 换来的是「WiFi 指纹到底能不能用」这个问题的答案。
+        const bs: string[] = list.map((i: wifiManager.WifiScanInfo) => i.bssid);
+        const rs: number[] = list.map((i: wifiManager.WifiScanInfo) => i.rssi);
+        this.lastWifi = wifiSummary(bs, rs, WIFI_KEEP);
         this.lastWifiCount = list.length;
       } catch (e) {
       }

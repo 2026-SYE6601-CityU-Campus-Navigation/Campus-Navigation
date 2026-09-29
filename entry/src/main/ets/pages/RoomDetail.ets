@@ -132,7 +132,9 @@ export struct RoomDetailPage {
               this.onBack();
             }
           })
-          Text(this.room ? this.room.name : '房间')
+          Text(this.room
+            ? (this.room.code.length > 0 ? `${this.room.code} · ${this.room.name}` : this.room.name)
+            : '房间')
             .fontSize(Theme.F_TITLE)
             .fontWeight(FontWeight.Bold)
             .fontColor(Theme.INK)

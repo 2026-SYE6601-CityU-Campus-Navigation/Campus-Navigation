@@ -1,9 +1,10 @@
 import { promptAction } from '@kit.ArkUI';
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { MarkerType, NodeDraft, PhotoKind, TrackPhotoDraft } from '../data/Entities';
+import { NodeDraft, PhotoKind, TrackPhotoDraft, markerNameForNote, markerTypeForNote } from '../data/Entities';
 import { Store } from '../data/Store';
 import { TrackRecorder } from '../sensors/TrackRecorder';
 import { captureTrackPhoto, deletePhotoFile, PhotoCapture } from '../sensors/TrackMedia';
+import { FloorProbe } from '../common/FloorMatch';
 import { fmtDuration } from '../common/Utils';
 import { Theme } from '../common/Theme';
 import { ThickButton } from '../common/Widgets';
@@ -19,8 +20,9 @@ const TAG = 'RoomMarker';
  * 因此这里用 500ms 定时器把录制状态/名称/时长/采样点数同步进页面本地 @State，
  * 显隐判断写在心跳 ForEach 内部（key 变化会重建子树、重新求值条件）。
  *
- * 采集流程（2026-09-28 改）：
- *  - 记录节点：先选类型+备注+楼层（门/门禁还要选房间）→ 再调相机 → 拍成功才落库。
+ * 采集流程（2026-09-28 改，2026-09-29 补）：
+ *  - 记录节点：先选区域（默认沿用轨迹的区域，跨楼可切）+ 类型 + 备注 + 楼层
+ *    （门/门禁还可以**可选**绑一个房间）→ 再调相机 → 拍成功才落库。
  *  - 风景照：先写备注（可空）→ 调相机 → 只存照片，不参与节点体系。
  *  拍照之后不再弹任何对话框 —— 原来的实现是「拍完再弹备注框」，而每次都在回调里
  *  new CustomDialogController 覆盖旧实例，导致第二张起相机回来后就报「拍照未完成」。
@@ -98,6 +100,12 @@ export struct RecordingBanner {
         trackIdProvider: (): number => {
           return TrackRecorder.get().getTrackId();
         },
+        // 点开对话框这一刻的实测高度：楼层高度索引拿它去比「这栋楼已记过的楼层」
+        floorProbeProvider: (): FloorProbe => {
+          const s = TrackRecorder.get().getSnapshot();
+          const probe: FloorProbe = { pressureHpa: s.pressureHpa, altitude: s.altitude };
+          return probe;
+        },
         onSave: (draft: NodeDraft): void => {
           this.saveNode(draft);
         }
@@ -146,7 +154,8 @@ export struct RecordingBanner {
       let tagId = -1;
       let markerFail = '';
       Store.insertTrackTag(trackId, cap.timeMs, draft.tagType, draft.note, draft.floor,
-        snap.latitude, snap.longitude, snap.altitude, snap.headingDeg)
+        draft.areaId, snap.latitude, snap.longitude, snap.altitude, snap.headingDeg,
+        snap.pressureHpa, snap.accuracy)
         .then((id: number) => {
           tagId = id;
           const photo: TrackPhotoDraft = {
@@ -161,19 +170,29 @@ export struct RecordingBanner {
             altitude: snap.altitude,
             headingDeg: snap.headingDeg
           };
+          // 顺手把这栋楼「这一层 ≈ 这个高度」记进楼层高度索引：同一个节点填了楼层才算数。
+          // 失败不影响记录（索引只是为了下次少打字），所以单独 catch 掉。
+          if (draft.floor.length > 0 && draft.areaId > 0) {
+            const probe: FloorProbe = { pressureHpa: snap.pressureHpa, altitude: snap.altitude };
+            Store.learnFloorHeight(draft.areaId, draft.floor, probe).catch(() => {
+            });
+          }
           return Store.insertTrackPhoto(photo);
         })
         .then(() => {
           // 门 / 门禁：往所选房间写一条「前门 / 后门」标记（备注里带「后」算后门）。
           // 标记失败不回滚节点 —— 节点与照片本身是有效的，只是没绑上房间，如实告知即可。
+          // 用 syncTagMarker 而不是直接 insertMarker：它顺手把新标记的 id 记回节点，
+          // 用户之后改绑房间时才能精确地把这条旧标记删掉（而不是乱猜）。
           if (draft.roomId <= 0) {
             return Promise.resolve();
           }
-          const markerType: string = draft.note.indexOf('后') >= 0
-            ? MarkerType.BACK_DOOR : MarkerType.FRONT_DOOR;
-          const markerName: string = draft.note.length > 0 ? draft.note : draft.tagType;
-          return Store.insertMarker(draft.roomId, markerName, markerType,
-            snap.latitude, snap.longitude, snap.altitude, undefined, snap.pressureHpa)
+          const markerType: string = markerTypeForNote(draft.note);
+          const markerName: string = markerNameForNote(draft.note, draft.tagType);
+          return Store.syncTagMarker(tagId, 0, draft.roomId, markerName, markerType,
+            snap.latitude, snap.longitude, snap.altitude, snap.pressureHpa)
+            .then(() => {
+            })
             .catch((e: Error) => {
               markerFail = e.message;
             });
@@ -181,13 +200,15 @@ export struct RecordingBanner {
         .then(() => {
           this.clearError();
           const where = draft.floor.length > 0 ? `（${draft.floor}）` : '';
+          // 归属区域写进提示里：跨楼采集时一眼能确认这个节点记到了哪栋楼
+          const areaPart = draft.areaName.length > 0 ? ` · ${draft.areaName}` : '';
           if (draft.roomId <= 0) {
-            promptAction.showToast({ message: `已记录节点「${draft.tagType}」${where}` });
+            promptAction.showToast({ message: `已记录节点「${draft.tagType}」${where}${areaPart}` });
           } else if (markerFail.length > 0) {
             promptAction.showToast({ message: `节点已保存，但绑定房间失败：${markerFail}` });
           } else {
             promptAction.showToast({
-              message: `已记录节点「${draft.tagType}」${where} · 已绑到「${draft.roomName}」`
+              message: `已记录节点「${draft.tagType}」${where}${areaPart} · 已绑到「${draft.roomName}」`
             });
           }
         })

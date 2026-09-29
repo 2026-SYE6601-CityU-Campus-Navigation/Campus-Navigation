@@ -232,10 +232,80 @@ export function readAll(fd: number): Uint8Array {
   return exact;
 }
 
+/**
+ * 读一个**自己的沙箱文件**（大小可信）—— 一次分配、一次读取，不做倍增拷贝。
+ *
+ * ⚠️ 2026-09-30 新增。起因是一次真机 appfreeze 堆栈：
+ *   `BCStub_... → readAll(TrackMedia.ets:213) → readFileBytes → writeZip → stageForUpload`，
+ * 主线程 5.3 s 全烧在 readAll 上。readAll 为了「不赌文件大小」做了三层拷贝
+ * （倍增搬运 + 每块搬运 + 收尾再搬一次），一张 4 MB 照片就要搬 1500 万个元素，
+ * 而它在字节码解释器里跑（堆栈里的 BCStub/RTStub）—— 每张照片接近 1 秒。
+ *
+ * 本函数的前提是**大小来自 statSync 且文件是我们自己写的**：一次 `readSync` 读满即可。
+ * 万一大小报 0 或一次没读满（罕见），退回通用读法 readAll，**不赌**。
+ */
+export function readFileExact(absPath: string): Uint8Array {
+  let size = 0;
+  try {
+    size = fs.statSync(absPath).size;
+  } catch (e) {
+    size = 0;
+  }
+  const f = fs.openSync(absPath, fs.OpenMode.READ_ONLY);
+  try {
+    // 大小不可信（报 0）→ 退回通用读法
+    if (size <= 0) {
+      return readAll(f.fd);
+    }
+    // 先赌一次「一次读满」（常规文件在正常实现下就是这样）—— 命中则**零拷贝**
+    const first = new ArrayBuffer(size);
+    const n0 = fs.readSync(f.fd, first);
+    if (n0 <= 0) {
+      return new Uint8Array(0);
+    }
+    if (n0 === size) {
+      return new Uint8Array(first);
+    }
+    // 有的实现一次只肯读一部分：把已读到的搬进目标缓冲，再分块补齐。
+    // 文件位置已经往后走了，**不用重开**，直接从当前位置继续。
+    const out = new Uint8Array(size);
+    const v0 = new Uint8Array(first, 0, n0);
+    for (let i = 0; i < n0; i++) {
+      out[i] = v0[i];
+    }
+    let total = n0;
+    while (total < size) {
+      const buf = new ArrayBuffer(CHUNK);
+      const n = fs.readSync(f.fd, buf);
+      if (n <= 0) {
+        break;
+      }
+      const view = new Uint8Array(buf, 0, n);
+      const room = size - total;
+      const take = view.length < room ? view.length : room;
+      for (let i = 0; i < take; i++) {
+        out[total + i] = view[i];
+      }
+      total += take;
+    }
+    if (total === size) {
+      return out;
+    }
+    // 文件比 stat 报的短（极罕见）：按实际读到的长度裁一下，包里的长度与 CRC 都用这个值，
+    // 所以包本身仍然自洽
+    const exact = new Uint8Array(total);
+    for (let i = 0; i < total; i++) {
+      exact[i] = out[i];
+    }
+    return exact;
+  } finally {
+    fs.closeSync(f);
+  }
+}
+
 /** 删除已复制的照片文件（用户放弃保存时清理） */
 export function deletePhotoFile(absPath: string): void {
-  try {
-    fs.unlinkSync(absPath);
+  try {    fs.unlinkSync(absPath);
   } catch (e) {
   }
 }
