@@ -1,7 +1,23 @@
-# macOS
-.DS_Store
+# ---------- HarmonyOS / DevEco build output ----------
+/.hvigor/
+/build/
+/entry/build/
+/entry/.preview/
+/entry/.cxx/
+/oh_modules/
+/entry/oh_modules/
+*.har
+*.hsp
+*.hap
+*.tsbuildinfo
 
-# Xcode build output
+# ---------- HarmonyOS IDE and local configuration ----------
+/.idea/
+*.iml
+/local.properties
+/.vscode/
+
+# ---------- iOS / Xcode build output ----------
 DerivedData/
 build/
 *.xcarchive
@@ -10,24 +26,40 @@ build/
 *.dSYM.zip
 *.xcresult
 
-# Xcode per-user state
+# ---------- Xcode per-user state ----------
 xcuserdata/
 *.xcuserstate
 *.xccheckout
 *.xcscmblueprint
 *.moved-aside
 
-# Swift Package Manager generated state
+# ---------- Swift Package Manager ----------
 .build/
 .swiftpm/
 
-# Local configuration and credentials
+# ---------- iOS local configuration and credentials ----------
 *.xcconfig.local
 Secrets.xcconfig
 *.mobileprovision
 *.p12
 
-# Editors and temporary files
+# ---------- OS-generated files ----------
+.DS_Store
+Thumbs.db
+
+# ---------- Local collected data / AI artifacts ----------
+track_*.json
+/models/
+/knowledge_store.json
+
+# Local upload-service receive directory
+/tools/uploads/
+
+# ---------- Python cache ----------
+__pycache__/
+*.pyc
+
+# ---------- Editors and temporary files ----------
 *.swp
 *.swo
 *~
