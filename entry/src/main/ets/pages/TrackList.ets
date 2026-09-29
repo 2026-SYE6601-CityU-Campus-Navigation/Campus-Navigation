@@ -4,6 +4,8 @@ import { Store } from '../data/Store';
 import { TrackRecorder } from '../sensors/TrackRecorder';
 import { RecordingBanner } from './RecordingBanner';
 import { defaultTrackName, fmtDuration, fmtTime } from '../common/Utils';
+import { Theme } from '../common/Theme';
+import { PillButton, ThickButton } from '../common/Widgets';
 
 @CustomDialog
 export struct StartTrackDialog {
@@ -46,42 +48,79 @@ export struct StartTrackDialog {
   }
 
   build() {
-    Column({ space: 12 }) {
-      Text('开始记录轨迹').fontSize(18).fontWeight(FontWeight.Medium).width('100%')
+    Column({ space: 14 }) {
+      Text('开始记录轨迹').fontSize(19).fontWeight(FontWeight.Bold).width('100%').fontColor(Theme.INK)
       TextInput({ text: this.name, placeholder: '轨迹名称' })
+        .fontSize(13.5)
+        .backgroundColor(Theme.CARD_SOFT)
+        .borderRadius(14)
+        .border({ width: 2, color: Theme.LINE })
+        .padding({ left: 12, right: 12, top: 10, bottom: 10 })
         .onChange((v: string) => {
           this.name = v;
         })
-      Text('所在区域（必选）').fontSize(14).width('100%')
+
+      Text('所在区域（必选）').fontSize(Theme.F_META).fontColor(Theme.INK2).width('100%')
       if (this.areas.length === 0) {
-        Text('还没有区域，请先在首页新建区域').fontSize(12).fontColor('#E84026').width('100%')
+        Text('还没有区域，请先在首页新建区域').fontSize(Theme.F_META).fontColor(Theme.DANGER).width('100%')
       } else {
         Select(this.areaOptions())
           .selected(this.selIndex)
+          .value(this.areas[this.selIndex >= 0 ? this.selIndex : 0].name)
+          .font({ size: 13.5 })
+          .width('100%')
           .onSelect((index: number, value: string) => {
             this.selIndex = index;
             this.selAreaId = this.areas[index].id;
           })
-          .width('100%')
       }
-      Text('开始后每秒采样 定位 + 气压 + 地磁 + 朝向 + WiFi，每 5 秒自动保存；途中可拍照、打标签')
-        .fontSize(12)
-        .fontColor('#99000000')
+
+      Text('开始后每秒采样 定位 + 气压 + 地磁 + 朝向 + WiFi，每 5 秒自动保存；途中可记录节点（标记+照片）、拍风景照')
+        .fontSize(Theme.F_META)
+        .fontColor(Theme.INK2)
         .width('100%')
-      Row({ space: 12 }) {
-        Button('取消').onClick(() => {
-          this.controller?.close();
-        })
-        Button('开始')
-          .enabled(this.name.trim().length > 0 && this.areas.length > 0)
-          .onClick(() => {
-            this.controller?.close();
-            if (this.onStart) {
-              this.onStart(this.name.trim(), this.selAreaId);
+
+      Row({ space: 10 }) {
+        Column() {
+          ThickButton({
+            label: '取消',
+            kind: 'ghost',
+            compact: true,
+            onTap: (): void => {
+              this.controller?.close();
             }
           })
-      }.width('100%').justifyContent(FlexAlign.End)
-    }.padding(16).width('100%')
+        }.layoutWeight(1)
+
+        Column() {
+          // 刻意不做 disabled：区域列表是异步加载的，对话框首次渲染时 areas 还是空的，
+          // 一旦被算成禁用态就会出现「按钮是灰的、怎么点都没反应」，而且没有任何提示。
+          // 改成点按时校验 + 明确提示，按钮永远是可按的，问题也能自己说清楚。
+          ThickButton({
+            label: '开始记录',
+            kind: 'primary',
+            compact: true,
+            onTap: (): void => {
+              if (this.name.trim().length === 0) {
+                promptAction.showToast({ message: '请先给这条轨迹起个名字' });
+                return;
+              }
+              if (this.areas.length === 0) {
+                promptAction.showToast({ message: '还没有区域，请先在首页新建区域' });
+                return;
+              }
+              this.controller?.close();
+              if (this.onStart) {
+                this.onStart(this.name.trim(), this.selAreaId);
+              }
+            }
+          })
+        }.layoutWeight(1.3)
+      }.width('100%')
+    }
+    .padding(18)
+    .width('100%')
+    .backgroundColor(Theme.CARD)
   }
 }
 
@@ -143,38 +182,61 @@ export struct TrackListPage {
   build() {
     Stack({ alignContent: Alignment.BottomEnd }) {
       Column() {
-        Row() {
-          Button('‹ 返回').fontSize(14).onClick(() => {
-            this.onBack();
+        Row({ space: 10 }) {
+          PillButton({
+            label: '‹ 返回',
+            onTap: (): void => {
+              this.onBack();
+            }
           })
-          Text('轨迹记录').fontSize(18).fontWeight(FontWeight.Medium).margin({ left: 12 })
-          Blank()
-        }.width('100%').padding({ left: 8, right: 12, top: 10, bottom: 10 })
-        Divider()
+          Column({ space: 2 }) {
+            Text('全部轨迹').fontSize(Theme.F_TITLE).fontWeight(FontWeight.Bold).fontColor(Theme.INK)
+            Text(`共 ${this.tracks.length} 条`)
+              .fontSize(Theme.F_META)
+              .fontColor(Theme.INK2)
+          }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+        }.width('100%').padding({ left: 14, right: 14, top: 12, bottom: 10 })
 
         RecordingBanner()
 
         if (this.tracks.length === 0 && !AppStorage.get<boolean>('rm_recording')) {
-          Column() {
+          Column({ space: 6 }) {
             Blank()
-            Text('还没有轨迹，点击右下角开始记录').fontColor('#99000000')
+            Text('还没有轨迹').fontWeight(FontWeight.Bold).fontColor(Theme.INK2)
+            Text('点右下角开始记录').fontSize(Theme.F_META).fontColor(Theme.INK3)
             Blank()
           }.width('100%').layoutWeight(1)
         } else {
           List() {
             ForEach(this.tracks, (t: Track) => {
               ListItem() {
-                Row() {
-                  Column({ space: 4 }) {
-                    Text(t.name).fontSize(16).width('100%')
-                    Text(this.trackSub(t)).fontSize(13).fontColor('#99000000').width('100%')
+                Row({ space: 10 }) {
+                  Column({ space: 3 }) {
+                    Text(t.name)
+                      .fontSize(15)
+                      .fontWeight(FontWeight.Medium)
+                      .fontColor(Theme.INK)
+                      .width('100%')
+                      .maxLines(1)
+                      .textOverflow({ overflow: TextOverflow.Ellipsis })
+                    Text(this.trackSub(t)).fontSize(Theme.F_META).fontColor(Theme.INK2).width('100%')
                   }.layoutWeight(1)
-                  Button('删除').fontSize(12).fontColor('#E84026').onClick(() => {
-                    Store.deleteTrack(t.id).then(() => {
-                      promptAction.showToast({ message: '已删除轨迹' });
-                    });
+                  PillButton({
+                    label: '删除',
+                    kind: 'danger',
+                    onTap: (): void => {
+                      Store.deleteTrack(t.id).then(() => {
+                        promptAction.showToast({ message: '已删除轨迹' });
+                      });
+                    }
                   })
-                }.width('100%').padding({ left: 16, right: 12, top: 12, bottom: 12 })
+                }
+                .width('100%')
+                .padding({ left: 16, right: 12, top: 12, bottom: 12 })
+                .backgroundColor(Theme.CARD)
+                .borderRadius(18)
+                .border({ width: 2, color: Theme.LINE })
+                .margin({ left: 16, right: 16, bottom: 10 })
               }.onClick(() => {
                 this.onOpenTrack(t.id);
               })
@@ -182,18 +244,28 @@ export struct TrackListPage {
           }
           .width('100%')
           .layoutWeight(1)
-          .divider({ strokeWidth: 0.5, color: '#1A000000' })
         }
       }.width('100%').height('100%')
 
       // 记录中横幅自带停止按钮，FAB 只在未记录时显示（心跳重建驱动刷新）
       ForEach([this.heartbeat], (h: number) => {
         if (!AppStorage.get<boolean>('rm_recording')) {
-          Button('开始记录').margin(16).onClick(() => {
-            this.startDialog.open();
-          })
+          Button('开始记录')
+            .fontSize(15)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(Theme.ON_RED)
+            .backgroundColor(Theme.RED)
+            .borderRadius(20)
+            .height(54)
+            .margin(Theme.PAD)
+            .onClick(() => {
+              this.startDialog.open();
+            })
         }
       }, (h: number) => h + '')
-    }.width('100%').height('100%')
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor(Theme.BG)
   }
 }
