@@ -1,0 +1,21 @@
+{
+  "version": 2,
+  "sourcePlatform": "ios",
+  "capabilities": {
+    "nearbyWifiFingerprint": "unsupported"
+  },
+  "name": "Synthetic iOS Track",
+  "area": "Synthetic Area",
+  "startedAt": 1700000100000,
+  "endedAt": 1700000105000,
+  "pointCount": 1,
+  "points": [
+    {
+      "timeMs": 1700000101000,
+      "pressureHpa": 1007.8,
+      "headingDeg": 90.0
+    }
+  ],
+  "tags": [],
+  "photos": []
+}
