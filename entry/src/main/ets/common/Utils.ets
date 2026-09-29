@@ -21,6 +21,13 @@ export function fmtDateTime(ms: number): string {
   return `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 
+/** YYYY-MM-DD HH:mm:ss（照片参数/导出索引用完整时间戳） */
+export function fmtFullTime(ms: number): string {
+  const d: Date = new Date(ms);
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} `
+    + `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+}
+
 /** mm:ss 或 h:mm:ss */
 export function fmtDuration(sec: number): string {
   const h: number = Math.floor(sec / 3600);

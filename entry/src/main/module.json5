@@ -21,6 +21,20 @@
         "startWindowBackground": "$color:start_window_background",
         "exported": true,
         "launchType": "singleton",
+        // ⚠️ 这两条（entity.system.home + ohos.want.action.home）是「桌面入口」的声明。
+        // 少了它，应用照样能装、能跑，但系统不会在桌面建图标 —— 只能在「设置 → 应用管理」里看到它，
+        // 表现就是「点进去只有后台、不像一个正常 App」。DevEco 的 Run 不依赖它（Run 是直接拉起 Ability），
+        // 所以这类缺失只在真机上手动点图标时才会暴露。
+        "skills": [
+          {
+            "entities": [
+              "entity.system.home"
+            ],
+            "actions": [
+              "ohos.want.action.home"
+            ]
+          }
+        ],
         "backgroundModes": [
           "location"
         ]
@@ -75,6 +89,13 @@
       },
       {
         "name": "ohos.permission.ACCELEROMETER"
+      },
+      {
+        "name": "ohos.permission.GYROSCOPE"
+      },
+      // 上传轨迹包（system_grant：装完即可用，不会弹窗让用户授权）
+      {
+        "name": "ohos.permission.INTERNET"
       },
       {
         "name": "ohos.permission.KEEP_BACKGROUND_RUNNING"

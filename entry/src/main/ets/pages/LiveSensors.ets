@@ -11,6 +11,8 @@ import {
   OrientView
 } from '../sensors/LiveStream';
 import { fmtTime } from '../common/Utils';
+import { Theme } from '../common/Theme';
+import { PillButton } from '../common/Widgets';
 
 @Component
 export struct LiveSensorsPage {
@@ -113,21 +115,24 @@ export struct LiveSensorsPage {
 
   build() {
     Column() {
-      Row() {
-        Button('‹ 返回').fontSize(14).onClick(() => {
-          this.onBack();
+      Row({ space: 10 }) {
+        PillButton({
+          label: '‹ 返回',
+          onTap: (): void => {
+            this.onBack();
+          }
         })
-        Text('实时传感器').fontSize(18).fontWeight(FontWeight.Medium).margin({ left: 12 })
-        Blank()
-        Text(this.tickMs > 0 ? `更新 ${fmtTime(this.tickMs)}` : '等待数据')
-          .fontSize(12)
-          .fontColor('#99000000')
-      }.width('100%').padding({ left: 8, right: 12, top: 10, bottom: 10 })
-      Divider()
+        Column({ space: 2 }) {
+          Text('实时传感器').fontSize(Theme.F_TITLE).fontWeight(FontWeight.Bold).fontColor(Theme.INK)
+          Text(this.tickMs > 0 ? `更新 ${fmtTime(this.tickMs)}` : '等待数据')
+            .fontSize(Theme.F_META)
+            .fontColor(Theme.INK2)
+        }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+      }.width('100%').padding({ left: 14, right: 14, top: 12, bottom: 12 })
 
       Scroll() {
         Column() {
-          // 以 heartbeat 为 key：每 0.5s 键变化 → 整个卡片列销毁重建 →
+          // 以 heartbeat 为 key：每 100ms 键变化 → 整个卡片列销毁重建 →
           // @StorageLink 重新初始化读取 AppStorage 最新值（等价于自动"重新进入页面"）
           ForEach([this.heartbeat], (h: number) => {
             Column({ space: 12 }) {
@@ -142,7 +147,7 @@ export struct LiveSensorsPage {
           }, (h: number) => `${h}`)
         }
       }.layoutWeight(1).width('100%')
-    }.width('100%').height('100%')
+    }.width('100%').height('100%').backgroundColor(Theme.BG)
   }
 
   @Builder
@@ -153,7 +158,7 @@ export struct LiveSensorsPage {
     }
     .width('100%')
     .padding(16)
-    .backgroundColor('#FFF7F7F7')
+    .backgroundColor(Theme.CARD)
     .borderRadius(12)
   }
 
@@ -165,7 +170,7 @@ export struct LiveSensorsPage {
     }
     .width('100%')
     .padding(16)
-    .backgroundColor('#FFF7F7F7')
+    .backgroundColor(Theme.CARD)
     .borderRadius(12)
   }
 
@@ -177,7 +182,7 @@ export struct LiveSensorsPage {
     }
     .width('100%')
     .padding(16)
-    .backgroundColor('#FFF7F7F7')
+    .backgroundColor(Theme.CARD)
     .borderRadius(12)
   }
 
@@ -194,7 +199,7 @@ export struct LiveSensorsPage {
     }
     .width('100%')
     .padding(16)
-    .backgroundColor('#FFF7F7F7')
+    .backgroundColor(Theme.CARD)
     .borderRadius(12)
   }
 
@@ -212,7 +217,7 @@ export struct LiveSensorsPage {
     }
     .width('100%')
     .padding(16)
-    .backgroundColor('#FFF7F7F7')
+    .backgroundColor(Theme.CARD)
     .borderRadius(12)
   }
 
@@ -227,7 +232,7 @@ export struct LiveSensorsPage {
     }
     .width('100%')
     .padding(16)
-    .backgroundColor('#FFF7F7F7')
+    .backgroundColor(Theme.CARD)
     .borderRadius(12)
   }
 
@@ -239,7 +244,7 @@ export struct LiveSensorsPage {
         .fontWeight(FontWeight.Medium)
         .width('100%')
       if (this.sensorList.length === 0) {
-        Text('无法读取传感器列表').fontSize(14).fontColor('#99000000').width('100%')
+        Text('无法读取传感器列表').fontSize(14).fontColor(Theme.INK2).width('100%')
       } else {
         ForEach(this.sensorList, (s: SensorInfoView) => {
           Row() {
@@ -247,29 +252,33 @@ export struct LiveSensorsPage {
               Text(s.label).fontSize(14)
               Text(`${s.name} · ${s.vendor}`)
                 .fontSize(11)
-                .fontColor('#99000000')
+                .fontColor(Theme.INK2)
                 .maxLines(1)
                 .textOverflow({ overflow: TextOverflow.Ellipsis })
             }.layoutWeight(1)
-            Text(`id ${s.id}`).fontSize(11).fontColor('#99000000')
+            Text(`id ${s.id}`).fontSize(11).fontColor(Theme.INK2)
           }.width('100%').padding({ top: 6, bottom: 6 })
         }, (s: SensorInfoView) => s.id + '')
       }
     }
     .width('100%')
     .padding(16)
-    .backgroundColor('#FFF7F7F7')
+    .backgroundColor(Theme.CARD)
     .borderRadius(12)
   }
 
+  // ⚠️ 下面这几个「带参数的 @Builder」能显示实时数值，靠的是它们被包在心跳 ForEach 里：
+  // key 每 100ms 变化 → 整个卡片子树销毁重建 → Builder 重新拿到新值。
+  // 注意 @Builder 按值传参**本身不会**随状态刷新 UI（轨迹详情页的统计卡片就因此一直空白），
+  // 所以别把心跳去掉，也别把这些 Builder 挪到心跳外面。
   @Builder
   Vec3Row(label: string, has: boolean, v: Vec3View | null, unit: string) {
     Row() {
-      Text(label).fontSize(13).fontColor('#99000000').width(88)
+      Text(label).fontSize(13).fontColor(Theme.INK2).width(88)
       if (!has) {
-        Text('此设备无该传感器').fontSize(13).fontColor('#99000000')
+        Text('此设备无该传感器').fontSize(13).fontColor(Theme.INK2)
       } else if (v === null) {
-        Text('等待读数…').fontSize(13).fontColor('#99000000')
+        Text('等待读数…').fontSize(13).fontColor(Theme.INK2)
       } else {
         Text(`X ${v.x.toFixed(2)} · Y ${v.y.toFixed(2)} · Z ${v.z.toFixed(2)} · 模 ${v.m.toFixed(2)} ${unit}`)
           .fontSize(12)
@@ -280,11 +289,11 @@ export struct LiveSensorsPage {
   @Builder
   QuatRow(label: string, has: boolean, v: QuatView | null) {
     Row() {
-      Text(label).fontSize(13).fontColor('#99000000').width(88)
+      Text(label).fontSize(13).fontColor(Theme.INK2).width(88)
       if (!has) {
-        Text('此设备无该传感器').fontSize(13).fontColor('#99000000')
+        Text('此设备无该传感器').fontSize(13).fontColor(Theme.INK2)
       } else if (v === null) {
-        Text('等待读数…').fontSize(13).fontColor('#99000000')
+        Text('等待读数…').fontSize(13).fontColor(Theme.INK2)
       } else {
         Text(`X ${v.x.toFixed(3)} · Y ${v.y.toFixed(3)} · Z ${v.z.toFixed(3)} · W ${v.w.toFixed(3)}`)
           .fontSize(12)
@@ -295,11 +304,11 @@ export struct LiveSensorsPage {
   @Builder
   OrientRow(label: string, has: boolean, v: OrientView | null) {
     Row() {
-      Text(label).fontSize(13).fontColor('#99000000').width(88)
+      Text(label).fontSize(13).fontColor(Theme.INK2).width(88)
       if (!has) {
-        Text('此设备无该传感器').fontSize(13).fontColor('#99000000')
+        Text('此设备无该传感器').fontSize(13).fontColor(Theme.INK2)
       } else if (v === null) {
-        Text('等待读数…').fontSize(13).fontColor('#99000000')
+        Text('等待读数…').fontSize(13).fontColor(Theme.INK2)
       } else {
         Text(`α ${v.alpha.toFixed(0)}° · β ${v.beta.toFixed(0)}° · γ ${v.gamma.toFixed(0)}°`)
           .fontSize(12)
@@ -310,11 +319,11 @@ export struct LiveSensorsPage {
   @Builder
   ScalarRow(label: string, has: boolean, v: number, text: string) {
     Row() {
-      Text(label).fontSize(13).fontColor('#99000000').width(88)
+      Text(label).fontSize(13).fontColor(Theme.INK2).width(88)
       if (!has) {
-        Text('此设备无该传感器').fontSize(13).fontColor('#99000000')
+        Text('此设备无该传感器').fontSize(13).fontColor(Theme.INK2)
       } else if (v < 0 || text.length === 0) {
-        Text('等待读数…').fontSize(13).fontColor('#99000000')
+        Text('等待读数…').fontSize(13).fontColor(Theme.INK2)
       } else {
         Text(text).fontSize(12)
       }
@@ -371,17 +380,17 @@ export struct LiveSensorsPage {
   @Builder
   WifiBody() {
     if (this.lastScanMs === 0) {
-      Text('尚未完成扫描').fontSize(12).fontColor('#99000000').width('100%')
+      Text('尚未完成扫描').fontSize(12).fontColor(Theme.INK2).width('100%')
     } else {
       Text(`最近扫描：${fmtTime(this.lastScanMs)}`)
         .fontSize(12)
-        .fontColor('#99000000')
+        .fontColor(Theme.INK2)
         .width('100%')
     }
     if (this.wifi.length === 0) {
       Text('暂无 WiFi 扫描结果 —— 需授权位置权限并打开系统定位开关；扫描受系统节流（约 30 秒一次）')
         .fontSize(12)
-        .fontColor('#99000000')
+        .fontColor(Theme.INK2)
         .width('100%')
     } else {
       ForEach(this.wifi, (ap: WifiView) => {
@@ -393,7 +402,7 @@ export struct LiveSensorsPage {
             .textOverflow({ overflow: TextOverflow.Ellipsis })
           Text(`${ap.rssi} dBm · ${ap.freq} MHz`)
             .fontSize(12)
-            .fontColor('#99000000')
+            .fontColor(Theme.INK2)
             .width('100%')
         }.width('100%').padding({ top: 6, bottom: 6 })
       }, (ap: WifiView) => ap.bssid)
@@ -403,7 +412,7 @@ export struct LiveSensorsPage {
   @Builder
   InfoRow(label: string, value: string) {
     Row() {
-      Text(label).fontSize(14).fontColor('#99000000').width(72)
+      Text(label).fontSize(14).fontColor(Theme.INK2).width(72)
       Text(value).fontSize(14)
     }.width('100%')
   }

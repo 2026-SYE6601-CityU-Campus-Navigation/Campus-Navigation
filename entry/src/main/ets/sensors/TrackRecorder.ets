@@ -76,6 +76,11 @@ export class TrackRecorder {
     return this.trackId;
   }
 
+  /** 本次记录已采样的点数（录制横幅显示，给用户「数据在动」的反馈） */
+  getPointCount(): number {
+    return this.pointCount;
+  }
+
   /** 当前传感器快照（供轨迹途中拍照/打标签时关联定位与朝向） */
   getSnapshot(): RecSnapshot {
     const loc = this.lastLoc;

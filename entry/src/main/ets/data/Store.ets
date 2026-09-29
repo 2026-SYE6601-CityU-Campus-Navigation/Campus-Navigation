@@ -1,7 +1,8 @@
 import { relationalStore } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
-import { Area, Marker, Room, Track, TrackPhoto, TrackPoint, TrackPointDraft, TrackTag } from './Entities';
+import { hilog } from '@kit.PerformanceAnalysisKit';
+import { Area, Marker, PhotoKind, Room, Track, TrackPhoto, TrackPhotoDraft, TrackPoint, TrackPointDraft, TrackTag } from './Entities';
 import { Ctx } from '../common/Utils';
 
 export type DataListener = () => void;
@@ -34,6 +35,7 @@ export class Store {
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           name TEXT NOT NULL,
           note TEXT NOT NULL DEFAULT '',
+          areaId INTEGER,
           latitude REAL,
           longitude REAL,
           altitude REAL,
@@ -62,6 +64,7 @@ export class Store {
         `CREATE TABLE IF NOT EXISTS tracks (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           name TEXT NOT NULL,
+          areaId INTEGER,
           startedAt INTEGER NOT NULL,
           endedAt INTEGER,
           pointCount INTEGER NOT NULL DEFAULT 0
@@ -80,6 +83,7 @@ export class Store {
           magneticX REAL,
           magneticY REAL,
           magneticZ REAL,
+          headingDeg REAL,
           wifiCount INTEGER NOT NULL DEFAULT 0,
           wifiTop TEXT NOT NULL DEFAULT ''
         )`
@@ -99,6 +103,7 @@ export class Store {
           timeMs INTEGER NOT NULL,
           tagType TEXT NOT NULL,
           note TEXT NOT NULL DEFAULT '',
+          floor TEXT NOT NULL DEFAULT '',
           latitude REAL,
           longitude REAL,
           altitude REAL,
@@ -110,6 +115,8 @@ export class Store {
         `CREATE TABLE IF NOT EXISTS track_photos (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           trackId INTEGER NOT NULL,
+          kind TEXT NOT NULL DEFAULT 'scenery',
+          tagId INTEGER,
           timeMs INTEGER NOT NULL,
           filePath TEXT NOT NULL,
           note TEXT NOT NULL DEFAULT '',
@@ -118,6 +125,13 @@ export class Store {
           altitude REAL,
           headingDeg REAL,
           createdAt INTEGER NOT NULL
+        )`
+      );
+      // 2026-09-29：键值设置表（上传地址、令牌等本机配置；与业务数据分开，不进导出包）
+      await rdb.executeSql(
+        `CREATE TABLE IF NOT EXISTS settings (
+          k TEXT PRIMARY KEY,
+          v TEXT NOT NULL DEFAULT ''
         )`
       );
       // 旧库迁移：列已存在时 ALTER 会报错，忽略即可
@@ -131,6 +145,22 @@ export class Store {
       }
       try {
         await rdb.executeSql('ALTER TABLE track_points ADD COLUMN headingDeg REAL');
+      } catch (e) {
+      }
+      // 2026-09-28：照片分「节点照 / 风景照」。默认值刻意取 scenery —— 升级前的老照片
+      // 全部归为风景照（用户确认的归类规则），标签则原样保留并成为「节点」。
+      try {
+        await rdb.executeSql(
+          `ALTER TABLE track_photos ADD COLUMN kind TEXT NOT NULL DEFAULT 'scenery'`);
+      } catch (e) {
+      }
+      try {
+        await rdb.executeSql('ALTER TABLE track_photos ADD COLUMN tagId INTEGER');
+      } catch (e) {
+      }
+      // 2026-09-28：节点增加手填楼层（用户确认不做高度估算），老节点默认空字符串
+      try {
+        await rdb.executeSql(`ALTER TABLE track_tags ADD COLUMN floor TEXT NOT NULL DEFAULT ''`);
       } catch (e) {
       }
       Store.rdb = rdb;
@@ -151,11 +181,60 @@ export class Store {
     }
   }
 
+  /**
+   * 通知订阅者刷新界面。
+   *
+   * 每个监听器单独 try-catch：某个页面的刷新里抛了异常，不能影响其它页面，
+   * 更不能顺着调用栈往上冒——否则写库已经成功（例如轨迹已落库），调用方拿到的却是 reject，
+   * 界面上会误报「保存失败」。异常只记日志，不改变写操作的成败。
+   */
   private static notify(): void {
     const copy: DataListener[] = Store.listeners.slice();
-    copy.forEach((l: DataListener) => {
-      l();
-    });
+    for (const l of copy) {
+      try {
+        l();
+      } catch (e) {
+        hilog.warn(0x0000, 'RoomMarker', 'Store listener failed: %{public}s', JSON.stringify(e));
+      }
+    }
+  }
+
+  // ---------- 设置（键值） ----------
+
+  /** 读设置项；不存在时返回默认值（上传地址这类本机配置都放这里） */
+  static async getSetting(key: string, def: string): Promise<string> {
+    await Store.ready;
+    if (!Store.rdb) {
+      return def;
+    }
+    const p: relationalStore.RdbPredicates = new relationalStore.RdbPredicates('settings');
+    p.equalTo('k', key);
+    const rs: relationalStore.ResultSet = await Store.rdb.query(p, ['v']);
+    let value: string = def;
+    if (rs.goToNextRow()) {
+      value = rs.getString(rs.getColumnIndex('v'));
+    }
+    rs.close();
+    return value;
+  }
+
+  /** 写设置项（先 update 再按需 insert，避免依赖 SQL 方言；写失败会抛给调用方） */
+  static async setSetting(key: string, value: string): Promise<void> {
+    await Store.ready;
+    if (!Store.rdb) {
+      throw new Error('数据库未就绪，请重启应用后再试');
+    }
+    const bucket: relationalStore.ValuesBucket = {
+      'k': key,
+      'v': value
+    };
+    const p: relationalStore.RdbPredicates = new relationalStore.RdbPredicates('settings');
+    p.equalTo('k', key);
+    const updated: number = await Store.rdb.update(bucket, p);
+    if (updated === 0) {
+      await Store.rdb.insert('settings', bucket);
+    }
+    Store.notify();
   }
 
   // ---------- 区域 ----------
@@ -494,16 +573,19 @@ export class Store {
     p.orderByAsc('timeMs');
     const rs: relationalStore.ResultSet = await Store.rdb.query(
       p,
-      ['id', 'trackId', 'timeMs', 'tagType', 'note', 'latitude', 'longitude', 'altitude', 'headingDeg', 'createdAt']
+      ['id', 'trackId', 'timeMs', 'tagType', 'note', 'floor', 'latitude', 'longitude', 'altitude',
+        'headingDeg', 'createdAt']
     );
     const out: TrackTag[] = [];
     while (rs.goToNextRow()) {
+      const floor: string | undefined = Store.optString(rs, 'floor');
       out.push({
         id: rs.getLong(rs.getColumnIndex('id')),
         trackId: rs.getLong(rs.getColumnIndex('trackId')),
         timeMs: rs.getLong(rs.getColumnIndex('timeMs')),
         tagType: rs.getString(rs.getColumnIndex('tagType')),
         note: rs.getString(rs.getColumnIndex('note')),
+        floor: floor === undefined ? '' : floor,
         latitude: Store.optDouble(rs, 'latitude'),
         longitude: Store.optDouble(rs, 'longitude'),
         altitude: Store.optDouble(rs, 'altitude'),
@@ -525,13 +607,17 @@ export class Store {
     p.orderByAsc('timeMs');
     const rs: relationalStore.ResultSet = await Store.rdb.query(
       p,
-      ['id', 'trackId', 'timeMs', 'filePath', 'note', 'latitude', 'longitude', 'altitude', 'headingDeg', 'createdAt']
+      ['id', 'trackId', 'kind', 'tagId', 'timeMs', 'filePath', 'note', 'latitude', 'longitude',
+        'altitude', 'headingDeg', 'createdAt']
     );
     const out: TrackPhoto[] = [];
     while (rs.goToNextRow()) {
+      const kind: string | undefined = Store.optString(rs, 'kind');
       out.push({
         id: rs.getLong(rs.getColumnIndex('id')),
         trackId: rs.getLong(rs.getColumnIndex('trackId')),
+        kind: kind === undefined ? PhotoKind.SCENERY : kind,
+        tagId: Store.optLong(rs, 'tagId'),
         timeMs: rs.getLong(rs.getColumnIndex('timeMs')),
         filePath: rs.getString(rs.getColumnIndex('filePath')),
         note: rs.getString(rs.getColumnIndex('note')),
@@ -686,15 +772,7 @@ export class Store {
     // 先删照片文件（沙箱），再删记录
     try {
       const photos: TrackPhoto[] = await Store.listTrackPhotos(id);
-      const dir: string = Ctx.ui ? Ctx.ui.filesDir : '';
-      for (const ph of photos) {
-        if (dir.length > 0) {
-          try {
-            fs.unlinkSync(`${dir}/${ph.filePath}`);
-          } catch (e) {
-          }
-        }
-      }
+      Store.unlinkFiles(photos.map((ph: TrackPhoto) => ph.filePath));
     } catch (e) {
     }
     let p: relationalStore.RdbPredicates = new relationalStore.RdbPredicates('tracks');
@@ -713,67 +791,114 @@ export class Store {
     Store.notify();
   }
 
+  /** 新建节点（原「标签」），返回行 id —— 节点照要用它做 tagId 关联。floor 为手填楼层，可留空 */
   static async insertTrackTag(trackId: number, timeMs: number, tagType: string, note: string,
-    latitude?: number, longitude?: number, altitude?: number, headingDeg?: number): Promise<void> {
+    floor: string, latitude?: number, longitude?: number, altitude?: number,
+    headingDeg?: number): Promise<number> {
     await Store.ready;
     const bucket: relationalStore.ValuesBucket = {
       'trackId': trackId,
       'timeMs': timeMs,
       'tagType': tagType,
       'note': note,
+      'floor': floor,
       'createdAt': Date.now()
     };
     Store.putOpt(bucket, 'latitude', latitude);
     Store.putOpt(bucket, 'longitude', longitude);
     Store.putOpt(bucket, 'altitude', altitude);
     Store.putOpt(bucket, 'headingDeg', headingDeg);
-    await Store.rdb!.insert('track_tags', bucket);
+    const rowId: number = await Store.rdb!.insert('track_tags', bucket);
     Store.notify();
+    return rowId > 0 ? rowId : await Store.lastRowId('track_tags');
   }
 
-  static async insertTrackPhoto(trackId: number, timeMs: number, filePath: string, note: string,
-    latitude?: number, longitude?: number, altitude?: number, headingDeg?: number): Promise<void> {
+  /** 插入一条照片记录（节点照带 kind='node' 与 tagId，风景照 kind='scenery'），返回行 id */
+  static async insertTrackPhoto(draft: TrackPhotoDraft): Promise<number> {
     await Store.ready;
     const bucket: relationalStore.ValuesBucket = {
-      'trackId': trackId,
-      'timeMs': timeMs,
-      'filePath': filePath,
-      'note': note,
+      'trackId': draft.trackId,
+      'kind': draft.kind,
+      'timeMs': draft.timeMs,
+      'filePath': draft.filePath,
+      'note': draft.note,
       'createdAt': Date.now()
     };
-    Store.putOpt(bucket, 'latitude', latitude);
-    Store.putOpt(bucket, 'longitude', longitude);
-    Store.putOpt(bucket, 'altitude', altitude);
-    Store.putOpt(bucket, 'headingDeg', headingDeg);
-    await Store.rdb!.insert('track_photos', bucket);
+    Store.putOpt(bucket, 'tagId', draft.tagId);
+    Store.putOpt(bucket, 'latitude', draft.latitude);
+    Store.putOpt(bucket, 'longitude', draft.longitude);
+    Store.putOpt(bucket, 'altitude', draft.altitude);
+    Store.putOpt(bucket, 'headingDeg', draft.headingDeg);
+    const rowId: number = await Store.rdb!.insert('track_photos', bucket);
     Store.notify();
+    return rowId > 0 ? rowId : await Store.lastRowId('track_photos');
   }
 
+  /** 删除节点：连带删除它名下的节点照（含沙箱文件），避免留下孤儿照片 */
   static async deleteTrackTag(id: number): Promise<void> {
     await Store.ready;
+    await Store.deletePhotosOfTag(id);
     const p: relationalStore.RdbPredicates = new relationalStore.RdbPredicates('track_tags');
     p.equalTo('id', id);
     await Store.rdb!.delete(p);
     Store.notify();
   }
 
+  /** 删除某个节点名下的全部照片：先删文件再删记录 */
+  private static async deletePhotosOfTag(tagId: number): Promise<void> {
+    const p: relationalStore.RdbPredicates = new relationalStore.RdbPredicates('track_photos');
+    p.equalTo('tagId', tagId);
+    const rs: relationalStore.ResultSet = await Store.rdb!.query(p, ['id', 'filePath']);
+    const ids: number[] = [];
+    const files: string[] = [];
+    while (rs.goToNextRow()) {
+      ids.push(rs.getLong(rs.getColumnIndex('id')));
+      files.push(rs.getString(rs.getColumnIndex('filePath')));
+    }
+    rs.close();
+    Store.unlinkFiles(files);
+    for (const pid of ids) {
+      const dp: relationalStore.RdbPredicates = new relationalStore.RdbPredicates('track_photos');
+      dp.equalTo('id', pid);
+      await Store.rdb!.delete(dp);
+    }
+  }
+
   static async deleteTrackPhoto(id: number): Promise<void> {
     await Store.ready;
-    // 删除沙箱文件
-    try {
-      const photos: TrackPhoto[] = await Store.listTrackPhotosAll(id);
-      if (photos.length > 0 && Ctx.ui) {
-        try {
-          fs.unlinkSync(`${Ctx.ui.filesDir}/${photos[0].filePath}`);
-        } catch (e) {
-        }
-      }
-    } catch (e) {
-    }
+    // 先取文件路径把沙箱文件删掉，再删记录
     const p: relationalStore.RdbPredicates = new relationalStore.RdbPredicates('track_photos');
     p.equalTo('id', id);
-    await Store.rdb!.delete(p);
+    const rs: relationalStore.ResultSet = await Store.rdb!.query(p, ['filePath']);
+    let filePath = '';
+    if (rs.goToNextRow()) {
+      filePath = rs.getString(rs.getColumnIndex('filePath'));
+    }
+    rs.close();
+    if (filePath.length > 0) {
+      Store.unlinkFiles([filePath]);
+    }
+    const dp: relationalStore.RdbPredicates = new relationalStore.RdbPredicates('track_photos');
+    dp.equalTo('id', id);
+    await Store.rdb!.delete(dp);
     Store.notify();
+  }
+
+  /** 批量删除沙箱内的照片文件（记录已被删或文件不存在都忽略） */
+  private static unlinkFiles(relPaths: string[]): void {
+    const dir: string = Ctx.ui ? Ctx.ui.filesDir : '';
+    if (dir.length === 0) {
+      return;
+    }
+    for (const rel of relPaths) {
+      if (rel.length === 0) {
+        continue;
+      }
+      try {
+        fs.unlinkSync(`${dir}/${rel}`);
+      } catch (e) {
+      }
+    }
   }
 
   // ---------- 工具 ----------
@@ -789,25 +914,6 @@ export class Store {
     const out: number[] = [];
     while (rs.goToNextRow()) {
       out.push(rs.getLong(rs.getColumnIndex('id')));
-    }
-    rs.close();
-    return out;
-  }
-
-  private static async listTrackPhotosAll(photoId: number): Promise<TrackPhoto[]> {
-    const p: relationalStore.RdbPredicates = new relationalStore.RdbPredicates('track_photos');
-    p.equalTo('id', photoId);
-    const rs: relationalStore.ResultSet = await Store.rdb!.query(p, ['filePath']);
-    const out: TrackPhoto[] = [];
-    while (rs.goToNextRow()) {
-      out.push({
-        id: photoId,
-        trackId: 0,
-        timeMs: 0,
-        filePath: rs.getString(rs.getColumnIndex('filePath')),
-        note: '',
-        createdAt: 0
-      });
     }
     rs.close();
     return out;
