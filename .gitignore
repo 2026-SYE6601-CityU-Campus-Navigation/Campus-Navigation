@@ -1,0 +1,35 @@
+# macOS
+.DS_Store
+
+# Xcode build output
+DerivedData/
+build/
+*.xcarchive
+*.ipa
+*.dSYM
+*.dSYM.zip
+*.xcresult
+
+# Xcode per-user state
+xcuserdata/
+*.xcuserstate
+*.xccheckout
+*.xcscmblueprint
+*.moved-aside
+
+# Swift Package Manager generated state
+.build/
+.swiftpm/
+
+# Local configuration and credentials
+*.xcconfig.local
+Secrets.xcconfig
+*.mobileprovision
+*.p12
+
+# Editors and temporary files
+*.swp
+*.swo
+*~
+.tmp/
+tmp/
