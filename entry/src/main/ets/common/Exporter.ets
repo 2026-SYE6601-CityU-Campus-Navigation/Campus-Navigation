@@ -1,9 +1,12 @@
 import { util } from '@kit.ArkTS';
 import { picker } from '@kit.CoreFileKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
+import { hilog } from '@kit.PerformanceAnalysisKit';
 import { Store, UNASSIGNED_AREA_ID } from '../data/Store';
-import { PhotoKind, Track, TrackPhoto, TrackPoint, TrackTag } from '../data/Entities';
-import { buildZip, ZipEntry } from './ZipWriter';
+import { Area, PhotoKind, Track, TrackPhoto, TrackPoint, TrackTag } from '../data/Entities';
+import { effectiveAreaId } from './RoomPlan';
+import { ZipStream, crc32, writeAllTo } from './ZipWriter';
+import { readFileExact } from '../sensors/TrackMedia';
 import { Ctx, compassDir, coordText, fmtFullTime, pad2, safeFileName } from './Utils';
 
 /** 导出 JSON 的采样点结构（可选字段为 undefined 时 JSON.stringify 自动省略） */
@@ -28,9 +31,20 @@ interface ExportTag {
   note: string;
   /** 手填楼层（空字符串 = 未填） */
   floor: string;
+  /** 节点所属建筑区域名（2026-09-29 新增，跨楼轨迹才非空区别）；
+   *  空字符串 = 节点没写区域且轨迹自身也没区域。属增量字段，version 不变，旧的消费脚本不受影响 */
+  area: string;
   latitude?: number;
   longitude?: number;
   altitude?: number;
+  /**
+   * 打这个节点时的定位精度（米）—— 2026-09-29 新增（第二十五轮）。
+   * 与采样点的 accuracy 同名字段对齐；**旧包没有这个字段**，所以消费脚本要按「缺省 = 没记精度、
+   * 不算差」处理。做航位推算时，只有精度在门限内的节点才能当锚点。
+   */
+  accuracy?: number;
+  /** 打这个节点时的气压（2026-09-29 新增，与采样点同名字段对齐；旧包没有这个字段） */
+  pressureHpa?: number;
   headingDeg?: number;
 }
 
@@ -98,6 +112,9 @@ interface GalleryTrack {
   tags: TrackTag[];
   photos: TrackPhoto[];
   photoMissing: boolean[];
+  /** 区域清单与轨迹自身区域：用来算每个节点的「所在建筑」 */
+  areas: Area[];
+  trackAreaId: number;
 }
 
 /**
@@ -107,16 +124,42 @@ interface GalleryTrack {
  * AI 可直接读 JSON（含标签/照片元数据与相对路径）并对照照片原图；
  * 人工则可以解压后双击 gallery.html 逐张核对照片、位置、朝向与备注。
  */
-/** 打包结果：zip 字节 + 建议文件名（导出到手机与上传到云端共用） */
-export interface ExportPackage {
-  name: string;
-  data: ArrayBuffer;
+/**
+ * 打包进度：既是给用户看的反馈，也是**打包中途出问题时的唯一线索**
+ * （闪退时 toast 带不走信息，但界面上的最后一条消息和 hilog 能说清崩在哪一步、包多大）。
+ */
+export interface PackProgress {
+  /** 正在处理第几个条目（**1 起**，配合 note 读作「第 3/8 个：photos/…」）/ 总条目数 */
+  done: number;
+  total: number;
+  /** 已写出的字节数 */
+  bytes: number;
+  /** 预计总字节数（照片大小已知，JSON 部分很小，估得够准） */
+  bytesTotal: number;
+  /** 正在处理的条目名（照片相对路径或 JSON 文件名） */
+  note: string;
 }
 
 /** 已经落进 cacheDir 的待上传包（uploadFile 只认 internal://cache/ 下的文件） */
 export interface StagedUpload {
   name: string;
   cachePath: string;
+  /** 实际落盘字节数（界面拿它显示这个包多大） */
+  bytes: number;
+}
+
+/**
+ * 一个打包条目：包内路径 + 内容来源。
+ * 照片**只记绝对路径**，字节在读的那一刻才产生 —— 这是这一轮治闪退的关键
+ * （老实现把全部照片读进内存、再拼一份整包字节，一个 5 张照片的包就有 17.5 MB，勾几条就崩）。
+ */
+interface PackJob {
+  name: string;
+  /** 内存里的内容（轨迹 JSON / gallery.html / manifest.json） */
+  data?: Uint8Array;
+  /** 照片原图的绝对路径（与 data 二选一） */
+  absPath?: string;
+  size: number;
 }
 
 export class Exporter {
@@ -148,24 +191,30 @@ export class Exporter {
     return Exporter.pack(picked, areaId, areaName, `_所选${picked.length}条`);
   }
 
-  /** 打包成 zip 字节（不落盘、不弹对话框）：「存到手机」与「上传到云端」都从这里拿数据 */
-  private static async build(tracks: Track[], areaId: number, areaName: string,
-    nameTag: string): Promise<ExportPackage> {
+  /**
+   * 收集要打进包的东西：**只算元数据与照片大小（stat），不读照片字节**。
+   * 分成 collect + writeZip 两步，是因为「保存到手机」这条路径要用系统对话框先拿到目标 URI
+   * （而对话框又要求先给文件名），所以包名与内容要能在写之前定下来。
+   */
+  private static async collect(tracks: Track[], areaId: number, areaName: string): Promise<PackJob[]> {
     const ctx = Ctx.ui;
     if (!ctx) {
       throw new Error('应用未就绪，稍后再试');
     }
     const filesDir = ctx.filesDir;
     const encoder = new util.TextEncoder();
-    const entries: ZipEntry[] = [];
+    const jobs: PackJob[] = [];
     const manifestTracks: ManifestTrack[] = [];
     const galleryTracks: GalleryTrack[] = [];
     let totalPhotos = 0;
+    // 区域清单：把节点的 areaId 翻成建筑名写进导出数据与照片索引页
+    const areas: Area[] = await Store.listAreas();
 
     for (const t of tracks) {
       const pts: TrackPoint[] = await Store.listPoints(t.id);
       const tags: TrackTag[] = await Store.listTrackTags(t.id);
       const photos: TrackPhoto[] = await Store.listTrackPhotos(t.id);
+      const trackAreaId: number = t.areaId === undefined ? UNASSIGNED_AREA_ID : t.areaId;
 
       const ep: ExportPoint[] = pts.map((p: TrackPoint) => {
         return {
@@ -184,37 +233,46 @@ export class Exporter {
         } as ExportPoint;
       });
       const et: ExportTag[] = tags.map((g: TrackTag) => {
+        // 节点所属建筑（节点自己写的区域优先，没写就沿用轨迹的区域）
+        const nodeAreaId: number = effectiveAreaId(g, trackAreaId);
+        let areaName: string = '';
+        for (const a of areas) {
+          if (a.id === nodeAreaId) {
+            areaName = a.name;
+            break;
+          }
+        }
         return {
           timeMs: g.timeMs,
           tagType: g.tagType,
           note: g.note,
           floor: g.floor,
+          area: areaName,
           latitude: g.latitude,
           longitude: g.longitude,
           altitude: g.altitude,
+          accuracy: g.accuracy,
+          pressureHpa: g.pressureHpa,
           headingDeg: g.headingDeg
         } as ExportTag;
       });
 
-      // 先读照片原图进包，缺失的标记 fileMissing（在 JSON 与索引页里体现）
+      // 照片：这里**只 stat 出大小**（不读字节），真正的读与写交给 writeZip 一张一张地做。
+      // 缺失的仍然标记 fileMissing（在 JSON 与索引页里体现），只是不再尝试把内容读进来。
       const photoOk: boolean[] = [];
       for (const ph of photos) {
         const abs = `${filesDir}/${ph.filePath}`;
-        let ok = false;
+        let size = -1;
         try {
-          const stat = fs.statSync(abs);
-          const f = fs.openSync(abs, fs.OpenMode.READ_ONLY);
-          const buf = new ArrayBuffer(stat.size);
-          fs.readSync(f.fd, buf);
-          fs.closeSync(f);
-          entries.push({
-            name: ph.filePath,
-            data: new Uint8Array(buf)
-          } as ZipEntry);
-          ok = true;
+          size = fs.statSync(abs).size;
         } catch (e) {
+          size = -1;
         }
+        const ok: boolean = size > 0;
         photoOk.push(ok);
+        if (ok) {
+          jobs.push({ name: ph.filePath, absPath: abs, size: size } as PackJob);
+        }
       }
       const eph: ExportPhoto[] = photos.map((ph: TrackPhoto, i: number) => {
         // 节点照用 tagIndex 指向 tags[] 里的节点（比对内部 id 更稳定，便于外部消费）
@@ -258,10 +316,8 @@ export class Exporter {
         photos: eph
       };
       const trackFile = `track_${t.id}_${safeFileName(t.name)}.json`;
-      entries.push({
-        name: trackFile,
-        data: encoder.encodeInto(JSON.stringify(trackJson))
-      } as ZipEntry);
+      const trackBytes: Uint8Array = encoder.encodeInto(JSON.stringify(trackJson));
+      jobs.push({ name: trackFile, data: trackBytes, size: trackBytes.length } as PackJob);
 
       manifestTracks.push({
         file: trackFile,
@@ -279,16 +335,17 @@ export class Exporter {
         pointCount: t.pointCount,
         tags: tags,
         photos: photos,
-        photoMissing: photoOk
+        photoMissing: photoOk,
+        areas: areas,
+        trackAreaId: trackAreaId
       } as GalleryTrack);
       totalPhotos += photos.length;
     }
 
     // 照片索引页：解压后用浏览器打开即可逐张核对照片、位置、朝向、备注
-    entries.push({
-      name: 'gallery.html',
-      data: encoder.encodeInto(Exporter.buildGalleryHtml(areaName, areaId, galleryTracks, totalPhotos))
-    } as ZipEntry);
+    const galleryBytes: Uint8Array =
+      encoder.encodeInto(Exporter.buildGalleryHtml(areaName, areaId, galleryTracks, totalPhotos));
+    jobs.push({ name: 'gallery.html', data: galleryBytes, size: galleryBytes.length } as PackJob);
 
     const areaInfo: ExportAreaInfo = {
       id: areaId === UNASSIGNED_AREA_ID ? null : areaId,
@@ -302,17 +359,129 @@ export class Exporter {
       gallery: 'gallery.html',
       tracks: manifestTracks
     };
-    entries.push({
-      name: 'manifest.json',
-      data: encoder.encodeInto(JSON.stringify(manifest))
-    } as ZipEntry);
+    const manifestBytes: Uint8Array = encoder.encodeInto(JSON.stringify(manifest));
+    jobs.push({ name: 'manifest.json', data: manifestBytes, size: manifestBytes.length } as PackJob);
 
-    const zipBuffer: ArrayBuffer = buildZip(entries);
+    return jobs;
+  }
+
+  /** 建议的包名。**要在开始写之前就定下来** —— 系统保存对话框得先知道文件名 */
+  private static zipName(areaName: string, nameTag: string): string {
     const d = new Date();
     const stamp =
       `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}_${pad2(d.getHours())}${pad2(d.getMinutes())}`;
-    const zipName = `${safeFileName(`${areaName}${nameTag}`)}_${stamp}.zip`;
-    return { name: zipName, data: zipBuffer } as ExportPackage;
+    return `${safeFileName(`${areaName}${nameTag}`)}_${stamp}.zip`;
+  }
+
+  /**
+   * 写满一段字节（实现搬到 ZipWriter.writeAllTo 了，这样那段逻辑能在离线沙箱里
+   * 用一个「只肯写几个字节」的假 sink 真跑一遍）。
+   * 这里只负责把 writeSync 包成 sink：**不传 WriteOptions.offset** —— 它到底是文件位置
+   * 还是缓冲区位置语义两说，显式切片在任何一种解释下都对（与 TrackMedia.copyByChunks 同一套做法）。
+   */
+  private static writeAll(fd: number, data: Uint8Array): void {
+    writeAllTo((bytes: ArrayBuffer): number => fs.writeSync(fd, bytes), data);
+  }
+
+  /**
+   * 读一张照片进内存（一次只读一个，立刻写出去）。
+   * **必须走 `readFileExact`**：它按 statSync 的大小一次读满，不做倍增拷贝 ——
+   * 真机 appfreeze 的堆栈就指在老的 `readAll` 上（一层层搬运，一张 4 MB 照片搬 1500 万个元素）。
+   */
+  private static readPhotoBytes(absPath: string): Uint8Array {
+    return readFileExact(absPath);
+  }
+
+  /**
+   * 把主线程让出来一次（0 ms 定时器）。
+   *
+   * ⚠️ **这一步不是可选的。** 打包是重活（读 17.5 MB + 逐字节算 CRC + 写出去）。全同步跑完
+   * 再返回的话主线程会连续阻塞十几秒，系统的看门狗（hicollie）在 6 秒时就判定
+   * **THREAD_BLOCK_6S** 把应用冻住 —— 真机 appfreeze 日志里 `Reason:` 就是这个，堆栈正好指在
+   * `readAll → readFileBytes → writeZip → stageForUpload` 上（见开发日志第二十七轮）。
+   * 每个条目之间让一次，事件队列才有机会排空、看门狗的计时器才会重置；
+   * 队列里排队的 vSync 任务是 VIP 优先级，会先于这个 0 ms 定时器被执行，所以界面上的
+   * 进度也真的能画出来（全同步的话 @State 改了也不会重绘）。
+   */
+  private static breathe(): Promise<void> {
+    return new Promise<void>((resolve: () => void) => {
+      setTimeout(() => {
+        resolve();
+      }, 0);
+    });
+  }
+
+  /**
+   * 把任务表**流式**写进目标文件，返回写出的字节数。
+   *
+   * 内存峰值 = 一张照片；每个条目之间让出主线程（见 breathe 的说明）。
+   * 老实现是「全部照片读进内存 + 再拼一份整包字节」，一个 5 张照片的轨迹包就有 17.5 MB，
+   * 勾几条轨迹就是两三百 MB（见开发日志第二十六轮）。
+   *
+   * 半截失败会把目标文件删掉：留一个半截的包，下次很容易被当成「上次成功的包」。
+   */
+  private static async writeZip(jobs: PackJob[], dstUri: string,
+    onProgress: ((p: PackProgress) => void) | undefined): Promise<number> {
+    const encoder = new util.TextEncoder();
+    const now: number = Date.now();
+    // 预估总字节：照片大小是 stat 出来的真实值，文件名与头几十字节，估得够准
+    let bytesTotal = 0;
+    for (const j of jobs) {
+      bytesTotal += j.size + 30 + j.name.length * 3 + 46;
+    }
+    hilog.info(0x0000, 'RoomMarker', '打包开始：%{public}d 个条目，约 %{public}d 字节',
+      jobs.length, bytesTotal);
+
+    const dst = fs.openSync(dstUri, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+    let total = 0;
+    try {
+      const z: ZipStream = new ZipStream();
+      let done = 0;
+      for (const j of jobs) {
+        // 先报再干：万一这一步崩了，界面上留下的最后一条消息就是正在处理的这个文件
+        if (onProgress) {
+          onProgress({
+            done: done + 1, total: jobs.length, bytes: z.writtenBytes(),
+            bytesTotal: bytesTotal, note: j.name
+          } as PackProgress);
+          // 让出主线程，界面才有机会把上面这条进度画出来（也顺手重置看门狗计时）
+          await Exporter.breathe();
+        }
+        const data: Uint8Array = j.absPath !== undefined
+          ? Exporter.readPhotoBytes(j.absPath)
+          : (j.data as Uint8Array);
+        const nb: Uint8Array = encoder.encodeInto(j.name);
+        Exporter.writeAll(dst.fd, z.entryHeader(nb, data.length, crc32(data), now));
+        Exporter.writeAll(dst.fd, data);
+        hilog.info(0x0000, 'RoomMarker', '打包 %{public}d/%{public}d %{public}s (%{public}d 字节)',
+          done + 1, jobs.length, j.name, data.length);
+        done++;
+      }
+      Exporter.writeAll(dst.fd, z.finish());
+      total = z.totalBytes();
+    } catch (e) {
+      try {
+        fs.unlinkSync(dstUri);
+      } catch (err) {
+      }
+      throw e as Error;
+    } finally {
+      fs.closeSync(dst);
+    }
+    // 对账：落盘大小必须等于流自己算出来的总长。缓存目录里 stat 一定可信；
+    // 而「保存到手机」那条走的是系统文档 URI，stat 有可能不被支持 —— 那就跳过校验，
+    // **绝不能因为校验做不了就把一次成功的导出报成失败**。
+    let size = -1;
+    try {
+      size = fs.statSync(dstUri).size;
+    } catch (e) {
+      size = -1;
+    }
+    if (size >= 0 && size !== total) {
+      throw new Error(`打包落盘大小不对：${size}/${total} 字节`);
+    }
+    hilog.info(0x0000, 'RoomMarker', '打包完成：%{public}d 字节', size >= 0 ? size : total);
+    return size >= 0 ? size : total;
   }
 
   /** 打包后走系统保存对话框存到手机（区域页「导出所选」用的就是这条） */
@@ -322,17 +491,18 @@ export class Exporter {
     if (!ctx) {
       throw new Error('应用未就绪，稍后再试');
     }
-    const pkg: ExportPackage = await Exporter.build(tracks, areaId, areaName, nameTag);
+    const zipName: string = Exporter.zipName(areaName, nameTag);
+    const jobs: PackJob[] = await Exporter.collect(tracks, areaId, areaName);
 
     const docPicker = new picker.DocumentViewPicker(ctx);
     const opt = new picker.DocumentSaveOptions();
-    opt.newFileNames = [pkg.name];
+    opt.newFileNames = [zipName];
     const uris: string[] = await docPicker.save(opt);
-    const uri = uris[0];
-    const dst = fs.openSync(uri, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE);
-    fs.writeSync(dst.fd, pkg.data);
-    fs.closeSync(dst);
-    return pkg.name;
+    if (uris.length === 0) {
+      throw new Error('没有选择保存位置，导出已取消');
+    }
+    await Exporter.writeZip(jobs, uris[0], undefined);
+    return zipName;
   }
 
   /**
@@ -343,7 +513,7 @@ export class Exporter {
    * 所以这里刻意不建子目录，直接用 cacheDir 根。
    */
   static async stageForUpload(trackIds: number[], areaId: number,
-    areaName: string): Promise<StagedUpload> {
+    areaName: string, onProgress: ((p: PackProgress) => void) | undefined): Promise<StagedUpload> {
     if (trackIds.length === 0) {
       throw new Error('请先勾选要上传的轨迹');
     }
@@ -358,13 +528,11 @@ export class Exporter {
     if (!ctx) {
       throw new Error('应用未就绪，稍后再试');
     }
-    const pkg: ExportPackage = await Exporter.build(picked, areaId, areaName,
-      `_所选${picked.length}条`);
-    const cachePath = `${ctx.cacheDir}/${pkg.name}`;
-    const f = fs.openSync(cachePath, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
-    fs.writeSync(f.fd, pkg.data);
-    fs.closeSync(f);
-    return { name: pkg.name, cachePath: cachePath } as StagedUpload;
+    const zipName: string = Exporter.zipName(areaName, `_所选${picked.length}条`);
+    const jobs: PackJob[] = await Exporter.collect(picked, areaId, areaName);
+    const cachePath = `${ctx.cacheDir}/${zipName}`;
+    const bytes: number = await Exporter.writeZip(jobs, cachePath, onProgress);
+    return { name: zipName, cachePath: cachePath, bytes: bytes } as StagedUpload;
   }
 
   /** 上传结束后清掉缓存里的临时包（源数据还在库里，需要时可重新打包，不会丢东西） */
@@ -381,6 +549,20 @@ export class Exporter {
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;');
+  }
+
+  /** 节点所属建筑区域名（照片索引页用；没有区域就显示「未分区」） */
+  private static nodeAreaName(t: GalleryTrack, g: TrackTag): string {
+    const id: number = effectiveAreaId(g, t.trackAreaId);
+    if (id <= 0) {
+      return '未分区';
+    }
+    for (const a of t.areas) {
+      if (a.id === id) {
+        return a.name;
+      }
+    }
+    return `区域 #${id}`;
   }
 
   private static buildGalleryHtml(areaName: string, areaId: number, tracks: GalleryTrack[],
@@ -470,8 +652,12 @@ export class Exporter {
           out.push(`<div class="note">${g.note.length > 0 ? Exporter.esc(g.note) : '（未填写备注）'}</div>`);
           out.push('<dl>');
           out.push(`<dt>楼层</dt><dd>${g.floor.length > 0 ? Exporter.esc(g.floor) : '未填写'}</dd>`);
+          out.push(`<dt>区域</dt><dd>${Exporter.esc(Exporter.nodeAreaName(t, g))}</dd>`);
           out.push(`<dt>时间</dt><dd>${fmtFullTime(g.timeMs)}</dd>`);
           out.push(`<dt>经纬度</dt><dd>${coordText(g.latitude, g.longitude)}</dd>`);
+          out.push(`<dt>定位精度</dt><dd>${g.accuracy !== undefined
+            ? `±${g.accuracy.toFixed(0)} m${g.accuracy > 50 ? '（网络定位，不可当实测坐标）' : ''}`
+            : '未记录精度（2026-09-29 之前的节点）'}</dd>`);
           out.push(`<dt>高度</dt><dd>${g.altitude !== undefined ? `${g.altitude.toFixed(1)} m` : '无海拔数据（室内 GPS 常缺失）'}</dd>`);
           out.push(`<dt>朝向</dt><dd>${g.headingDeg !== undefined ? `${g.headingDeg.toFixed(0)}° ${compassDir(g.headingDeg)}` : '无朝向数据'}</dd>`);
           if (k >= 0) {

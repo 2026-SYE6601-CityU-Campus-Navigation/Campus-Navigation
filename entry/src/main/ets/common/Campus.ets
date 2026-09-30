@@ -44,6 +44,24 @@ function normKey(s: string): string {
   return s.replace(/\s+/g, '').toLowerCase();
 }
 
+/** 这个区域名是不是城大的正式校园建筑（用于把老区域一次性归到「城市大学」分类） */
+export function isCampusBuildingName(name: string): boolean {
+  const k: string = normKey(name);
+  if (k.length === 0) {
+    return false;
+  }
+  for (const b of cityuBuildings()) {
+    const full: string = normKey(b.name);
+    // 建筑名形如「AC1 楊建文學術樓」，第一段就是学生日常用的简称
+    const short: string = normKey(b.name.split(' ')[0]);
+    // 认全名，也认「简称开头」（用户可能把区域改叫「AC1」或「AC1 三楼」）
+    if (k === full || k.startsWith(short)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /** 要新建的建筑区域（同名区域跳过，所以重复导入是安全的） */
 export function planBuildingAreas(existingNames: string[]): CampusBuilding[] {
   const taken: string[] = [];

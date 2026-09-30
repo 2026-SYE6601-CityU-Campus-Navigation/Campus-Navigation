@@ -3,7 +3,9 @@ import { Area, Track } from '../data/Entities';
 import { Store } from '../data/Store';
 import { TrackRecorder } from '../sensors/TrackRecorder';
 import { RecordingBanner } from './RecordingBanner';
-import { defaultTrackName, fmtDuration, fmtTime } from '../common/Utils';
+import {
+  ROW_DAY, TrackDayGroup, TrackRow, dayKey, defaultTrackName, flattenTracksByDay, groupTracksByDay
+} from '../common/Utils';
 import { Theme } from '../common/Theme';
 import { PillButton, ThickButton } from '../common/Widgets';
 
@@ -131,12 +133,21 @@ export struct TrackListPage {
   onOpenTrack: (id: number) => void = (id: number) => {
   };
   @State tracks: Track[] = [];
+  /** 按天分组后摊平成的行序列（分组头也是一行）；渲染只认它，见 Utils.flattenTracksByDay */
+  @State rows: TrackRow[] = [];
+  @State dayCount: number = 0;
   @State heartbeat: number = 0;
   private timer: number = -1;
+  /** 上一次算分组时所在的「天」：跨过午夜要重算，否则昨晚的轨迹会一直挂着「今天」 */
+  private lastDayKey: string = '';
 
   private reload = (): void => {
     Store.listTracks().then((t: Track[]) => {
       this.tracks = t;
+      this.lastDayKey = dayKey(Date.now());
+      const groups: TrackDayGroup[] = groupTracksByDay(t, Date.now());
+      this.dayCount = groups.length;
+      this.rows = flattenTracksByDay(groups);
     });
   };
 
@@ -145,6 +156,11 @@ export struct TrackListPage {
     Store.subscribe(this.reload);
     this.timer = setInterval(() => {
       this.heartbeat++;
+      // 「今天 / 昨天」是按天算出来的标题，不重算的话页面开着过夜就会显示错（比如昨天的轨迹
+      // 一直写着「今天」）。这个定时器本来就在跑，顺带比一下日期几乎不花钱。
+      if (dayKey(Date.now()) !== this.lastDayKey) {
+        this.reload();
+      }
     }, 500);
   }
 
@@ -168,15 +184,35 @@ export struct TrackListPage {
     customStyle: false
   });
 
-  private trackSub(t: Track): string {
-    const end = t.endedAt !== undefined ? t.endedAt : t.startedAt;
-    const area = t.areaName !== undefined ? t.areaName : '未分区';
-    let s =
-      `[${area}] ${fmtTime(t.startedAt)} · 时长 ${fmtDuration(Math.floor((end - t.startedAt) / 1000))} · ${t.pointCount} 点`;
-    if (t.endedAt === undefined) {
-      s += ' · 进行中';
-    }
-    return s;
+  /**
+   * 删除一条轨迹前先确认（用户 2026-09-29 要求）。
+   * 原来点了立刻就删、没有任何提示，采样点和照片都是**一起删掉且找不回来**的，
+   * 手指一滑就没了，所以这里必须拦一道。
+   */
+  private confirmDelete(id: number, name: string, sub: string): void {
+    promptAction.showDialog({
+      title: '删除这条轨迹？',
+      message: `「${name}」\n${sub}\n采样点、节点和照片会一起删掉，删了就找不回来了。`,
+      buttons: [
+        { text: '取消', color: Theme.INK2 },
+        { text: '删除', color: Theme.DANGER }
+      ]
+    }).then((res: promptAction.ShowDialogSuccessResponse) => {
+      if (res.index !== 1) {
+        return;
+      }
+      // 正在记录的那条不能删：记录线程还在往里写采样点，删掉会留下一条写不进去的野记录
+      if (TrackRecorder.get().getTrackId() === id) {
+        promptAction.showToast({ message: '这条轨迹正在记录中，先停止记录再删' });
+        return;
+      }
+      Store.deleteTrack(id).then(() => {
+        promptAction.showToast({ message: '已删除轨迹' });
+      }).catch((e: Error) => {
+        promptAction.showToast({ message: `删除失败：${e.message}` });
+      });
+    }).catch(() => {
+    });
   }
 
   build() {
@@ -191,7 +227,9 @@ export struct TrackListPage {
           })
           Column({ space: 2 }) {
             Text('全部轨迹').fontSize(Theme.F_TITLE).fontWeight(FontWeight.Bold).fontColor(Theme.INK)
-            Text(`共 ${this.tracks.length} 条`)
+            Text(this.dayCount > 0
+              ? `共 ${this.tracks.length} 条 · ${this.dayCount} 天`
+              : '共 0 条')
               .fontSize(Theme.F_META)
               .fontColor(Theme.INK2)
           }.layoutWeight(1).alignItems(HorizontalAlign.Start)
@@ -207,40 +245,53 @@ export struct TrackListPage {
             Blank()
           }.width('100%').layoutWeight(1)
         } else {
+          // 按天分组：分组头也是一行（去掉了粘性头，理由见 Utils.flattenTracksByDay）
           List() {
-            ForEach(this.tracks, (t: Track) => {
+            ForEach(this.rows, (r: TrackRow) => {
               ListItem() {
-                Row({ space: 10 }) {
-                  Column({ space: 3 }) {
-                    Text(t.name)
-                      .fontSize(15)
-                      .fontWeight(FontWeight.Medium)
+                if (r.kind === ROW_DAY) {
+                  Row({ space: 8 }) {
+                    Text(r.label)
+                      .fontSize(Theme.F_SECTION)
+                      .fontWeight(FontWeight.Bold)
                       .fontColor(Theme.INK)
-                      .width('100%')
-                      .maxLines(1)
-                      .textOverflow({ overflow: TextOverflow.Ellipsis })
-                    Text(this.trackSub(t)).fontSize(Theme.F_META).fontColor(Theme.INK2).width('100%')
-                  }.layoutWeight(1)
-                  PillButton({
-                    label: '删除',
-                    kind: 'danger',
-                    onTap: (): void => {
-                      Store.deleteTrack(t.id).then(() => {
-                        promptAction.showToast({ message: '已删除轨迹' });
-                      });
-                    }
+                    Text(`${r.count} 条`).fontSize(Theme.F_META).fontColor(Theme.INK2)
+                    Blank()
+                  }
+                  .width('100%')
+                  .padding({ left: 20, right: 20, top: 12, bottom: 8 })
+                } else {
+                  Row({ space: 10 }) {
+                    Column({ space: 3 }) {
+                      Text(r.name)
+                        .fontSize(15)
+                        .fontWeight(FontWeight.Medium)
+                        .fontColor(Theme.INK)
+                        .width('100%')
+                        .maxLines(1)
+                        .textOverflow({ overflow: TextOverflow.Ellipsis })
+                      Text(r.sub).fontSize(Theme.F_META).fontColor(Theme.INK2).width('100%')
+                    }.layoutWeight(1)
+                    PillButton({
+                      label: '删除',
+                      kind: 'danger',
+                      onTap: (): void => {
+                        this.confirmDelete(r.id, r.name, r.sub);
+                      }
+                    })
+                  }
+                  .width('100%')
+                  .padding({ left: 16, right: 12, top: 12, bottom: 12 })
+                  .backgroundColor(Theme.CARD)
+                  .borderRadius(18)
+                  .border({ width: 2, color: Theme.LINE })
+                  .margin({ left: 16, right: 16, bottom: 10 })
+                  .onClick(() => {
+                    this.onOpenTrack(r.id);
                   })
                 }
-                .width('100%')
-                .padding({ left: 16, right: 12, top: 12, bottom: 12 })
-                .backgroundColor(Theme.CARD)
-                .borderRadius(18)
-                .border({ width: 2, color: Theme.LINE })
-                .margin({ left: 16, right: 16, bottom: 10 })
-              }.onClick(() => {
-                this.onOpenTrack(t.id);
-              })
-            }, (t: Track) => t.id + '')
+              }
+            }, (r: TrackRow) => r.key)
           }
           .width('100%')
           .layoutWeight(1)

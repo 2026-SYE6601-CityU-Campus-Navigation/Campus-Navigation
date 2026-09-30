@@ -55,6 +55,10 @@ track_*.json
 # Local upload-service receive directory
 /tools/uploads/
 
+# 三维预览图（由真实轨迹渲染而来，含具体地点与住址附近的轨迹形态；公开仓库不入库）
+# 2026-09-30 用户确认：这些图只作本机文档，答辩时本机打开。
+/设计素材/3D预览/
+
 # ---------- Python cache ----------
 __pycache__/
 *.pyc

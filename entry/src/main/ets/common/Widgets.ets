@@ -5,6 +5,9 @@ import { Theme } from './Theme';
  * 因此只适合放在浅色底上（深色底上会看不见，那边就只用文字）。
  */
 export function tagIconRes(iconKey: string): Resource | undefined {
+  if (iconKey === '大门') {
+    return $r('app.media.ic_maingate');
+  }
   if (iconKey === '楼梯') {
     return $r('app.media.ic_stairs');
   }
@@ -25,6 +28,15 @@ export function tagIconRes(iconKey: string): Resource | undefined {
   }
   if (iconKey === '教室') {
     return $r('app.media.ic_class');
+  }
+  if (iconKey === '食堂') {
+    return $r('app.media.ic_canteen');
+  }
+  if (iconKey === '商店') {
+    return $r('app.media.ic_shop');
+  }
+  if (iconKey === '其他室内') {
+    return $r('app.media.ic_indoor');
   }
   if (iconKey === 'floor') {
     return $r('app.media.ic_layers');

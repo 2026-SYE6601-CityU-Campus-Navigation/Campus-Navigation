@@ -2,8 +2,10 @@ import { relationalStore } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { Area, Marker, PhotoKind, Room, Track, TrackPhoto, TrackPhotoDraft, TrackPoint, TrackPointDraft, TrackTag } from './Entities';
+import { Area, Marker, PhotoKind, Room, Track, TrackPhoto, TrackPhotoDraft, TrackPoint, TrackPointDraft, TrackTag, AREA_CATEGORY_CITYU, AREA_CATEGORY_TEST } from './Entities';
 import { Ctx } from '../common/Utils';
+import { isCampusBuildingName } from '../common/Campus';
+import { FloorGuess, FloorObservation, FloorProbe, matchFloor, observationFrom } from '../common/FloorMatch';
 
 export type DataListener = () => void;
 
@@ -34,6 +36,7 @@ export class Store {
         `CREATE TABLE IF NOT EXISTS rooms (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           name TEXT NOT NULL,
+          code TEXT NOT NULL DEFAULT '',
           note TEXT NOT NULL DEFAULT '',
           areaId INTEGER,
           latitude REAL,
@@ -93,6 +96,7 @@ export class Store {
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           name TEXT NOT NULL,
           note TEXT NOT NULL DEFAULT '',
+          category TEXT NOT NULL DEFAULT '城市大学',
           createdAt INTEGER NOT NULL
         )`
       );
@@ -104,9 +108,13 @@ export class Store {
           tagType TEXT NOT NULL,
           note TEXT NOT NULL DEFAULT '',
           floor TEXT NOT NULL DEFAULT '',
+          areaId INTEGER,
           latitude REAL,
           longitude REAL,
           altitude REAL,
+          accuracy REAL,
+          pressureHpa REAL,
+          markerId INTEGER,
           headingDeg REAL,
           createdAt INTEGER NOT NULL
         )`
@@ -132,6 +140,21 @@ export class Store {
         `CREATE TABLE IF NOT EXISTS settings (
           k TEXT PRIMARY KEY,
           v TEXT NOT NULL DEFAULT ''
+        )`
+      );
+      // 2026-09-29：楼层高度索引（用户要求「检测到在案的楼层高度就默认那个楼层」）。
+      // 按「区域 + 楼层」一行，记下最近一次在该层采到的气压/海拔 —— 采集下一个节点时
+      // 拿当前高度来比，落在容差内就把楼层名带出来（仍可手改）。判定逻辑在 common/FloorMatch。
+      // 全新表，不需要 ALTER：两条路径都靠这条 CREATE 建出来。
+      await rdb.executeSql(
+        `CREATE TABLE IF NOT EXISTS floor_heights (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          areaId INTEGER NOT NULL,
+          floorKey TEXT NOT NULL,
+          floor TEXT NOT NULL,
+          pressureHpa REAL,
+          altitude REAL,
+          updatedAt INTEGER NOT NULL
         )`
       );
       // 旧库迁移：列已存在时 ALTER 会报错，忽略即可
@@ -161,6 +184,63 @@ export class Store {
       // 2026-09-28：节点增加手填楼层（用户确认不做高度估算），老节点默认空字符串
       try {
         await rdb.executeSql(`ALTER TABLE track_tags ADD COLUMN floor TEXT NOT NULL DEFAULT ''`);
+      } catch (e) {
+      }
+      // 2026-09-29：房间增加「教室代码」（教室名单里代码与名称是两样东西）；
+      // 老房间没有代码，默认空字符串（列表里就只显示名称，与升级前一致）
+      try {
+        await rdb.executeSql(`ALTER TABLE rooms ADD COLUMN code TEXT NOT NULL DEFAULT ''`);
+      } catch (e) {
+      }
+      // 2026-09-29：节点增加归属区域（跨楼轨迹里节点各归各楼）；老节点为 NULL = 沿用轨迹的区域
+      try {
+        await rdb.executeSql('ALTER TABLE track_tags ADD COLUMN areaId INTEGER');
+      } catch (e) {
+      }
+      // 2026-09-29：节点增加气压（楼层高度索引的室内依据）与绑定标记 id（事后改绑房间时用它精确删旧标记）。
+      // 老节点两条都是 NULL：气压没有就不参与高度比对吧（FloorMatch 里 undefined 直接跳过），
+      // markerId 没有则改绑时无法自动清理旧房间里的标记，界面对老数据会如实提示。
+      try {
+        await rdb.executeSql('ALTER TABLE track_tags ADD COLUMN pressureHpa REAL');
+      } catch (e) {
+      }
+      try {
+        await rdb.executeSql('ALTER TABLE track_tags ADD COLUMN markerId INTEGER');
+      } catch (e) {
+      }
+      // 2026-09-29（第二十五轮）：节点增加定位精度。老节点为 NULL = 没记过精度，
+      // 口径与采样点一致（**没记精度不算差**），所以老数据不会突然被当成推算位置。
+      try {
+        await rdb.executeSql('ALTER TABLE track_tags ADD COLUMN accuracy REAL');
+      } catch (e) {
+      }
+      // 2026-09-29：区域分两大类（城市大学 / 测试集）。老区域的默认值刻意给**空串**，
+      // 好让下面那段一次性归类只处理「还没分类」的行；归完就不再有空串 → 天然幂等，
+      // 也不会覆盖用户之后手改过的分类。全新安装走 CREATE 的默认值『城市大学』。
+      try {
+        await rdb.executeSql(`ALTER TABLE areas ADD COLUMN category TEXT NOT NULL DEFAULT ''`);
+      } catch (e) {
+      }
+      // 一次性归类：老库里的区域按名字判定 —— 11 栋正式建筑 → 城市大学，其余 → 测试集
+      // （用户 2026-09-29 确认的口径：库里已有的自己的测试区域要落到「测试集」）
+      try {
+        const ars: relationalStore.ResultSet =
+          await rdb.querySql(`SELECT id, name FROM areas WHERE category = ''`);
+        const areaIds: number[] = [];
+        const areaNames: string[] = [];
+        while (ars.goToNextRow()) {
+          areaIds.push(ars.getLong(ars.getColumnIndex('id')));
+          areaNames.push(ars.getString(ars.getColumnIndex('name')));
+        }
+        ars.close();
+        for (let i = 0; i < areaIds.length; i++) {
+          const catBucket: relationalStore.ValuesBucket = {
+            'category': isCampusBuildingName(areaNames[i]) ? AREA_CATEGORY_CITYU : AREA_CATEGORY_TEST
+          };
+          const pb: relationalStore.RdbPredicates = new relationalStore.RdbPredicates('areas');
+          pb.equalTo('id', areaIds[i]);
+          await rdb.update(catBucket, pb);
+        }
       } catch (e) {
       }
       Store.rdb = rdb;
@@ -245,7 +325,7 @@ export class Store {
       return [];
     }
     const rs: relationalStore.ResultSet = await Store.rdb.querySql(
-      `SELECT a.id, a.name, a.note, a.createdAt,
+      `SELECT a.id, a.name, a.note, a.category, a.createdAt,
         (SELECT COUNT(*) FROM rooms r WHERE r.areaId = a.id) AS roomCount,
         (SELECT COUNT(*) FROM tracks t WHERE t.areaId = a.id) AS trackCount
        FROM areas a ORDER BY a.createdAt ASC`
@@ -256,6 +336,7 @@ export class Store {
         id: rs.getLong(rs.getColumnIndex('id')),
         name: rs.getString(rs.getColumnIndex('name')),
         note: rs.getString(rs.getColumnIndex('note')),
+        category: Store.optString(rs, 'category') ?? '',
         createdAt: rs.getLong(rs.getColumnIndex('createdAt')),
         roomCount: rs.getLong(rs.getColumnIndex('roomCount')),
         trackCount: rs.getLong(rs.getColumnIndex('trackCount'))
@@ -273,7 +354,7 @@ export class Store {
     const p: relationalStore.RdbPredicates = new relationalStore.RdbPredicates('areas');
     p.equalTo('id', id);
     const rs: relationalStore.ResultSet = await Store.rdb.query(
-      p, ['id', 'name', 'note', 'createdAt']
+      p, ['id', 'name', 'note', 'category', 'createdAt']
     );
     let area: Area | undefined = undefined;
     if (rs.goToNextRow()) {
@@ -281,6 +362,7 @@ export class Store {
         id: rs.getLong(rs.getColumnIndex('id')),
         name: rs.getString(rs.getColumnIndex('name')),
         note: rs.getString(rs.getColumnIndex('note')),
+        category: Store.optString(rs, 'category') ?? '',
         createdAt: rs.getLong(rs.getColumnIndex('createdAt')),
         roomCount: 0,
         trackCount: 0
@@ -290,16 +372,30 @@ export class Store {
     return area;
   }
 
-  static async insertArea(name: string, note: string): Promise<number> {
+  /** 新建区域，返回行 id。category 为两大类之一（城市大学 / 测试集），空串按「城市大学」落库 */
+  static async insertArea(name: string, note: string, category: string): Promise<number> {
     await Store.ready;
     const bucket: relationalStore.ValuesBucket = {
       'name': name,
       'note': note,
+      'category': category.length > 0 ? category : AREA_CATEGORY_CITYU,
       'createdAt': Date.now()
     };
     const rowId: number = await Store.rdb!.insert('areas', bucket);
     Store.notify();
     return rowId > 0 ? rowId : await Store.lastRowId('areas');
+  }
+
+  /** 改区域的分类（城市大学 / 测试集）。分类是自动归类出来的，给用户一个反悔的入口 */
+  static async updateAreaCategory(id: number, category: string): Promise<void> {
+    await Store.ready;
+    const bucket: relationalStore.ValuesBucket = {
+      'category': category.length > 0 ? category : AREA_CATEGORY_CITYU
+    };
+    const p: relationalStore.RdbPredicates = new relationalStore.RdbPredicates('areas');
+    p.equalTo('id', id);
+    await Store.rdb!.update(bucket, p);
+    Store.notify();
   }
 
   /** 删除区域：区域内的房间与轨迹全部移入未分区（不丢数据） */
@@ -362,13 +458,14 @@ export class Store {
     }
     p.orderByAsc('createdAt');
     const rs: relationalStore.ResultSet = await Store.rdb.query(
-      p, ['id', 'name', 'note', 'areaId', 'latitude', 'longitude', 'altitude', 'pressureHpa', 'createdAt']
+      p, ['id', 'name', 'code', 'note', 'areaId', 'latitude', 'longitude', 'altitude', 'pressureHpa', 'createdAt']
     );
     const out: Room[] = [];
     while (rs.goToNextRow()) {
       out.push({
         id: rs.getLong(rs.getColumnIndex('id')),
         name: rs.getString(rs.getColumnIndex('name')),
+        code: Store.optString(rs, 'code') ?? '',
         note: rs.getString(rs.getColumnIndex('note')),
         areaId: Store.optLong(rs, 'areaId'),
         latitude: Store.optDouble(rs, 'latitude'),
@@ -390,13 +487,14 @@ export class Store {
     const p: relationalStore.RdbPredicates = new relationalStore.RdbPredicates('rooms');
     p.equalTo('id', id);
     const rs: relationalStore.ResultSet = await Store.rdb.query(
-      p, ['id', 'name', 'note', 'areaId', 'latitude', 'longitude', 'altitude', 'pressureHpa', 'createdAt']
+      p, ['id', 'name', 'code', 'note', 'areaId', 'latitude', 'longitude', 'altitude', 'pressureHpa', 'createdAt']
     );
     let room: Room | undefined = undefined;
     if (rs.goToNextRow()) {
       room = {
         id: rs.getLong(rs.getColumnIndex('id')),
         name: rs.getString(rs.getColumnIndex('name')),
+        code: Store.optString(rs, 'code') ?? '',
         note: rs.getString(rs.getColumnIndex('note')),
         areaId: Store.optLong(rs, 'areaId'),
         latitude: Store.optDouble(rs, 'latitude'),
@@ -573,8 +671,8 @@ export class Store {
     p.orderByAsc('timeMs');
     const rs: relationalStore.ResultSet = await Store.rdb.query(
       p,
-      ['id', 'trackId', 'timeMs', 'tagType', 'note', 'floor', 'latitude', 'longitude', 'altitude',
-        'headingDeg', 'createdAt']
+      ['id', 'trackId', 'timeMs', 'tagType', 'note', 'floor', 'areaId', 'latitude', 'longitude',
+        'altitude', 'accuracy', 'pressureHpa', 'markerId', 'headingDeg', 'createdAt']
     );
     const out: TrackTag[] = [];
     while (rs.goToNextRow()) {
@@ -586,9 +684,13 @@ export class Store {
         tagType: rs.getString(rs.getColumnIndex('tagType')),
         note: rs.getString(rs.getColumnIndex('note')),
         floor: floor === undefined ? '' : floor,
+        areaId: Store.optLong(rs, 'areaId'),
         latitude: Store.optDouble(rs, 'latitude'),
         longitude: Store.optDouble(rs, 'longitude'),
         altitude: Store.optDouble(rs, 'altitude'),
+        accuracy: Store.optDouble(rs, 'accuracy'),
+        pressureHpa: Store.optDouble(rs, 'pressureHpa'),
+        markerId: Store.optLong(rs, 'markerId'),
         headingDeg: Store.optDouble(rs, 'headingDeg'),
         createdAt: rs.getLong(rs.getColumnIndex('createdAt'))
       });
@@ -634,11 +736,12 @@ export class Store {
 
   // ---------- 写入 ----------
 
-  /** 新建房间，返回行 id。areaId 为 0/undefined 时归入未分区 */
-  static async insertRoom(name: string, note: string, areaId?: number): Promise<number> {
+  /** 新建房间，返回行 id。areaId 为 0/undefined 时归入未分区；code 为教室代码（普通房间留空） */
+  static async insertRoom(name: string, note: string, areaId?: number, code?: string): Promise<number> {
     await Store.ready;
     const bucket: relationalStore.ValuesBucket = {
       'name': name,
+      'code': code ?? '',
       'note': note,
       'createdAt': Date.now()
     };
@@ -685,9 +788,11 @@ export class Store {
     Store.notify();
   }
 
+  /** 往房间写一条标记，返回行 id（节点要用它记住「我绑的是哪条标记」，见 syncTagMarker） */
   static async insertMarker(roomId: number, name: string, markerType: string,
     latitude?: number, longitude?: number, altitude?: number, accuracy?: number,
-    pressureHpa?: number, magneticX?: number, magneticY?: number, magneticZ?: number): Promise<void> {
+    pressureHpa?: number, magneticX?: number, magneticY?: number,
+    magneticZ?: number): Promise<number> {
     await Store.ready;
     const bucket: relationalStore.ValuesBucket = {
       'roomId': roomId,
@@ -703,7 +808,51 @@ export class Store {
     Store.putOpt(bucket, 'magneticX', magneticX);
     Store.putOpt(bucket, 'magneticY', magneticY);
     Store.putOpt(bucket, 'magneticZ', magneticZ);
-    await Store.rdb!.insert('markers', bucket);
+    const rowId: number = await Store.rdb!.insert('markers', bucket);
+    Store.notify();
+    return rowId > 0 ? rowId : await Store.lastRowId('markers');
+  }
+
+  /** 按 id 取一条标记（编辑节点时要据此判断「旧标记在哪个房间」，才能决定原地更新还是搬走） */
+  static async getMarker(id: number): Promise<Marker | undefined> {
+    await Store.ready;
+    if (!Store.rdb || id <= 0) {
+      return undefined;
+    }
+    const p: relationalStore.RdbPredicates = new relationalStore.RdbPredicates('markers');
+    p.equalTo('id', id);
+    const rs: relationalStore.ResultSet = await Store.rdb.query(p,
+      ['id', 'roomId', 'name', 'markerType', 'latitude', 'longitude', 'altitude', 'accuracy',
+        'pressureHpa', 'createdAt']);
+    let out: Marker | undefined = undefined;
+    if (rs.goToNextRow()) {
+      out = {
+        id: rs.getLong(rs.getColumnIndex('id')),
+        roomId: rs.getLong(rs.getColumnIndex('roomId')),
+        name: rs.getString(rs.getColumnIndex('name')),
+        markerType: rs.getString(rs.getColumnIndex('markerType')),
+        latitude: Store.optDouble(rs, 'latitude'),
+        longitude: Store.optDouble(rs, 'longitude'),
+        altitude: Store.optDouble(rs, 'altitude'),
+        accuracy: Store.optDouble(rs, 'accuracy'),
+        pressureHpa: Store.optDouble(rs, 'pressureHpa'),
+        createdAt: rs.getLong(rs.getColumnIndex('createdAt'))
+      };
+    }
+    rs.close();
+    return out;
+  }
+
+  /** 改标记的名字与类型（备注从「西侧铁门」改成「东侧铁门」时，房间页那条标记也要跟着变） */
+  static async updateMarkerLabel(id: number, name: string, markerType: string): Promise<void> {
+    await Store.ready;
+    const bucket: relationalStore.ValuesBucket = {
+      'name': name,
+      'markerType': markerType
+    };
+    const p: relationalStore.RdbPredicates = new relationalStore.RdbPredicates('markers');
+    p.equalTo('id', id);
+    await Store.rdb!.update(bucket, p);
     Store.notify();
   }
 
@@ -791,10 +940,13 @@ export class Store {
     Store.notify();
   }
 
-  /** 新建节点（原「标签」），返回行 id —— 节点照要用它做 tagId 关联。floor 为手填楼层，可留空 */
+  /** 新建节点（原「标签」），返回行 id —— 节点照要用它做 tagId 关联。
+   *  floor 为手填楼层（可留空）；areaId 为节点归属的区域（-1 = 不分区域，存 NULL）；
+   *  pressureHpa 为打点时的气压、accuracy 为打点时的定位精度（参数放在最后，
+   *  是为了不打乱既有调用点的位置语义）。 */
   static async insertTrackTag(trackId: number, timeMs: number, tagType: string, note: string,
-    floor: string, latitude?: number, longitude?: number, altitude?: number,
-    headingDeg?: number): Promise<number> {
+    floor: string, areaId: number, latitude?: number, longitude?: number, altitude?: number,
+    headingDeg?: number, pressureHpa?: number, accuracy?: number): Promise<number> {
     await Store.ready;
     const bucket: relationalStore.ValuesBucket = {
       'trackId': trackId,
@@ -804,13 +956,157 @@ export class Store {
       'floor': floor,
       'createdAt': Date.now()
     };
+    if (areaId > 0) {
+      bucket['areaId'] = areaId;
+    }
     Store.putOpt(bucket, 'latitude', latitude);
     Store.putOpt(bucket, 'longitude', longitude);
     Store.putOpt(bucket, 'altitude', altitude);
+    Store.putOpt(bucket, 'pressureHpa', pressureHpa);
     Store.putOpt(bucket, 'headingDeg', headingDeg);
+    Store.putOpt(bucket, 'accuracy', accuracy);
     const rowId: number = await Store.rdb!.insert('track_tags', bucket);
     Store.notify();
     return rowId > 0 ? rowId : await Store.lastRowId('track_tags');
+  }
+
+  /**
+   * 事后修正一个节点（用户 2026-09-29 要求「标记错了要能在 APP 里改」）。
+   * 只改**填错的那几栏**：类型 / 备注 / 楼层 / 区域。位置（经纬度/海拔/气压）是实测值，
+   * 本轮不提供修改（用户确认「先不做改位置」），保持数据的可信度。
+   * areaId <= 0 会写成 NULL（＝沿用轨迹的区域），所以「改成未分区」是真能改回去的。
+   */
+  static async updateTrackTag(id: number, tagType: string, note: string, floor: string,
+    areaId: number): Promise<void> {
+    await Store.ready;
+    const bucket: relationalStore.ValuesBucket = {
+      'tagType': tagType,
+      'note': note,
+      'floor': floor,
+      'areaId': areaId > 0 ? areaId : null
+    };
+    const p: relationalStore.RdbPredicates = new relationalStore.RdbPredicates('track_tags');
+    p.equalTo('id', id);
+    await Store.rdb!.update(bucket, p);
+    Store.notify();
+  }
+
+  /** 把节点记住的「我绑的是哪条房间标记」写回去 */
+  static async setTagMarker(tagId: number, markerId: number): Promise<void> {
+    await Store.ready;
+    if (markerId <= 0) {
+      return;
+    }
+    const bucket: relationalStore.ValuesBucket = { 'markerId': markerId };
+    const p: relationalStore.RdbPredicates = new relationalStore.RdbPredicates('track_tags');
+    p.equalTo('id', tagId);
+    await Store.rdb!.update(bucket, p);
+    // 不改动列表展示，无需 notify
+  }
+
+  /**
+   * 让「房间标记」跟上节点的最新状态（记录节点时、以及事后编辑节点时都走这里）。
+   *
+   * 为什么要有它：门 / 门禁节点绑房间并不是直接写进节点字段，而是**往那个房间插一条标记**。
+   * 于是「把节点改绑到另一个房间」必须先把旧房间里那条标记删掉，否则房间页会一直挂着一条
+   * 指向错误位置的标记。用户 2026-09-29 明确要能修正「区域 / 绑定房间选错」的节点。
+   *
+   * 三种情况：
+   *  - roomId <= 0（不绑 / 解绑）：删掉旧标记（如果有）
+   *  - roomId > 0 且旧标记就在这个房间：**原地改**名字与类型 —— 标记上还挂着精度、磁力三轴这些
+   *    只在标记里存的采样值（室内定位研究要用），删了重建就没了
+   *  - roomId > 0 且换了房间（或本来没标记）：删旧建新，并把新标记 id 记回节点
+   *
+   * 返回现在的标记 id（0 = 现在没有标记）。
+   */
+  static async syncTagMarker(tagId: number, markerId: number, roomId: number, name: string,
+    markerType: string, latitude?: number, longitude?: number, altitude?: number,
+    pressureHpa?: number): Promise<number> {
+    await Store.ready;
+    if (roomId <= 0) {
+      if (markerId > 0) {
+        await Store.deleteMarker(markerId);
+      }
+      return 0;
+    }
+    if (markerId > 0) {
+      const old: Marker | undefined = await Store.getMarker(markerId);
+      if (old !== undefined && old.roomId === roomId) {
+        await Store.updateMarkerLabel(markerId, name, markerType);
+        return markerId;
+      }
+      if (old !== undefined) {
+        await Store.deleteMarker(markerId);
+      }
+    }
+    const newId: number = await Store.insertMarker(roomId, name, markerType,
+      latitude, longitude, altitude, undefined, pressureHpa);
+    await Store.setTagMarker(tagId, newId);
+    return newId;
+  }
+
+  // ---------- 楼层高度索引 ----------
+
+  /**
+   * 学一条「这个区域的这一层 ≈ 这个高度」。同区域同层只留最近一次（先删后插），
+   * 所以反复采同一层不会越积越多，也会随最近一次实测更新。
+   * areaId <= 0（未分区）不学：未分区会把好几栋楼混在一起，学出来的是错的高度。
+   */
+  static async learnFloorHeight(areaId: number, floor: string, probe: FloorProbe): Promise<void> {
+    await Store.ready;
+    if (areaId <= 0) {
+      return;
+    }
+    if (probe.pressureHpa === undefined && probe.altitude === undefined) {
+      return;
+    }
+    // 归一化键由 observationFrom 统一算（与 Track3D 的图层分组同一套口径）
+    const obs: FloorObservation = observationFrom(floor, probe, Date.now());
+    if (obs.key.length === 0) {
+      return;
+    }
+    const del: relationalStore.RdbPredicates = new relationalStore.RdbPredicates('floor_heights');
+    del.equalTo('areaId', areaId);
+    del.equalTo('floorKey', obs.key);
+    await Store.rdb!.delete(del);
+    const bucket: relationalStore.ValuesBucket = {
+      'areaId': areaId,
+      'floorKey': obs.key,
+      'floor': obs.floor,
+      'updatedAt': obs.updatedAt
+    };
+    Store.putOpt(bucket, 'pressureHpa', obs.pressureHpa);
+    Store.putOpt(bucket, 'altitude', obs.altitude);
+    await Store.rdb!.insert('floor_heights', bucket);
+    // 楼层索引只在采集时读，不影响列表页展示，无需 notify
+  }
+
+  /** 按当前实测高度推测楼层（只认这个区域里已经记过的楼层）；猜不出来时 floor 为空串 */
+  static async matchFloorHeight(areaId: number, probe: FloorProbe): Promise<FloorGuess> {
+    await Store.ready;
+    const empty: FloorGuess = { floor: '', by: '' };
+    if (!Store.rdb || areaId <= 0) {
+      return empty;
+    }
+    if (probe.pressureHpa === undefined && probe.altitude === undefined) {
+      return empty;
+    }
+    const p: relationalStore.RdbPredicates = new relationalStore.RdbPredicates('floor_heights');
+    p.equalTo('areaId', areaId);
+    const rs: relationalStore.ResultSet = await Store.rdb.query(p,
+      ['floorKey', 'floor', 'pressureHpa', 'altitude', 'updatedAt']);
+    const obs: FloorObservation[] = [];
+    while (rs.goToNextRow()) {
+      obs.push({
+        key: rs.getString(rs.getColumnIndex('floorKey')),
+        floor: rs.getString(rs.getColumnIndex('floor')),
+        pressureHpa: Store.optDouble(rs, 'pressureHpa'),
+        altitude: Store.optDouble(rs, 'altitude'),
+        updatedAt: rs.getLong(rs.getColumnIndex('updatedAt'))
+      });
+    }
+    rs.close();
+    return matchFloor(obs, probe, Date.now());
   }
 
   /** 插入一条照片记录（节点照带 kind='node' 与 tagId，风景照 kind='scenery'），返回行 id */

@@ -61,6 +61,12 @@ export class Theme {
   static readonly CANVAS_FLOOR_STROKE: string = 'rgba(30,127,194,.28)';
   static readonly CANVAS_FLOOR_TEXT: string = 'rgba(20,88,138,.75)';
   static readonly CANVAS_LABEL_BG: string = 'rgba(255,255,255,.96)';
+  /**
+   * 定位精度偏弱的那几段轨迹线的透明度（2026-09-30 第二十九轮）。
+   * 依据：室内自报 13~16 m 的点，两次走同一条走廊位置会差 20~30 m —— 不该和实测点长得一样。
+   * 线和阴影都靠它区分；改这里一处即可。
+   */
+  static readonly CANVAS_WEAK_ALPHA: number = 0.3;
 
   // ---------- 圆角 ----------
   static readonly R_CARD: number = 22;

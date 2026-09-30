@@ -1,10 +1,10 @@
 import { promptAction } from '@kit.ArkUI';
-import { Area, Room, Track } from '../data/Entities';
+import { Area, AREA_CATEGORY_CITYU, Room, Track, areaCategoryOptions } from '../data/Entities';
 import { Store, UNASSIGNED_AREA_ID } from '../data/Store';
 import { TrackRecorder } from '../sensors/TrackRecorder';
 import { RecordingBanner } from './RecordingBanner';
 import { StartTrackDialog } from './TrackList';
-import { Exporter, StagedUpload } from '../common/Exporter';
+import { Exporter, PackProgress, StagedUpload } from '../common/Exporter';
 import { UploadProgress, UploadResult, UploadTarget, Uploader } from '../common/Uploader';
 import { fmtDuration, fmtTime } from '../common/Utils';
 import { Theme } from '../common/Theme';
@@ -17,14 +17,15 @@ const UPLOAD_TOKEN_KEY = 'upload_token';
 @CustomDialog
 struct AddRoomDialog {
   controller?: CustomDialogController;
-  onSave?: (name: string, note: string) => void;
+  onSave?: (name: string, code: string, note: string) => void;
   @State name: string = '';
+  @State code: string = '';
   @State note: string = '';
 
   build() {
     Column({ space: 14 }) {
       Text('添加房间').fontSize(19).fontWeight(FontWeight.Bold).width('100%').fontColor(Theme.INK)
-      TextInput({ placeholder: '房间名称（如：301 会议室）' })
+      TextInput({ placeholder: '房间名称（如：301 会议室 / 讲堂 1）' })
         .fontSize(13.5)
         .backgroundColor(Theme.CARD_SOFT)
         .borderRadius(14)
@@ -32,6 +33,15 @@ struct AddRoomDialog {
         .padding({ left: 12, right: 12, top: 10, bottom: 10 })
         .onChange((v: string) => {
           this.name = v;
+        })
+      TextInput({ placeholder: '教室代码（选填，如 LT-1 / P4702 / 6-213）' })
+        .fontSize(13.5)
+        .backgroundColor(Theme.CARD_SOFT)
+        .borderRadius(14)
+        .border({ width: 2, color: Theme.LINE })
+        .padding({ left: 12, right: 12, top: 10, bottom: 10 })
+        .onChange((v: string) => {
+          this.code = v;
         })
       TextInput({ placeholder: '备注（选填）' })
         .fontSize(13.5)
@@ -42,6 +52,8 @@ struct AddRoomDialog {
         .onChange((v: string) => {
           this.note = v;
         })
+      Text('加完就留在这个区域页，不再自动跳进房间；想进去点列表里那一行。')
+        .fontSize(Theme.F_META).fontColor(Theme.INK2).width('100%')
       Row({ space: 10 }) {
         Column() {
           ThickButton({
@@ -56,18 +68,86 @@ struct AddRoomDialog {
 
         Column() {
           ThickButton({
-            label: '保存并打开',
+            label: '保存',
             kind: 'primary',
             compact: true,
             disabled: this.name.trim().length === 0,
             onTap: (): void => {
               this.controller?.close();
               if (this.onSave) {
-                this.onSave(this.name.trim(), this.note.trim());
+                this.onSave(this.name.trim(), this.code.trim(), this.note.trim());
               }
             }
           })
         }.layoutWeight(1.4)
+      }.width('100%')
+    }
+    .padding(18)
+    .width('100%')
+    .backgroundColor(Theme.CARD)
+  }
+}
+
+/** 改区域分类：固定两类，点一下选中。分类是自动归类出来的，这个对话框是给用户反悔用的 */
+@CustomDialog
+struct AreaCategoryDialog {
+  controller?: CustomDialogController;
+  onSave?: (category: string) => void;
+  /** 当前分类（空串按「城市大学」显示） */
+  current: string = '';
+  @State picked: string = AREA_CATEGORY_CITYU;
+
+  aboutToAppear(): void {
+    this.picked = this.current.length > 0 ? this.current : AREA_CATEGORY_CITYU;
+  }
+
+  build() {
+    Column({ space: 14 }) {
+      Text('改分类').fontSize(19).fontWeight(FontWeight.Bold).width('100%').fontColor(Theme.INK)
+      Text('「城市大学」放正式的校园建筑数据；「测试集」放试采集、试标签、试拍照的区域。首页按这两类分区显示。')
+        .fontSize(Theme.F_META).fontColor(Theme.INK2).width('100%')
+      Row({ space: 10 }) {
+        ForEach(areaCategoryOptions(), (c: string) => {
+          Text(c)
+            .fontSize(13.5)
+            .fontWeight(FontWeight.Bold)
+            .textAlign(TextAlign.Center)
+            .layoutWeight(1)
+            .padding({ top: 10, bottom: 10 })
+            .fontColor(this.picked === c ? Theme.ON_RED : Theme.INK)
+            .backgroundColor(this.picked === c ? Theme.RED : Theme.CARD_SOFT)
+            .borderRadius(14)
+            .border({ width: 2, color: this.picked === c ? Theme.RED_DEEP : Theme.LINE })
+            .onClick(() => {
+              this.picked = c;
+            })
+        }, (c: string) => c)
+      }.width('100%')
+      Row({ space: 10 }) {
+        Column() {
+          ThickButton({
+            label: '取消',
+            kind: 'ghost',
+            compact: true,
+            onTap: (): void => {
+              this.controller?.close();
+            }
+          })
+        }.layoutWeight(1)
+
+        Column() {
+          ThickButton({
+            label: '保存',
+            kind: 'primary',
+            compact: true,
+            onTap: (): void => {
+              this.controller?.close();
+              if (this.onSave) {
+                this.onSave(this.picked);
+              }
+            }
+          })
+        }.layoutWeight(1.2)
       }.width('100%')
     }
     .padding(18)
@@ -188,12 +268,19 @@ export struct AreaDetailPage {
     return this.areaId === UNASSIGNED_AREA_ID;
   }
 
+  /** 区域分类名（空串按「城市大学」显示，与首页分区的口径保持一致） */
+  private areaCategoryLabel(): string {
+    const c: string = this.area ? this.area.category : '';
+    return c.length > 0 ? c : AREA_CATEGORY_CITYU;
+  }
+
   private reload = (): void => {
     if (this.isUnassigned()) {
       this.area = {
         id: UNASSIGNED_AREA_ID,
         name: '未分区',
         note: '升级前的旧数据，尚未归属任何区域',
+        category: '',
         roomCount: 0,
         trackCount: 0,
         createdAt: 0
@@ -232,13 +319,15 @@ export struct AreaDetailPage {
 
   private addRoomDialog: CustomDialogController = new CustomDialogController({
     builder: AddRoomDialog({
-      onSave: (name: string, note: string): void => {
+      onSave: (name: string, code: string, note: string): void => {
         const n = name.trim();
         if (n.length === 0) {
           return;
         }
-        Store.insertRoom(n, note.trim(), this.areaId).then((id: number) => {
-          this.onOpenRoom(id);
+        // 加完不再自动跳进房间详情页（用户 2026-09-29 实测反馈：那个跳转是多余的），
+        // 只提示一句；真想进去点列表里那一行即可。
+        Store.insertRoom(n, note.trim(), this.areaId, code.trim()).then(() => {
+          promptAction.showToast({ message: `已添加房间「${n}」` });
         });
       }
     }),
@@ -261,6 +350,27 @@ export struct AreaDetailPage {
       customStyle: false
     });
     this.startDialog.open();
+  }
+
+  // ---------- 改分类 ----------
+
+  private categoryDialog: CustomDialogController | null = null;
+
+  /** 同样按点击时机动态构造：this.area 是异步加载的，成员初始化阶段拿不到 */
+  private openCategoryDialog(): void {
+    const cur: string = this.areaCategoryLabel();
+    this.categoryDialog = new CustomDialogController({
+      builder: AreaCategoryDialog({
+        current: cur,
+        onSave: (c: string): void => {
+          Store.updateAreaCategory(this.areaId, c).then(() => {
+            promptAction.showToast({ message: `分类已改为「${c}」` });
+          });
+        }
+      }),
+      customStyle: false
+    });
+    this.categoryDialog.open();
   }
 
   // ---------- 导出 ----------
@@ -392,9 +502,14 @@ export struct AreaDetailPage {
     this.lastUploadMsg = '正在打包…';
     const name: string = this.areaName();
     let staged: StagedUpload | undefined = undefined;
-    Exporter.stageForUpload(ids, this.areaId, name).then((s: StagedUpload) => {
+    Exporter.stageForUpload(ids, this.areaId, name, (p: PackProgress) => {
+      // 打包进度：既是「数据在动」的反馈，也是**打包中途出问题时的唯一线索**
+      // （闪退会把 toast 一起带走，界面上留下的最后一条消息就指着正在处理的那个文件和大致的包大小）
+      this.lastUploadMsg = `正在打包 ${p.done}/${p.total}：${p.note}`
+        + `（约 ${(p.bytesTotal / 1048576).toFixed(1)} MB）`;
+    }).then((s: StagedUpload) => {
       staged = s;
-      this.lastUploadMsg = `正在上传 ${s.name}…`;
+      this.lastUploadMsg = `正在上传 ${s.name}（${(s.bytes / 1048576).toFixed(1)} MB）…`;
       const target: UploadTarget = {
         url: this.uploadUrl,
         token: this.uploadToken,
@@ -418,7 +533,7 @@ export struct AreaDetailPage {
       this.uploading = false;
       this.uploadPct = -1;
       this.lastUploadOk = false;
-      this.lastUploadMsg = `打包失败：${e.message}`;
+      this.lastUploadMsg = `打包/上传失败：${e.message}`;
       promptAction.showToast({ message: this.lastUploadMsg });
     });
   }
@@ -482,11 +597,20 @@ export struct AreaDetailPage {
               .fontColor(Theme.INK)
               .maxLines(1)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
-            Text(`房间 ${this.rooms.length} · 轨迹 ${this.tracks.length}`)
+            Text(this.isUnassigned()
+              ? `房间 ${this.rooms.length} · 轨迹 ${this.tracks.length}`
+              : `${this.areaCategoryLabel()} · 房间 ${this.rooms.length} · 轨迹 ${this.tracks.length}`)
               .fontSize(Theme.F_META)
               .fontColor(Theme.INK2)
           }.layoutWeight(1).alignItems(HorizontalAlign.Start)
           if (!this.isUnassigned()) {
+            // 点它改分类（自动归类万一归错了，这里是反悔入口）
+            PillButton({
+              label: this.areaCategoryLabel(),
+              onTap: (): void => {
+                this.openCategoryDialog();
+              }
+            })
             PillButton({
               label: '删除',
               kind: 'danger',
@@ -520,7 +644,9 @@ export struct AreaDetailPage {
               ForEach(this.rooms, (r: Room) => {
                 Row({ space: 10 }) {
                   Column({ space: 3 }) {
-                    Text(r.name).fontSize(15).fontWeight(FontWeight.Medium).fontColor(Theme.INK)
+                    // 教室代码放在名称前面（课表上写的就是代码，学生按代码找）
+                    Text(r.code.length > 0 ? `${r.code} · ${r.name}` : r.name)
+                      .fontSize(15).fontWeight(FontWeight.Medium).fontColor(Theme.INK)
                       .width('100%')
                     Text(r.note.length > 0 ? r.note : '点击打开，可添加前门/后门等标记')
                       .fontSize(Theme.F_META)
