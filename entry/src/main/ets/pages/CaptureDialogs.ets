@@ -1,6 +1,9 @@
-import { Area, NodeDraft, Room, Track, TrackTag, roomBoundTagTypes, trackTagNames, TrackTagType } from '../data/Entities';
+import {
+  Area, NodeDraft, Room, TrackTag, roomBoundTagTypes, trackTagNames, TrackTagType
+} from '../data/Entities';
 import { Store, UNASSIGNED_AREA_ID } from '../data/Store';
 import { cityuFloors } from '../common/Campus';
+import { InheritedNode, previousNode } from '../common/NodeInherit';
 import { effectiveAreaId } from '../common/RoomPlan';
 import { FloorGuess, FloorProbe, guessLabel } from '../common/FloorMatch';
 import { floorKey } from '../common/Track3D';
@@ -23,14 +26,19 @@ const DIALOG_BODY_MAX: number = 460;
  * 流程方向：先填后拍，对话框只往外抛回调，不需要把外部数据传进来。
  *
  * 区域（2026-09-29 新增，用户实测后提出）：一条轨迹可以从校外一路穿过好几栋楼，
- * 轨迹只挂一个区域不够用。所以每个节点自己带区域：默认沿用这条轨迹的区域，
- * 途中换楼就在这儿点一下切过去——节点各归各楼，「生成房间」也按这个分楼建。
+ * 轨迹只挂一个区域不够用。所以每个节点自己带区域。
+ * **2026-10-08 改：默认值不再来自「这条轨迹的区域」（轨迹已经不归属区域了，会跨楼），
+ * 改成继承**上一个节点**的区域**（见 common/NodeInherit），跨楼时在这儿点一下切过去
+ * —— 节点各归各楼，「生成房间」也按这个分楼建。
  *
  * 楼层：给一排城大常用楼层（LG/F、G/F、1/F…）点一下即可，也可以直接在输入框手填。
- * 另外（2026-09-29 用户新增要求）：**如果这一栋楼里已经记过某个楼层的高度，就按当前实测高度
- * 自动带出那个楼层**（"检测到在案的楼层高度就默认那个楼层，当然也支持手动修改"）。
- * 只在这栋楼的楼层高度索引里查得到、且用户还没自己填过时才带 —— 查不到就一个字都不猜。
- * 判定逻辑全在 common/FloorMatch（纯函数），这里只负责拿实测快照、显示提示。
+ * **2026-10-08 改：楼层同样继承上一个节点**。这带来一个必须讲清的分工：
+ *  - 有上一个节点 → 楼层栏是**继承**来的，气压/高度推测降级成一行**提示**（点了才改用），
+ *    绝不悄悄覆盖 —— 与「修改节点」对话框同一条口径；
+ *  - 没有上一个节点（这条轨迹的第一个节点）→ 沿用原来的行为：这栋楼如果记过某个楼层的
+ *    高度，就按当前实测高度把它**直接带出来**（2026-09-29 用户要求）。
+ * 为什么继承要压过推测：在楼里连打几个节点，上一个节点通常就在几十米内，
+ * 而「按高度推测」依赖的是这栋楼里**以前**记过的高度，跨楼/跨天时反而更容易错。
  * 房间（2026-09-29 放宽）：标记「门 / 门禁」时**可选**绑一个房间；绑了就照旧往该房间插一条
  * 「前门 / 后门」标记，不绑就是一个归属该区域的建筑大门 / 出入口（原来强制必绑，
  * 结果被逼着在每栋楼里建一个假的「大门房间」，跟「区域＝一栋楼」的模型打架）。
@@ -52,9 +60,20 @@ export struct TrackTagDialog {
   };
   @State note: string = '';
   @State floor: string = '';
-  /** 按高度推测出来的提示文案（空串 = 没推测出来，或用户已经自己填了）；只是提示，随时可改 */
-  @State floorGuess: string = '';
-  /** 当前填的楼层是不是「自动带出来的」（用户一改就不再算自动带出的） */
+  /**
+   * 楼层栏下面那行说明（空串 = 不显示）。两种来源：
+   *  - 「按高度带出来」的解释（这一栏本来是空的，被推测填上了）；
+   *  - 「按高度看更像 X」的提示（floorPick 非空时这行可点）。
+   */
+  @State floorNote: string = '';
+  /**
+   * 按高度推测出来的**候选**楼层：非空时上面那行可点，点了才改用。
+   * 只在楼层栏**已经有值**（多半是继承来的）时才出现 —— 此时高度只作提示，不覆盖。
+   */
+  @State floorPick: string = '';
+  /** 区域栏下面那行说明：这个默认值继承自哪个节点（别让默认值来路不明） */
+  @State inheritNote: string = '';
+  /** 当前填的楼层是不是「自动带出来的」（继承来的或按高度带出来的）；用户一改就不再算 */
   private floorAuto: boolean = false;
   /** 默认选中类型 = 类型网格的第一项（与改版顺序保持一致） */
   @State tagType: string = TrackTagType.MAIN_GATE;
@@ -71,7 +90,9 @@ export struct TrackTagDialog {
     // 所以进来先把「每个节点各不相同」的几栏显式复位，免得沿用上一个节点填过的值。
     this.note = '';
     this.floor = '';
-    this.floorGuess = '';
+    this.floorNote = '';
+    this.floorPick = '';
+    this.inheritNote = '';
     this.floorAuto = false;
     this.tagType = TrackTagType.MAIN_GATE;
     this.selRoom = 0;
@@ -79,39 +100,60 @@ export struct TrackTagDialog {
     if (tid < 0) {
       return;
     }
-    Store.getTrack(tid).then((t: Track | undefined) => {
-      const trackArea: number = (t !== undefined && t.areaId !== undefined) ? t.areaId : -1;
-      return Store.listAreas().then((list: Area[]) => {
-        const names: string[] = [];
-        const ids: number[] = [];
-        if (trackArea <= 0) {
-          // 这条轨迹还没分区（旧数据）：给一个「未分区」选项，默认选它，不偷偷改归属
-          names.push('（未分区）');
-          ids.push(-1);
-        }
-        for (const a of list) {
-          names.push(a.name);
-          ids.push(a.id);
-        }
-        this.areaNames = names;
-        this.areaIds = ids;
-        let idx = 0;
-        for (let i = 0; i < ids.length; i++) {
-          if (ids[i] === trackArea) {
-            idx = i;
-            break;
-          }
-        }
-        this.selAreaIdx = idx;
-        this.reloadRooms();
-        this.suggestFloor();
+    // 2026-10-08：不再去问「这条轨迹属于哪栋楼」——轨迹已经不归属区域了（Track 里那个
+    // 字段已经删掉，原来这里读 t.areaId 已经编译不过）。默认值改成继承上一个节点；
+    // 没有上一个节点就是「未分区」。「（未分区）」这一项因此**常驻**第一项：
+    // 记录时也得有个地方能明确表示「这个点不属于任何一栋楼」（比如在校外马路上）。
+    Store.listAreas().then((list: Area[]) => {
+      const names: string[] = ['（未分区）'];
+      const ids: number[] = [-1];
+      for (const a of list) {
+        names.push(a.name);
+        ids.push(a.id);
+      }
+      this.areaNames = names;
+      this.areaIds = ids;
+      return Store.listTrackTags(tid).then((tags: TrackTag[]) => {
+        this.applyInherit(previousNode(tags));
       });
     });
   }
 
   /**
-   * 按「这栋楼已经记过的楼层高度」推测当前节点在哪一层，并带出来。
-   * 只在用户还没自己填过（或之前那次是自动带出来的）时才动这一栏 —— 绝不覆盖手填的值。
+   * 把上一个节点的楼层 / 区域作为默认值填进来。第一个节点（没有上一个）时什么都不做 ——
+   * 此时楼层栏留空，于是看起来是空的就按高度推测（见 suggestFloor）。
+   */
+  private applyInherit(prev: InheritedNode): void {
+    let idx = 0;
+    if (prev.exists && prev.areaId > 0) {
+      for (let i = 0; i < this.areaIds.length; i++) {
+        if (this.areaIds[i] === prev.areaId) {
+          idx = i;
+          break;
+        }
+      }
+    }
+    this.selAreaIdx = idx;
+    if (prev.exists) {
+      this.floor = prev.floor;
+      // floorAuto = true：这一栏是「带出来的」，用户在输入框里一动就交还给用户
+      this.floorAuto = true;
+      const where: string = idx > 0 ? this.areaNames[idx] : '未分区';
+      const fl: string = prev.floor.length > 0 ? prev.floor : '楼层没填';
+      this.inheritNote = `楼层与建筑沿用上一个节点「${prev.tagType}」（${where} · ${fl}）；换楼或换层在这儿改。`;
+    }
+    this.reloadRooms();
+    this.suggestFloor();
+  }
+
+  /**
+   * 按「这栋楼已经记过的楼层高度」推测当前节点在哪一层。
+   *
+   * 2026-10-08 起分两种情形（因为楼层现在多半是**继承**来的）：
+   *  - 楼层栏还是空的（这条轨迹的第一个节点）：沿用原来的行为，直接带出来；
+   *  - 楼层栏已经有值：高度**只作提示**，写成一行可点的候选，点了才改用。绝不悄悄覆盖 ——
+   *    与「修改节点」对话框完全同一条口径。
+   * 用户自己手填过（floorAuto=false 且非空）则一律不打扰。
    * 查不到就什么都不做（FloorMatch 的口径是「宁可不说，也不猜」）。
    */
   private suggestFloor(): void {
@@ -120,26 +162,52 @@ export struct TrackTagDialog {
     }
     const aId: number = this.currentAreaId();
     if (aId <= 0) {
-      this.floorGuess = '';
+      this.floorNote = '';
+      this.floorPick = '';
       return;
     }
     const probe: FloorProbe = this.floorProbeProvider();
     Store.matchFloorHeight(aId, probe).then((g: FloorGuess) => {
       if (g.floor.length === 0) {
-        this.floorGuess = '';
+        this.floorNote = '';
+        this.floorPick = '';
+        return;
+      }
+      if (this.floor.length > 0) {
+        if (floorKey(g.floor) === floorKey(this.floor)) {
+          // 与现在这一栏一致：没什么好提示的，不留噪音
+          this.floorNote = '';
+          this.floorPick = '';
+          return;
+        }
+        this.floorPick = g.floor;
+        this.floorNote = `${guessLabel(g)}　—　点这里改用 ${g.floor}`;
         return;
       }
       this.floor = g.floor;
       this.floorAuto = true;
-      this.floorGuess = guessLabel(g);
+      this.floorPick = '';
+      this.floorNote = guessLabel(g);
     });
   }
 
-  /** 用户自己动了楼层这一栏：以后就不再自动带出（他的填写优先） */
+  /** 用户自己动了楼层这一栏：以后就不再自动带出/覆盖（他的填写优先） */
   private setFloorManually(v: string): void {
     this.floor = v;
     this.floorAuto = false;
-    this.floorGuess = '';
+    this.floorNote = '';
+    this.floorPick = '';
+  }
+
+  /** 采纳那行按高度推测出来的候选楼层 */
+  private pickSuggestedFloor(): void {
+    if (this.floorPick.length === 0) {
+      return;
+    }
+    this.floor = this.floorPick;
+    this.floorAuto = true;
+    this.floorNote = '已按高度改成上面这个楼层；与你填的不一样时以你填的为准。';
+    this.floorPick = '';
   }
 
   /** 当前选中的区域 id；-1 = 未分区 */
@@ -265,7 +333,7 @@ export struct TrackTagDialog {
             }, (name: string) => name)
           }.width('100%')
 
-          // 区域：默认沿用这条轨迹的区域，跨楼时在这里切（节点各归各楼）
+          // 区域：默认继承上一个节点的建筑，跨楼时在这里切（节点各归各楼）
           Text('所在建筑 / 区域（跨楼时在这儿切换）').fontSize(Theme.F_META).fontColor(Theme.INK2).width('100%')
           if (this.areaNames.length === 0) {
             Text('还没有区域：先在首页导入城大建筑或新建区域，这个节点会先记成未分区。')
@@ -279,9 +347,17 @@ export struct TrackTagDialog {
               .onSelect((index: number) => {
                 this.selAreaIdx = index;
                 this.reloadRooms();
-                // 换了楼就按那栋楼已记过的楼层高度重新带一次（手填过的不会被覆盖）
+                // 换了楼就按那栋楼已记过的楼层高度重新推一次（手填过的不会被覆盖；
+                // 继承来的楼层也不会被覆盖，只会降级成一行「点这里改用」的提示）
                 this.suggestFloor();
               })
+            // 这个默认值是从哪儿来的，说清楚 —— 不然用户以为是自己上次填的
+            if (this.inheritNote.length > 0) {
+              Text(this.inheritNote)
+                .fontSize(Theme.F_META)
+                .fontColor(Theme.INK3)
+                .width('100%')
+            }
           }
 
           TextInput({ placeholder: '备注（如：西侧楼梯口，上去是四楼平台）' })
@@ -320,9 +396,25 @@ export struct TrackTagDialog {
             .onChange((v: string) => {
               this.setFloorManually(v);
             })
-          // 自动带出来的楼层：明说这是推测、可以改（空串则整行不显示）
-          if (this.floorGuess.length > 0) {
-            Text(`${this.floorGuess}　—　它来自这栋楼里已经记过的楼层高度`)
+          // 楼层栏下面那行：要么是「点这里改用 X」的候选（可点），要么只是说明文字。
+          // 分成两栏（floorPick / floorNote）而不是把两种情况塞进一句话：可点与不可点
+          // 在界面上必须看得出来，否则用户不知道那行能按。
+          //
+          // ⚠️ 2026-10-08 真机编译报错：这里原来写了 `.textDecoration({type: TextDecorationType.Underline})`
+          // —— **ArkUI 里没有 `textDecoration` 这个属性**（那是 CSS 的写法），编译器提示 "Did you mean 'decoration'?"。
+          // 干脆**整个去掉**：① 「点这里改用 4/F」这句话本身已经在说它可点；
+          // ② 「修改节点」对话框里同一条提示（EditNodeDialog）本来就没有下划线、用户已经用过；
+          // ③ 装饰性属性只有真机编译能验证，而每次编译都要用户在 DevEco 跑一轮 —— 不值当。
+          if (this.floorPick.length > 0) {
+            Text(this.floorNote)
+              .fontSize(Theme.F_META)
+              .fontColor(Theme.BLUE_DEEP)
+              .width('100%')
+              .onClick(() => {
+                this.pickSuggestedFloor();
+              })
+          } else if (this.floorNote.length > 0) {
+            Text(this.floorNote)
               .fontSize(Theme.F_META)
               .fontColor(Theme.BLUE_DEEP)
               .width('100%')
@@ -419,8 +511,6 @@ export struct EditNodeDialog {
   tagProvider: () => TrackTag | undefined = (): TrackTag | undefined => undefined;
   /** 这个节点当前绑定的房间 id（页面查出来传进来，用于把下拉预选到那个房间）；-1 = 没绑 */
   boundRoomProvider: () => number = () => -1;
-  /** 节点所属轨迹的区域 id（节点自己没写区域时沿用）；0 = 未分区 */
-  trackAreaIdProvider: () => number = () => 0;
 
   @State tagId: number = -1;
   @State tagType: string = TrackTagType.MAIN_GATE;
@@ -477,7 +567,7 @@ export struct EditNodeDialog {
       }
       this.areaNames = names;
       this.areaIds = ids;
-      const cur: number = effectiveAreaId(g, this.trackAreaIdProvider());
+      const cur: number = effectiveAreaId(g);
       let idx = 0;
       for (let i = 0; i < ids.length; i++) {
         if (ids[i] === cur) {

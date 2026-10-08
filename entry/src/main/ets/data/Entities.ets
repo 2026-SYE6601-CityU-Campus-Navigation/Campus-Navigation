@@ -80,6 +80,12 @@ export interface Area {
   /** 所属分类：AREA_CATEGORY_CITYU / AREA_CATEGORY_TEST；空串表示还没分类 */
   category: string;
   roomCount: number;
+  /**
+   * 「在本区域有节点的轨迹」条数（2026-10-08 改）。
+   * 旧口径是「归属本区域的轨迹条数」，但轨迹已经不归属区域了；现在的定义是
+   * **至少有一个节点落在这栋楼里的轨迹数**（一条跨楼轨迹会在它经过的每栋楼里都算一次），
+   * 与「按区域导出」的口径完全一致。0 = 这栋楼还没被任何轨迹走到过。
+   */
   trackCount: number;
   createdAt: number;
 }
@@ -145,14 +151,125 @@ export function trackTagNames(): Array<string> {
   return ['大门', '门', '门禁', '楼梯', '扶梯', '电梯', '厕所', '教室', '食堂', '商店', '其他室内'];
 }
 
+/**
+ * 一条轨迹。
+ *
+ * **2026-10-08 起轨迹不再归属任何区域**（用户提出：「轨迹的记录不要放在区域下面了，
+ * 因为会跨区域」）。原来的 `areaId` / `areaName` 已从模型里去掉：
+ *  - 一条轨迹可以从校外一路穿过好几栋楼，用**一个**区域去概括它，本身就是错的；
+ *  - 而且旧口径下 `deleteAreaCascade` 会「删掉该区域下的轨迹」—— 一条跨楼轨迹被算在
+ *    它经过的每一栋楼里，删一栋楼就会连整条轨迹（含采样点与照片）一起删掉。
+ * 归属改由**节点自己的 areaId** 表达（TrackTag.areaId，2026-09-29 就有了），
+ * 室内/室外由下面的 track_segments 表达。数据库里 `tracks.areaId` 列**保留不删**
+ * （老数据不动），只是不再写入、不再读取。
+ */
 export interface Track {
   id: number;
   name: string;
-  areaId?: number;
-  areaName?: string;
   startedAt: number;
   endedAt?: number;
   pointCount: number;
+}
+
+/**
+ * 建指纹地图只需要这三列（2026-10-08 新增）。
+ *
+ * 为什么单独来一个类型、而不是直接用 `TrackPoint`：`TrackPoint` 还带着
+ * `accelSeries`/`gyroSeries`，那是每秒一条、每条约 2 KB 的字符串 —— 建图要读**全部轨迹的全部点**，
+ * 带上这两列就是几十 MB 的无用搬运（本工程在导出那条路上被「主线程搬运」坑过一次，
+ * 见开发日志第二十七轮的 THREAD_BLOCK_6S）。建图时一个字都不读它们。
+ */
+export interface WifiPoint {
+  timeMs: number;
+  wifiTop: string;
+  pressureHpa?: number;
+}
+
+/**
+ * 「原地静止扫描」记录（2026-10-08 新增，表 `place_scans`）。
+ *
+ * 用途有两个，都很实在：
+ *  1. **回答「跨会话还能不能认出来」**（这是整套指纹方案的生死前提，见 common/PlaceMatch 顶部）。
+ *     每次扫描把「当时的指纹 + 匹配结果」一起存下来，隔 2 小时 / 隔天再扫一次就能直接对比。
+ *  2. **强化地点**：`boundKey` 非空时，这次扫描会作为**一个新的会话**参与建图，
+ *     于是「同一个地点多扫几次」能把指纹压实、也能长出 `wifi_structural`（每个会话都在的 AP），
+ *     这正是用户说的「像清理出土文物一样慢慢清理迷雾、不断标记强化」的落地方式。
+ *
+ * 注意：扫描记录里的指纹与 App 安装强绑定（重装 / 改包名会让 BSSID 全变），
+ * 所以这些记录只在同一台机器同一次安装内有效 —— 界面上要如实说。
+ */
+export interface PlaceScan {
+  id: number;
+  atMs: number;
+  /** 当前扫描的 WiFi 摘要（与采样点同格式：`bssid:rssi;…`） */
+  wifiTop: string;
+  wifiCount: number;
+  pressureHpa?: number;
+  /** 当场算出来的匹配结果（空 key = 没认出来） */
+  matchedKey: string;
+  matchedLabel: string;
+  score: number;
+  margin: number;
+  runnerLabel: string;
+  commonAp: number;
+  /** 人工绑定到的地点键（空 = 只是验证记录，不参与建图） */
+  boundKey: string;
+  boundLabel: string;
+}
+
+export interface PlaceScanDraft {
+  atMs: number;
+  wifiTop: string;
+  wifiCount: number;
+  pressureHpa?: number;
+  matchedKey: string;
+  matchedLabel: string;
+  score: number;
+  margin: number;
+  runnerLabel: string;
+  commonAp: number;
+  boundKey: string;
+  boundLabel: string;
+}
+
+/**
+ * 室内 / 室外三态（2026-10-08 新增）。
+ *
+ * 为什么是**三态**而不是布尔：录制时用户可能整趟都没按过那个按钮。
+ * 若默认成「室外」，进楼前忘了按就会把室内段标成室外 —— 那是**错的**；
+ * 而「未标」是**诚实的**。导出时能区分「没标」和「真的在室外」，离线工具就不会
+ * 把没标的段当成有效信息用。
+ */
+export const INDOOR_UNKNOWN: number = -1;
+export const INDOOR_OUT: number = 0;
+export const INDOOR_IN: number = 1;
+
+/**
+ * 轨迹的一段「室内 / 室外」区间（新表 track_segments）。
+ *
+ * 录制中按一下那个三态按钮 = 关掉当前段、开一段新的，所以段的边界就是**用户按下按钮的
+ * 那一刻**，时间戳是精确的。这带来一个顺带的好处：`track_corners`（拐点）的室内/室外
+ * **不用加字段**——查它落在哪一段就知道了。这也正好消掉了 2026-09-30 登记的那条待办
+ * 「拐点节点分类（区分室内 / 室外）」（当时只能把「拐点2 室外」写进备注，统计不了）。
+ *
+ * `endMs` 为空 = 那段还没结束（正在录，或者是没正常收尾的轨迹）。
+ */
+export interface TrackSegment {
+  id: number;
+  trackId: number;
+  startMs: number;
+  /** 该段结束时刻；undefined = 还没关闭 */
+  endMs?: number;
+  /** INDOOR_UNKNOWN / INDOOR_OUT / INDOOR_IN */
+  indoor: number;
+}
+
+/** 插入段时 id 尚未生成，使用无 id 版本 */
+export interface TrackSegmentDraft {
+  trackId: number;
+  startMs: number;
+  endMs?: number;
+  indoor: number;
 }
 
 export interface TrackPoint {
@@ -178,6 +295,14 @@ export interface TrackPoint {
    * 老数据仍然是 5 个（字段名与格式都没变，所以解析方式不用改）。
    */
   wifiTop: string;
+  /**
+   * 本采样点那一秒里**加速度计**的三轴原始序列 `"t:x:y:z;…"`（m/s²；t 为相对本秒窗口起点的毫秒）。
+   * 2026-10-04 新增（阶段 0 采集端改造）；**在此之前的轨迹该字段为空串**。
+   * 编解码见 common/ImuFeatures.ets；存原始序列而不是特征，是为了让步态/步长/朝向积分能事后重算。
+   */
+  accelSeries: string;
+  /** 同 accelSeries，存的是**陀螺仪**三轴（rad/s）——朝向积分要用。 */
+  gyroSeries: string;
 }
 
 /** 插入采样点时 id 尚未生成，使用无 id 版本 */
@@ -196,6 +321,10 @@ export interface TrackPointDraft {
   wifiCount: number;
   /** 见 TrackPoint.wifiTop：从 2026-09-30 起是前 40 个（老数据 5 个） */
   wifiTop: string;
+  /** 见 TrackPoint.accelSeries（2026-10-04 阶段 0 新增） */
+  accelSeries: string;
+  /** 见 TrackPoint.gyroSeries */
+  gyroSeries: string;
 }
 
 /** 轨迹途中打的「节点」标记（厕所/楼梯/门/门禁/电梯/教室 + 备注）。
@@ -247,6 +376,30 @@ export interface TrackTag {
   markerId?: number;
   headingDeg?: number;
   createdAt: number;
+}
+
+/**
+ * 轨迹途中一键打下的「拐点」（2026-10-05 新增）。
+ *
+ * **与「节点」是两套东西，刻意分表存**：
+ *  - 节点 = 标记 + 照片，是**给人看**的地标；
+ *  - 拐点 = 纯粹的**几何约束**，是**给算法吃**的：它只回答一个问题 —— 「什么时候转了弯」。
+ *
+ * **为什么必须独立、且必须一键（不走节点那条流程）**：节点的 timeMs / 定位 / 朝向都是
+ * **拍照完成**那一刻才取的（前面还有一整个填写对话框 + 相机），按 1.2 m/s 走，误差可达
+ * 15~25 米 —— 拐点标到几十米外就废了。而拐点要的恰恰是**精确时刻**：PDR 用它把轨迹切成
+ * 「段」，段内强制走直线（这才是压住自由积分漂移最实用的手段）。
+ * 拐点也不需要照片（对着走廊转角拍照毫无意义），所以不该走「节点 = 标记 + 照片」那条流程。
+ *
+ * 误触（连点两下）交给离线脚本合并（相隔 < 1.5 秒的拐点视为一个），不在采集端拦。
+ */
+export interface TrackCorner {
+  id: number;
+  trackId: number;
+  timeMs: number;
+  /** 按下那一刻的朝向（加速度+地磁融合方位角）；undefined = 当时没有可用朝向 */
+  headingDeg?: number;
+  note: string;
 }
 
 /**

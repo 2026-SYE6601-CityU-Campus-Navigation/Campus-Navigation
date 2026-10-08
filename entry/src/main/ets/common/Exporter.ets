@@ -3,7 +3,8 @@ import { picker } from '@kit.CoreFileKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { Store, UNASSIGNED_AREA_ID } from '../data/Store';
-import { Area, PhotoKind, Track, TrackPhoto, TrackPoint, TrackTag } from '../data/Entities';
+import { Area, Marker, PhotoKind, Room, Track, TrackCorner, TrackPhoto, TrackPoint, TrackSegment, TrackTag } from '../data/Entities';
+import { indoorOf } from './IndoorState';
 import { effectiveAreaId } from './RoomPlan';
 import { ZipStream, crc32, writeAllTo } from './ZipWriter';
 import { readFileExact } from '../sensors/TrackMedia';
@@ -23,6 +24,27 @@ interface ExportPoint {
   headingDeg?: number;
   wifiCount: number;
   wifiTop: string;
+  /** 本秒窗口的原始加速度序列 `"t:x:y:z;…"`（m/s²）。2026-10-04 阶段 0 新增，
+   *  增量字段、version 不变；**老数据为空串**（那批轨迹没有 IMU）。 */
+  accelSeries: string;
+  /** 本秒窗口的原始陀螺仪序列（rad/s），同上。 */
+  gyroSeries: string;
+  /**
+   * 这个采样点当时是室内还是室外（2026-10-08 新增，增量字段、version 不变）。
+   * 取值同 Entities 里的 INDOOR_*（-1 未标 / 0 室外 / 1 室内）。
+   *
+   * **注意它是导出时按 track_segments 解析出来的，数据库里并不逐行存** ——
+   * 只存段，点的 indoor 由「点落在哪一段」推出来，避免两处数据打架。
+   * 老包没有这个键 → 消费脚本按「未标」处理。
+   */
+  indoor?: number;
+}
+
+/** 导出 JSON 的室内外段（只有边界与三态，没有别的） */
+interface ExportSegment {
+  startMs: number;
+  endMs?: number;
+  indoor: number;
 }
 
 interface ExportTag {
@@ -46,6 +68,27 @@ interface ExportTag {
   /** 打这个节点时的气压（2026-09-29 新增，与采样点同名字段对齐；旧包没有这个字段） */
   pressureHpa?: number;
   headingDeg?: number;
+  /**
+   * 节点绑定的**房间名** —— 2026-10-08 新增（增量字段，version 不变）。
+   *
+   * 背景：门 / 门禁绑房间时，App 会往该房间插一条「前门 / 后门」标记，节点上存 `markerId`
+   * （链路 `track_tags.markerId → markers.roomId → rooms.name/code`）。**但导出从来没带过它**，
+   * 于是离线看数据时「这个门是哪个房间的门」完全看不出来 —— 用户 2026-10-08 问
+   * 「请把房间号码标记出来」时才发现这个缺口。
+   * 空字符串 = 没绑房间，或绑了但查不到（房间被删、或 2026-09-29 之前的老绑定没留 markerId）。
+   */
+  roomName: string;
+  /** 房间的**教室代码**（如 LT-13）；普通手建房间没有代码，空字符串 */
+  roomCode: string;
+  /** 房间里那条标记的名字（「前门」/「后门」），便于区分同一房间的两个门 */
+  markerName: string;
+  /**
+   * 节点当时绑的标记 id。**只用来区分「从没绑过」和「绑过的标记被删了」**：
+   * 前者是 undefined，后者有值但 `markerName` 为空 —— 少了它，离线页面只能把两种
+   * 情况都写成「未绑定房间」，而 App 内的相册页是分得清的（`roomLabelOf`）。
+   * 与 markerId 一样是增量字段：旧包没有这个键。
+   */
+  markerId?: number;
 }
 
 interface ExportPhoto {
@@ -72,6 +115,8 @@ interface ManifestTrack {
   nodeCount: number;
   photoCount: number;
   sceneryPhotoCount: number;
+  /** 拐点数（2026-10-05 新增） */
+  cornerCount: number;
 }
 
 interface ExportAreaInfo {
@@ -83,7 +128,12 @@ interface ExportTrackJson {
   /** 2：tags 语义变为「节点」，photos 增加 kind/tagIndex */
   version: number;
   name: string;
-  area: string;
+  /**
+   * **2026-10-08 由 `area` 改名而来**：轨迹不再归属区域，这个值现在只表示
+   * 「这个包是按哪个区域导出的」（导出时选的那个区域），不再表示轨迹的归属。
+   * 消费脚本要能同时接受 `exportArea`（新）与 `area`（老包）。
+   */
+  exportArea: string;
   startedAt: number;
   endedAt?: number;
   pointCount: number;
@@ -91,6 +141,21 @@ interface ExportTrackJson {
   /** 节点列表（标记 + 定位 + 朝向），节点照在 photos[] 里以 tagIndex 指向本数组 */
   tags: ExportTag[];
   photos: ExportPhoto[];
+  /** 一键打下的拐点（2026-10-05 新增，增量字段、version 不变；老包没有这个键） */
+  corners: ExportCorner[];
+  /**
+   * 室内 / 室外段（2026-10-08 新增，增量字段、version 不变；老包没有这个键）。
+   *
+   * 拐点的室内外**不用另加字段**：查拐点时刻落在哪一段即可（见 common/IndoorState.indoorOf）。
+   * 这也顺带消掉了 2026-09-30 登记的那条待办「拐点节点分类（区分室内 / 室外）」。
+   */
+  segments: ExportSegment[];
+}
+
+/** 导出 JSON 的拐点结构（只有时刻与当场朝向，没有照片 —— 拐点是几何约束，不是地标） */
+interface ExportCorner {
+  timeMs: number;
+  headingDeg?: number;
 }
 
 interface ExportManifest {
@@ -112,9 +177,11 @@ interface GalleryTrack {
   tags: TrackTag[];
   photos: TrackPhoto[];
   photoMissing: boolean[];
-  /** 区域清单与轨迹自身区域：用来算每个节点的「所在建筑」 */
+  /** 区域清单：用来算每个节点的「所在建筑」。轨迹自身不再有区域（2026-10-08）。 */
   areas: Area[];
-  trackAreaId: number;
+  /** 房间绑定的两张查表（2026-10-08 新增）：节点卡的「房间」行要用 */
+  markerById: Map<number, Marker>;
+  roomById: Map<number, Room>;
 }
 
 /**
@@ -169,7 +236,7 @@ export class Exporter {
    * 效果等价）；保留这个 API 供以后需要一键整区导出时复用，`pack()` 也是两者共用的。
    */
   static async exportAreaZip(areaId: number, areaName: string): Promise<string> {
-    const tracks: Track[] = await Store.listTracksInArea(areaId);
+    const tracks: Track[] = await Store.listTracksTouchingArea(areaId);
     if (tracks.length === 0) {
       throw new Error('该区域还没有轨迹，无法导出');
     }
@@ -181,7 +248,7 @@ export class Exporter {
     if (trackIds.length === 0) {
       throw new Error('请先勾选要导出的轨迹');
     }
-    const all: Track[] = await Store.listTracksInArea(areaId);
+    const all: Track[] = await Store.listTracksTouchingArea(areaId);
     const picked: Track[] = all.filter((t: Track) => {
       return trackIds.indexOf(t.id) >= 0;
     });
@@ -209,12 +276,26 @@ export class Exporter {
     let totalPhotos = 0;
     // 区域清单：把节点的 areaId 翻成建筑名写进导出数据与照片索引页
     const areas: Area[] = await Store.listAreas();
+    /* 房间绑定（2026-10-08 新增）：节点上的 markerId 指向一条标记，标记又挂在某个房间上。
+       一次性把 markers 与 rooms 都读出来建成表，逐节点查表 —— 比「按房间逐个 listMarkers()」
+       少几十次查询。两张表只读一次，也不会随轨迹条数增长。 */
+    const rooms: Room[] = await Store.listRooms();
+    const markers: Marker[] = await Store.listAllMarkers();
+    const roomById: Map<number, Room> = new Map<number, Room>();
+    for (const r of rooms) {
+      roomById.set(r.id, r);
+    }
+    const markerById: Map<number, Marker> = new Map<number, Marker>();
+    for (const m of markers) {
+      markerById.set(m.id, m);
+    }
 
     for (const t of tracks) {
       const pts: TrackPoint[] = await Store.listPoints(t.id);
       const tags: TrackTag[] = await Store.listTrackTags(t.id);
       const photos: TrackPhoto[] = await Store.listTrackPhotos(t.id);
-      const trackAreaId: number = t.areaId === undefined ? UNASSIGNED_AREA_ID : t.areaId;
+      const corners: TrackCorner[] = await Store.listCorners(t.id);
+      const segments: TrackSegment[] = await Store.listSegments(t.id);
 
       const ep: ExportPoint[] = pts.map((p: TrackPoint) => {
         return {
@@ -229,17 +310,37 @@ export class Exporter {
           magneticZ: p.magneticZ,
           headingDeg: p.headingDeg,
           wifiCount: p.wifiCount,
-          wifiTop: p.wifiTop
+          wifiTop: p.wifiTop,
+          accelSeries: p.accelSeries,
+          gyroSeries: p.gyroSeries,
+          indoor: indoorOf(segments, p.timeMs)
         } as ExportPoint;
       });
       const et: ExportTag[] = tags.map((g: TrackTag) => {
         // 节点所属建筑（节点自己写的区域优先，没写就沿用轨迹的区域）
-        const nodeAreaId: number = effectiveAreaId(g, trackAreaId);
+        const nodeAreaId: number = effectiveAreaId(g);
         let areaName: string = '';
         for (const a of areas) {
           if (a.id === nodeAreaId) {
             areaName = a.name;
             break;
+          }
+        }
+        /* 房间绑定（2026-10-08）：markerId → 标记 → 房间。
+           **查不到就留空**，不编名字：老数据（2026-09-29 之前的绑定没留 markerId）、
+           房间被删掉、标记被删掉，都可能出现，空字符串是诚实的答案。 */
+        let roomName: string = '';
+        let roomCode: string = '';
+        let markerName: string = '';
+        if (g.markerId !== undefined) {
+          const mk: Marker | undefined = markerById.get(g.markerId);
+          if (mk !== undefined) {
+            markerName = mk.name;
+            const rm: Room | undefined = roomById.get(mk.roomId);
+            if (rm !== undefined) {
+              roomName = rm.name;
+              roomCode = rm.code;
+            }
           }
         }
         return {
@@ -253,7 +354,11 @@ export class Exporter {
           altitude: g.altitude,
           accuracy: g.accuracy,
           pressureHpa: g.pressureHpa,
-          headingDeg: g.headingDeg
+          headingDeg: g.headingDeg,
+          roomName: roomName,
+          roomCode: roomCode,
+          markerName: markerName,
+          markerId: g.markerId
         } as ExportTag;
       });
 
@@ -304,16 +409,25 @@ export class Exporter {
         }
       }
 
+      const ec: ExportCorner[] = corners.map((c: TrackCorner) => {
+        return { timeMs: c.timeMs, headingDeg: c.headingDeg } as ExportCorner;
+      });
+
+      const es: ExportSegment[] = segments.map((sg: TrackSegment) => {
+        return { startMs: sg.startMs, endMs: sg.endMs, indoor: sg.indoor } as ExportSegment;
+      });
       const trackJson: ExportTrackJson = {
         version: 2,
         name: t.name,
-        area: areaName,
+        exportArea: areaName,
         startedAt: t.startedAt,
         endedAt: t.endedAt,
         pointCount: t.pointCount,
         points: ep,
         tags: et,
-        photos: eph
+        photos: eph,
+        corners: ec,
+        segments: es
       };
       const trackFile = `track_${t.id}_${safeFileName(t.name)}.json`;
       const trackBytes: Uint8Array = encoder.encodeInto(JSON.stringify(trackJson));
@@ -326,7 +440,8 @@ export class Exporter {
         pointCount: t.pointCount,
         nodeCount: tags.length,
         photoCount: photos.length,
-        sceneryPhotoCount: sceneryCount
+        sceneryPhotoCount: sceneryCount,
+        cornerCount: corners.length
       } as ManifestTrack);
       galleryTracks.push({
         name: t.name,
@@ -337,7 +452,8 @@ export class Exporter {
         photos: photos,
         photoMissing: photoOk,
         areas: areas,
-        trackAreaId: trackAreaId
+        markerById: markerById,
+        roomById: roomById
       } as GalleryTrack);
       totalPhotos += photos.length;
     }
@@ -517,7 +633,7 @@ export class Exporter {
     if (trackIds.length === 0) {
       throw new Error('请先勾选要上传的轨迹');
     }
-    const all: Track[] = await Store.listTracksInArea(areaId);
+    const all: Track[] = await Store.listTracksTouchingArea(areaId);
     const picked: Track[] = all.filter((t: Track) => {
       return trackIds.indexOf(t.id) >= 0;
     });
@@ -553,7 +669,7 @@ export class Exporter {
 
   /** 节点所属建筑区域名（照片索引页用；没有区域就显示「未分区」） */
   private static nodeAreaName(t: GalleryTrack, g: TrackTag): string {
-    const id: number = effectiveAreaId(g, t.trackAreaId);
+    const id: number = effectiveAreaId(g);
     if (id <= 0) {
       return '未分区';
     }
@@ -563,6 +679,30 @@ export class Exporter {
       }
     }
     return `区域 #${id}`;
+  }
+
+  /**
+   * 节点绑定的房间文案（2026-10-08 新增）。
+   *
+   * 链路：`track_tags.markerId → markers.roomId → rooms.name/code`（标记名区分前门/后门）。
+   * **查不到就如实说查不到，不编名字** —— 老绑定（2026-09-29 之前没记 markerId）、
+   * 房间或标记事后被删，都会走到这几个分支。
+   */
+  private static roomLabelOf(t: GalleryTrack, g: TrackTag): string {
+    if (g.markerId === undefined) {
+      return '未绑定房间';
+    }
+    const mk: Marker | undefined = t.markerById.get(g.markerId);
+    if (mk === undefined) {
+      return '绑定的标记已被删除';
+    }
+    const rm: Room | undefined = t.roomById.get(mk.roomId);
+    if (rm === undefined) {
+      return `绑定的房间已被删除（原 #${mk.roomId}）`;
+    }
+    const codePart: string = rm.code.length > 0 ? `${rm.code} ` : '';
+    const markPart: string = mk.name.length > 0 ? ` · ${mk.name}` : '';
+    return Exporter.esc(`${codePart}${rm.name}${markPart}`);
   }
 
   private static buildGalleryHtml(areaName: string, areaId: number, tracks: GalleryTrack[],
@@ -652,6 +792,7 @@ export class Exporter {
           out.push(`<div class="note">${g.note.length > 0 ? Exporter.esc(g.note) : '（未填写备注）'}</div>`);
           out.push('<dl>');
           out.push(`<dt>楼层</dt><dd>${g.floor.length > 0 ? Exporter.esc(g.floor) : '未填写'}</dd>`);
+          out.push(`<dt>房间</dt><dd>${Exporter.roomLabelOf(t, g)}</dd>`);
           out.push(`<dt>区域</dt><dd>${Exporter.esc(Exporter.nodeAreaName(t, g))}</dd>`);
           out.push(`<dt>时间</dt><dd>${fmtFullTime(g.timeMs)}</dd>`);
           out.push(`<dt>经纬度</dt><dd>${coordText(g.latitude, g.longitude)}</dd>`);

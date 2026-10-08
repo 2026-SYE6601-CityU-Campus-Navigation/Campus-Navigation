@@ -2,8 +2,9 @@ import { relationalStore } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { Area, Marker, PhotoKind, Room, Track, TrackPhoto, TrackPhotoDraft, TrackPoint, TrackPointDraft, TrackTag, AREA_CATEGORY_CITYU, AREA_CATEGORY_TEST } from './Entities';
+import { Area, Marker, PhotoKind, PlaceScan, PlaceScanDraft, Room, Track, TrackCorner, TrackPhoto, TrackPhotoDraft, TrackPoint, TrackPointDraft, TrackSegment, TrackSegmentDraft, TrackTag, WifiPoint, AREA_CATEGORY_CITYU, AREA_CATEGORY_TEST, INDOOR_UNKNOWN } from './Entities';
 import { Ctx } from '../common/Utils';
+import { SegmentMerge, SegmentSplit } from '../common/IndoorState';
 import { isCampusBuildingName } from '../common/Campus';
 import { FloorGuess, FloorObservation, FloorProbe, matchFloor, observationFrom } from '../common/FloorMatch';
 
@@ -63,6 +64,11 @@ export class Store {
           createdAt INTEGER NOT NULL
         )`
       );
+      // ⚠️ `tracks.areaId` 是**历史遗留列**（2026-10-08 起停用）：轨迹不再归属区域（会跨楼）。
+      // 保留不删的唯一原因，是第 ~290 行那段一次性迁移要读它 —— 把老节点里「areaId IS NULL」的
+      // （旧约定＝沿用轨迹的区域）按当时的轨迹区域回填。新代码一律不写也不读这一列
+      // （见 Entities.Track 的注释）。注释写在 SQL 外面而不是 `--` 里：工程里的迁移工具是
+      // 按行/正则抽 CREATE 语句的，SQL 里塞行注释容易被它当成语句的一部分。
       await rdb.executeSql(
         `CREATE TABLE IF NOT EXISTS tracks (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -88,7 +94,9 @@ export class Store {
           magneticZ REAL,
           headingDeg REAL,
           wifiCount INTEGER NOT NULL DEFAULT 0,
-          wifiTop TEXT NOT NULL DEFAULT ''
+          wifiTop TEXT NOT NULL DEFAULT '',
+          accelSeries TEXT NOT NULL DEFAULT '',
+          gyroSeries TEXT NOT NULL DEFAULT ''
         )`
       );
       await rdb.executeSql(
@@ -157,6 +165,47 @@ export class Store {
           updatedAt INTEGER NOT NULL
         )`
       );
+      // 2026-10-05：一键打下的「拐点」（见 Entities.TrackCorner 的说明）。
+      // 全新表，不需要 ALTER —— 两条路径都靠这条 CREATE 建出来。
+      await rdb.executeSql(
+        `CREATE TABLE IF NOT EXISTS track_corners (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          trackId INTEGER NOT NULL,
+          timeMs INTEGER NOT NULL,
+          headingDeg REAL,
+          note TEXT NOT NULL DEFAULT ''
+        )`
+      );
+      // 2026-10-08：轨迹的「室内 / 室外」段（见 Entities.TrackSegment）。
+      // 全新表，不需要 ALTER —— 两条路径都靠这条 CREATE 建出来。
+      await rdb.executeSql(
+        `CREATE TABLE IF NOT EXISTS track_segments (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          trackId INTEGER NOT NULL,
+          startMs INTEGER NOT NULL,
+          endMs INTEGER,
+          indoor INTEGER NOT NULL DEFAULT -1
+        )`
+      );
+      // 2026-10-08：「原地静止扫描」记录（见 Entities.PlaceScan 的两条用途：跨会话验证 + 强化地点）。
+      // 新表，两条路径都由 CREATE IF NOT EXISTS 建出，不需要 ALTER。
+      await rdb.executeSql(
+        `CREATE TABLE IF NOT EXISTS place_scans (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          atMs INTEGER NOT NULL,
+          wifiTop TEXT NOT NULL DEFAULT '',
+          wifiCount INTEGER NOT NULL DEFAULT 0,
+          pressureHpa REAL,
+          matchedKey TEXT NOT NULL DEFAULT '',
+          matchedLabel TEXT NOT NULL DEFAULT '',
+          score REAL NOT NULL DEFAULT 0,
+          margin REAL NOT NULL DEFAULT 0,
+          runnerLabel TEXT NOT NULL DEFAULT '',
+          commonAp INTEGER NOT NULL DEFAULT 0,
+          boundKey TEXT NOT NULL DEFAULT '',
+          boundLabel TEXT NOT NULL DEFAULT ''
+        )`
+      );
       // 旧库迁移：列已存在时 ALTER 会报错，忽略即可
       try {
         await rdb.executeSql('ALTER TABLE rooms ADD COLUMN areaId INTEGER');
@@ -214,6 +263,16 @@ export class Store {
         await rdb.executeSql('ALTER TABLE track_tags ADD COLUMN accuracy REAL');
       } catch (e) {
       }
+      // 2026-10-04（阶段 0）：采样点增加「每秒窗口的原始 IMU 序列」（编解码见 common/ImuFeatures）。
+      // 老轨迹两列都是空串 = 那批数据没有 IMU，做不了 PDR —— **这是一条批次分界线**。
+      try {
+        await rdb.executeSql(`ALTER TABLE track_points ADD COLUMN accelSeries TEXT NOT NULL DEFAULT ''`);
+      } catch (e) {
+      }
+      try {
+        await rdb.executeSql(`ALTER TABLE track_points ADD COLUMN gyroSeries TEXT NOT NULL DEFAULT ''`);
+      } catch (e) {
+      }
       // 2026-09-29：区域分两大类（城市大学 / 测试集）。老区域的默认值刻意给**空串**，
       // 好让下面那段一次性归类只处理「还没分类」的行；归完就不再有空串 → 天然幂等，
       // 也不会覆盖用户之后手改过的分类。全新安装走 CREATE 的默认值『城市大学』。
@@ -241,6 +300,23 @@ export class Store {
           pb.equalTo('id', areaIds[i]);
           await rdb.update(catBucket, pb);
         }
+      } catch (e) {
+      }
+      // 2026-10-08：轨迹不再归属区域 —— 但老节点里有一批 areaId 是 NULL
+      // （当时的约定正是「NULL = 沿用轨迹的区域」，见 Entities.TrackTag 的注释）。
+      // 停用轨迹区域之前必须先把它们回填掉，否则老节点的区域会凭空丢掉：
+      // RoomPlan 的回退值没了，那些节点会变成「不属于任何楼」，生成房间、导出都受影响。
+      // 幂等性靠 WHERE areaId IS NULL —— 跑第二遍没有任何行满足条件。
+      // 老轨迹没有段 → 室内外一律落在「未标」，这是诚实的，不做假回填。
+      try {
+        await rdb.executeSql(
+          `UPDATE track_tags SET areaId = (
+             SELECT t.areaId FROM tracks t WHERE t.id = track_tags.trackId
+           )
+           WHERE areaId IS NULL
+             AND EXISTS (SELECT 1 FROM tracks t
+                         WHERE t.id = track_tags.trackId AND t.areaId IS NOT NULL)`
+        );
       } catch (e) {
       }
       Store.rdb = rdb;
@@ -327,7 +403,7 @@ export class Store {
     const rs: relationalStore.ResultSet = await Store.rdb.querySql(
       `SELECT a.id, a.name, a.note, a.category, a.createdAt,
         (SELECT COUNT(*) FROM rooms r WHERE r.areaId = a.id) AS roomCount,
-        (SELECT COUNT(*) FROM tracks t WHERE t.areaId = a.id) AS trackCount
+        (SELECT COUNT(DISTINCT g.trackId) FROM track_tags g WHERE g.areaId = a.id) AS trackCount
        FROM areas a ORDER BY a.createdAt ASC`
     );
     const out: Area[] = [];
@@ -405,8 +481,10 @@ export class Store {
     let p: relationalStore.RdbPredicates = new relationalStore.RdbPredicates('rooms');
     p.equalTo('areaId', id);
     await Store.rdb!.update(bucket, p);
+    // 2026-10-08：轨迹不归属区域了，要「移出区域」的是**节点**（track_tags）——
+    // 这正是跨楼轨迹里真正带着归属的那一层。tracks.areaId 那列已废弃，不再动它。
     bucket = { 'areaId': null };
-    p = new relationalStore.RdbPredicates('tracks');
+    p = new relationalStore.RdbPredicates('track_tags');
     p.equalTo('areaId', id);
     await Store.rdb!.update(bucket, p);
     p = new relationalStore.RdbPredicates('areas');
@@ -415,15 +493,23 @@ export class Store {
     Store.notify();
   }
 
-  /** 彻底删除区域及其全部数据（房间+标记、轨迹+采样点+标签+照片文件） */
+  /**
+   * 彻底删除区域及其全部数据（房间+标记；以及把指向它的节点改成未分区）。
+   *
+   * **2026-10-08 起不再删轨迹。** 旧口径下这里会「先删该区域下的轨迹」，而一条轨迹
+   * 可以从校外一路穿过好几栋楼 —— 它会被算在每一栋楼里，于是删一栋楼就把整条轨迹
+   * （含采样点、节点、照片文件）一起删掉了。轨迹是采集者的原始记录，删一栋楼的元数据
+   * 不该动它。
+   */
   static async deleteAreaCascade(id: number): Promise<void> {
     await Store.ready;
-    // 先删轨迹（连带采样点/标签/照片文件），再删房间（连带标记），最后删区域
-    const trackIds: number[] = await Store.trackIdsInArea(id);
-    for (const tid of trackIds) {
-      await Store.deleteTrack(tid);
-    }
-    let p: relationalStore.RdbPredicates = new relationalStore.RdbPredicates('rooms');
+    // 指向这个区域的节点 → 未分区（与 moveAreaToUnassigned 同一口径，避免悬空 areaId）
+    const bucket: relationalStore.ValuesBucket = { 'areaId': null };
+    let p: relationalStore.RdbPredicates = new relationalStore.RdbPredicates('track_tags');
+    p.equalTo('areaId', id);
+    await Store.rdb!.update(bucket, p);
+    // 再删房间（连带标记）
+    p = new relationalStore.RdbPredicates('rooms');
     p.equalTo('areaId', id);
     const rs: relationalStore.ResultSet = await Store.rdb!.query(p, ['id']);
     const roomIds: number[] = [];
@@ -434,6 +520,7 @@ export class Store {
     for (const rid of roomIds) {
       await Store.deleteRoom(rid);
     }
+    // 最后删区域
     p = new relationalStore.RdbPredicates('areas');
     p.equalTo('id', id);
     await Store.rdb!.delete(p);
@@ -543,47 +630,47 @@ export class Store {
     return out;
   }
 
-  static async listTracks(): Promise<Track[]> {
+  /**
+   * **全部**标记（不分房间）—— 2026-10-08 新增，只为导出服务。
+   *
+   * 为什么要它：导出时要把「哪个门绑到了哪个房间」写出去，链路是
+   * `track_tags.markerId → markers.id → markers.roomId → rooms.name/code`。
+   * 若按房间逐个 `listMarkers(roomId)` 查，房间一多就是几十次查询；
+   * 这里一次查完，在内存里建 `id → Marker` 的表即可。
+   */
+  static async listAllMarkers(): Promise<Marker[]> {
     await Store.ready;
     if (!Store.rdb) {
       return [];
     }
-    const rs: relationalStore.ResultSet = await Store.rdb.querySql(
-      `SELECT t.id, t.name, t.startedAt, t.endedAt, t.pointCount, t.areaId, a.name AS areaName
-       FROM tracks t LEFT JOIN areas a ON t.areaId = a.id
-       ORDER BY t.startedAt DESC`
+    const p: relationalStore.RdbPredicates = new relationalStore.RdbPredicates('markers');
+    p.orderByAsc('id');
+    const rs: relationalStore.ResultSet = await Store.rdb.query(
+      p, ['id', 'roomId', 'name', 'markerType', 'createdAt']
     );
-    const out: Track[] = [];
+    const out: Marker[] = [];
     while (rs.goToNextRow()) {
       out.push({
         id: rs.getLong(rs.getColumnIndex('id')),
+        roomId: rs.getLong(rs.getColumnIndex('roomId')),
         name: rs.getString(rs.getColumnIndex('name')),
-        startedAt: rs.getLong(rs.getColumnIndex('startedAt')),
-        endedAt: Store.optLong(rs, 'endedAt'),
-        pointCount: rs.getLong(rs.getColumnIndex('pointCount')),
-        areaId: Store.optLong(rs, 'areaId'),
-        areaName: Store.optString(rs, 'areaName')
+        markerType: rs.getString(rs.getColumnIndex('markerType')),
+        createdAt: rs.getLong(rs.getColumnIndex('createdAt'))
       });
     }
     rs.close();
     return out;
   }
 
-  /** 按区域列轨迹；areaId=0（未分区）查 NULL */
-  static async listTracksInArea(areaId: number): Promise<Track[]> {
+  /** 全部轨迹（按开始时间倒序）。2026-10-08 起轨迹不再归属区域，所以这里不再 JOIN areas。 */
+  static async listTracks(): Promise<Track[]> {
     await Store.ready;
     if (!Store.rdb) {
       return [];
     }
-    const p: relationalStore.RdbPredicates = new relationalStore.RdbPredicates('tracks');
-    if (areaId === UNASSIGNED_AREA_ID) {
-      p.isNull('areaId');
-    } else {
-      p.equalTo('areaId', areaId);
-    }
-    p.orderByDesc('startedAt');
-    const rs: relationalStore.ResultSet = await Store.rdb.query(
-      p, ['id', 'name', 'startedAt', 'endedAt', 'pointCount', 'areaId']
+    const rs: relationalStore.ResultSet = await Store.rdb.querySql(
+      `SELECT id, name, startedAt, endedAt, pointCount
+       FROM tracks ORDER BY startedAt DESC`
     );
     const out: Track[] = [];
     while (rs.goToNextRow()) {
@@ -592,11 +679,62 @@ export class Store {
         name: rs.getString(rs.getColumnIndex('name')),
         startedAt: rs.getLong(rs.getColumnIndex('startedAt')),
         endedAt: Store.optLong(rs, 'endedAt'),
-        pointCount: rs.getLong(rs.getColumnIndex('pointCount')),
-        areaId: Store.optLong(rs, 'areaId')
+        pointCount: rs.getLong(rs.getColumnIndex('pointCount'))
       });
     }
     rs.close();
+    return out;
+  }
+
+  /**
+   * 「在本区域有节点的轨迹」—— 按区域导出的口径（用户 2026-10-08 选定）。
+   *
+   * 为什么不按轨迹的区域查：轨迹已经不归属区域了。一条跨楼轨迹在 A 楼和 B 楼都有节点，
+   * 那么导出 A 楼时**整条带走**（包括它在 B 楼的那一段），B 楼同理 —— 这正是用户要的
+   * 「含跨区整条」：导航是连续的，只要它在你这栋楼里有地标，这条轨迹对你就有用。
+   * 一条轨迹只算一次（DISTINCT）。
+   */
+  static async listTracksTouchingArea(areaId: number): Promise<Track[]> {
+    await Store.ready;
+    if (!Store.rdb) {
+      return [];
+    }
+    // 用 bindArgs 而不是拼字符串：一个查询走两条路径（NULL / = ?），也免了注入 worry
+    if (areaId === UNASSIGNED_AREA_ID) {
+      const rs: relationalStore.ResultSet = await Store.rdb.querySql(
+        `SELECT t.id, t.name, t.startedAt, t.endedAt, t.pointCount
+         FROM tracks t WHERE t.id IN
+           (SELECT DISTINCT g.trackId FROM track_tags g WHERE g.areaId IS NULL)
+         ORDER BY t.startedAt DESC`
+      );
+      const out: Track[] = Store.readTracks(rs);
+      rs.close();
+      return out;
+    }
+    const rs: relationalStore.ResultSet = await Store.rdb.querySql(
+      `SELECT t.id, t.name, t.startedAt, t.endedAt, t.pointCount
+       FROM tracks t WHERE t.id IN
+         (SELECT DISTINCT g.trackId FROM track_tags g WHERE g.areaId = ?)
+       ORDER BY t.startedAt DESC`,
+      [areaId]
+    );
+    const out: Track[] = Store.readTracks(rs);
+    rs.close();
+    return out;
+  }
+
+  /** 把 tracks 查询结果读成 Track[]（两个查询共用，避免两处字段列表分叉） */
+  private static readTracks(rs: relationalStore.ResultSet): Track[] {
+    const out: Track[] = [];
+    while (rs.goToNextRow()) {
+      out.push({
+        id: rs.getLong(rs.getColumnIndex('id')),
+        name: rs.getString(rs.getColumnIndex('name')),
+        startedAt: rs.getLong(rs.getColumnIndex('startedAt')),
+        endedAt: Store.optLong(rs, 'endedAt'),
+        pointCount: rs.getLong(rs.getColumnIndex('pointCount'))
+      });
+    }
     return out;
   }
 
@@ -606,8 +744,8 @@ export class Store {
       return undefined;
     }
     const rs: relationalStore.ResultSet = await Store.rdb.querySql(
-      `SELECT t.id, t.name, t.startedAt, t.endedAt, t.pointCount, t.areaId, a.name AS areaName
-       FROM tracks t LEFT JOIN areas a ON t.areaId = a.id WHERE t.id = ${id}`
+      `SELECT id, name, startedAt, endedAt, pointCount FROM tracks WHERE id = ?`,
+      [id]
     );
     let track: Track | undefined = undefined;
     if (rs.goToNextRow()) {
@@ -616,9 +754,7 @@ export class Store {
         name: rs.getString(rs.getColumnIndex('name')),
         startedAt: rs.getLong(rs.getColumnIndex('startedAt')),
         endedAt: Store.optLong(rs, 'endedAt'),
-        pointCount: rs.getLong(rs.getColumnIndex('pointCount')),
-        areaId: Store.optLong(rs, 'areaId'),
-        areaName: Store.optString(rs, 'areaName')
+        pointCount: rs.getLong(rs.getColumnIndex('pointCount'))
       };
     }
     rs.close();
@@ -636,7 +772,8 @@ export class Store {
     const rs: relationalStore.ResultSet = await Store.rdb.query(
       p,
       ['id', 'trackId', 'timeMs', 'latitude', 'longitude', 'altitude', 'accuracy',
-        'pressureHpa', 'magneticX', 'magneticY', 'magneticZ', 'headingDeg', 'wifiCount', 'wifiTop']
+        'pressureHpa', 'magneticX', 'magneticY', 'magneticZ', 'headingDeg', 'wifiCount', 'wifiTop',
+        'accelSeries', 'gyroSeries']
     );
     const out: TrackPoint[] = [];
     while (rs.goToNextRow()) {
@@ -654,7 +791,9 @@ export class Store {
         magneticZ: Store.optDouble(rs, 'magneticZ'),
         headingDeg: Store.optDouble(rs, 'headingDeg'),
         wifiCount: rs.getLong(rs.getColumnIndex('wifiCount')),
-        wifiTop: rs.getString(rs.getColumnIndex('wifiTop'))
+        wifiTop: rs.getString(rs.getColumnIndex('wifiTop')),
+        accelSeries: rs.getString(rs.getColumnIndex('accelSeries')),
+        gyroSeries: rs.getString(rs.getColumnIndex('gyroSeries'))
       });
     }
     rs.close();
@@ -865,17 +1004,250 @@ export class Store {
   }
 
   /** 新建轨迹会话，返回行 id。areaId 必填（UI 层强制先选区域） */
-  static async insertTrack(name: string, areaId: number): Promise<number> {
+  /**
+   * 新建轨迹。**2026-10-08 起不再接收 areaId** —— 轨迹不归属区域了（见 Entities.Track）。
+   * `startedAt` 可由调用方传入，好让第一段（track_segments）的起点与轨迹起点严格相等；
+   * 不传就用当前时刻。
+   */
+  static async insertTrack(name: string, startedAt?: number): Promise<number> {
     await Store.ready;
     const bucket: relationalStore.ValuesBucket = {
       'name': name,
-      'areaId': areaId,
-      'startedAt': Date.now(),
+      'startedAt': startedAt === undefined ? Date.now() : startedAt,
       'pointCount': 0
     };
     const rowId: number = await Store.rdb!.insert('tracks', bucket);
     Store.notify();
     return rowId > 0 ? rowId : await Store.lastRowId('tracks');
+  }
+
+  /**
+   * 开一段「室内 / 室外」。indoor 取 Entities 里的 INDOOR_* 三态。
+   * `endMs` 只在**事后修正**（把一段切成两半）时才传：新出来的后半段要继承原来的结束时刻，
+   * 否则它会被当成「还开着」，在导出里表现为一段永远在延伸（2026-10-08 批次三新增）。
+   */
+  static async insertSegment(trackId: number, startMs: number, indoor: number,
+    endMs?: number): Promise<number> {
+    await Store.ready;
+    const bucket: relationalStore.ValuesBucket = {
+      'trackId': trackId,
+      'startMs': startMs,
+      'indoor': indoor
+    };
+    Store.putOpt(bucket, 'endMs', endMs);
+    const rowId: number = await Store.rdb!.insert('track_segments', bucket);
+    Store.notify();
+    return rowId > 0 ? rowId : await Store.lastRowId('track_segments');
+  }
+
+  /** 改一段的室内外状态（事后修正：按错了、或者补标）。 */
+  static async setSegmentIndoor(segmentId: number, indoor: number): Promise<void> {
+    await Store.ready;
+    const bucket: relationalStore.ValuesBucket = { 'indoor': indoor };
+    const p: relationalStore.RdbPredicates = new relationalStore.RdbPredicates('track_segments');
+    p.equalTo('id', segmentId);
+    await Store.rdb!.update(bucket, p);
+    Store.notify();
+  }
+
+  /**
+   * 事后修正：把一段在 `atMs` 处切成两半 —— 前半段收到 atMs，新开的后半段状态是 newIndoor。
+   * 切分点由 IndoorState.planSplit 先校验（必须严格落在这一段内部），所以这里不再判边界。
+   *
+   * 两步之间失败会留下「前半段被截短、后半段没建出来」的空档（那段时间落回「未标」）——
+   * 不做事务处理：RDB 的失败基本都是磁盘/句柄级故障，此时硬回滚反而更难说清；
+   * 空档是**诚实**的（那段时间确实没有标注），用户重按一次切分即可。
+   */
+  static async splitSegment(split: SegmentSplit): Promise<number> {
+    await Store.closeSegment(split.segId, split.atMs);
+    return Store.insertSegment(split.trackId, split.atMs, split.newIndoor, split.endMs);
+  }
+
+  /**
+   * 事后修正：把 segId 这一段**并入它前面的那一段**（多按了一下按钮时用）。
+   *
+   * 合并后那一段取**前一段的状态**（用户的意思正是「这一段不该存在、应该接着前一段」），
+   * 时间范围取两段的并集。实现是「保留后一段、把它的起点与状态改成前一段的、删掉前一段」，
+   * 而不是「把前一段的 endMs 延长过去」：后者在后面那段**还开着**（正在录/没收尾）时得把
+   * 前一段重新置成 NULL，而往 ValuesBucket 里写 null 需要额外确认；这一版只用
+   * 「改两列数字 + 删一行」，全走已经验证过的写法，也不必碰 endMs 的可空语义。
+   *
+   * 具体保留谁、起点是多少、取谁的状态由 IndoorState.planMerge 决定（纯函数，可离线单测），
+   * 这里只负责执行两笔写。
+   */
+  static async mergeSegment(merge: SegmentMerge): Promise<void> {
+    await Store.ready;
+    const bucket: relationalStore.ValuesBucket = {
+      'startMs': merge.startMs,
+      'indoor': merge.indoor
+    };
+    const p: relationalStore.RdbPredicates = new relationalStore.RdbPredicates('track_segments');
+    p.equalTo('id', merge.keepId);
+    await Store.rdb!.update(bucket, p);
+    const dp: relationalStore.RdbPredicates = new relationalStore.RdbPredicates('track_segments');
+    dp.equalTo('id', merge.delId);
+    await Store.rdb!.delete(dp);
+    Store.notify();
+  }
+
+  /** 关掉一段（写入 endMs）。段已经关过也无妨：重复写同一个 endMs 不产生副作用。 */
+  static async closeSegment(segmentId: number, endMs: number): Promise<void> {
+    await Store.ready;
+    const bucket: relationalStore.ValuesBucket = { 'endMs': endMs };
+    const p: relationalStore.RdbPredicates = new relationalStore.RdbPredicates('track_segments');
+    p.equalTo('id', segmentId);
+    await Store.rdb!.update(bucket, p);
+    Store.notify();
+  }
+
+  /**
+   * 收尾时把这条轨迹里所有还没关闭的段关掉。
+   * 用「所有未关闭的段」而不是「最后一个」：异常退出（杀进程、掉电）会留下多个开着段，
+   * 全关掉才能保证导出时不会出现「一段永远在延伸」。
+   */
+  static async closeOpenSegments(trackId: number, endMs: number): Promise<void> {
+    await Store.ready;
+    const bucket: relationalStore.ValuesBucket = { 'endMs': endMs };
+    const p: relationalStore.RdbPredicates = new relationalStore.RdbPredicates('track_segments');
+    p.equalTo('trackId', trackId);
+    p.isNull('endMs');
+    await Store.rdb!.update(bucket, p);
+    Store.notify();
+  }
+
+  /** 某条轨迹的段，按起点升序（室内外判定与导出都要求顺序稳定） */
+  static async listSegments(trackId: number): Promise<TrackSegment[]> {
+    await Store.ready;
+    if (!Store.rdb) {
+      return [];
+    }
+    const rs: relationalStore.ResultSet = await Store.rdb.querySql(
+      `SELECT id, trackId, startMs, endMs, indoor FROM track_segments
+       WHERE trackId = ? ORDER BY startMs ASC`,
+      [trackId]
+    );
+    const out: TrackSegment[] = [];
+    while (rs.goToNextRow()) {
+      out.push({
+        id: rs.getLong(rs.getColumnIndex('id')),
+        trackId: rs.getLong(rs.getColumnIndex('trackId')),
+        startMs: rs.getLong(rs.getColumnIndex('startMs')),
+        endMs: Store.optLong(rs, 'endMs'),
+        indoor: Store.optLong(rs, 'indoor') ?? INDOOR_UNKNOWN
+      });
+    }
+    rs.close();
+    return out;
+  }
+
+  // ---------- 「我在哪」：静止扫描记录（2026-10-08） ----------
+
+  /**
+   * 记一次「原地静止扫描」：把当时的指纹与**当场算出来的匹配结果**一起存下来。
+   * 存匹配结果而不是只存指纹，是为了隔天再扫时能直接对比（跨会话验证的核心数据）。
+   */
+  static async insertPlaceScan(d: PlaceScanDraft): Promise<number> {
+    await Store.ready;
+    const bucket: relationalStore.ValuesBucket = {
+      'atMs': d.atMs,
+      'wifiTop': d.wifiTop,
+      'wifiCount': d.wifiCount,
+      'matchedKey': d.matchedKey,
+      'matchedLabel': d.matchedLabel,
+      'score': d.score,
+      'margin': d.margin,
+      'runnerLabel': d.runnerLabel,
+      'commonAp': d.commonAp,
+      'boundKey': d.boundKey,
+      'boundLabel': d.boundLabel
+    };
+    Store.putOpt(bucket, 'pressureHpa', d.pressureHpa);
+    const rowId: number = await Store.rdb!.insert('place_scans', bucket);
+    Store.notify();
+    return rowId > 0 ? rowId : await Store.lastRowId('place_scans');
+  }
+
+  /** 最近的若干条扫描记录（新 → 旧） */
+  static async listPlaceScans(limit: number): Promise<PlaceScan[]> {
+    await Store.ready;
+    if (!Store.rdb) {
+      return [];
+    }
+    const rs: relationalStore.ResultSet = await Store.rdb.querySql(
+      `SELECT id, atMs, wifiTop, wifiCount, pressureHpa, matchedKey, matchedLabel, score,
+              margin, runnerLabel, commonAp, boundKey, boundLabel
+       FROM place_scans ORDER BY atMs DESC LIMIT ?`,
+      [limit]
+    );
+    const out: PlaceScan[] = [];
+    while (rs.goToNextRow()) {
+      out.push({
+        id: rs.getLong(rs.getColumnIndex('id')),
+        atMs: rs.getLong(rs.getColumnIndex('atMs')),
+        wifiTop: rs.getString(rs.getColumnIndex('wifiTop')),
+        wifiCount: rs.getLong(rs.getColumnIndex('wifiCount')),
+        pressureHpa: Store.optDouble(rs, 'pressureHpa'),
+        matchedKey: rs.getString(rs.getColumnIndex('matchedKey')),
+        matchedLabel: rs.getString(rs.getColumnIndex('matchedLabel')),
+        score: rs.getDouble(rs.getColumnIndex('score')),
+        margin: rs.getDouble(rs.getColumnIndex('margin')),
+        runnerLabel: rs.getString(rs.getColumnIndex('runnerLabel')),
+        commonAp: rs.getLong(rs.getColumnIndex('commonAp')),
+        boundKey: rs.getString(rs.getColumnIndex('boundKey')),
+        boundLabel: rs.getString(rs.getColumnIndex('boundLabel'))
+      });
+    }
+    rs.close();
+    return out;
+  }
+
+  /**
+   * 把某次扫描绑定到某个地点。绑了之后这次扫描会作为**一个新的会话**参与建图
+   * （见 PlaceMatch.mergeLandmarks）—— 这就是「多来几次把地点压实」的机制。
+   * 传空 key 表示取消绑定（退回成纯验证记录）。
+   */
+  static async setPlaceScanBinding(id: number, key: string, label: string): Promise<void> {
+    await Store.ready;
+    const bucket: relationalStore.ValuesBucket = { 'boundKey': key, 'boundLabel': label };
+    const p: relationalStore.RdbPredicates = new relationalStore.RdbPredicates('place_scans');
+    p.equalTo('id', id);
+    await Store.rdb!.update(bucket, p);
+    Store.notify();
+  }
+
+  static async deletePlaceScan(id: number): Promise<void> {
+    await Store.ready;
+    const p: relationalStore.RdbPredicates = new relationalStore.RdbPredicates('place_scans');
+    p.equalTo('id', id);
+    await Store.rdb!.delete(p);
+    Store.notify();
+  }
+
+  /**
+   * 建图专用：只读 timeMs / wifiTop / pressureHpa。
+   * **不要用 `listPoints`** —— 它连 `accelSeries`/`gyroSeries` 一起读，每行约 2 KB，
+   * 建图要把全部轨迹的全部点都过一遍，带上那两列就是几十 MB 的无用搬运。
+   */
+  static async listWifiPoints(trackId: number): Promise<WifiPoint[]> {
+    await Store.ready;
+    if (!Store.rdb) {
+      return [];
+    }
+    const rs: relationalStore.ResultSet = await Store.rdb.querySql(
+      `SELECT timeMs, wifiTop, pressureHpa FROM track_points
+       WHERE trackId = ? ORDER BY timeMs ASC`,
+      [trackId]
+    );
+    const out: WifiPoint[] = [];
+    while (rs.goToNextRow()) {
+      out.push({
+        timeMs: rs.getLong(rs.getColumnIndex('timeMs')),
+        wifiTop: rs.getString(rs.getColumnIndex('wifiTop')),
+        pressureHpa: Store.optDouble(rs, 'pressureHpa')
+      });
+    }
+    rs.close();
+    return out;
   }
 
   static async insertPoints(points: TrackPointDraft[]): Promise<void> {
@@ -888,7 +1260,9 @@ export class Store {
         'trackId': pt.trackId,
         'timeMs': pt.timeMs,
         'wifiCount': pt.wifiCount,
-        'wifiTop': pt.wifiTop
+        'wifiTop': pt.wifiTop,
+        'accelSeries': pt.accelSeries,
+        'gyroSeries': pt.gyroSeries
       };
       Store.putOpt(bucket, 'latitude', pt.latitude);
       Store.putOpt(bucket, 'longitude', pt.longitude);
@@ -913,6 +1287,9 @@ export class Store {
     const p: relationalStore.RdbPredicates = new relationalStore.RdbPredicates('tracks');
     p.equalTo('id', id);
     await Store.rdb!.update(bucket, p);
+    // 收尾时顺手关掉还开着的室内外段 —— 放在这里而不是调用方，
+    // 是为了让「结束录制」无论从哪条路径走都不会留下永远延伸的段。
+    await Store.closeOpenSegments(id, endedAt);
     Store.notify();
   }
 
@@ -935,6 +1312,12 @@ export class Store {
     p.equalTo('trackId', id);
     await Store.rdb!.delete(p);
     p = new relationalStore.RdbPredicates('track_photos');
+    p.equalTo('trackId', id);
+    await Store.rdb!.delete(p);
+    p = new relationalStore.RdbPredicates('track_corners');
+    p.equalTo('trackId', id);
+    await Store.rdb!.delete(p);
+    p = new relationalStore.RdbPredicates('track_segments');
     p.equalTo('trackId', id);
     await Store.rdb!.delete(p);
     Store.notify();
@@ -968,6 +1351,45 @@ export class Store {
     const rowId: number = await Store.rdb!.insert('track_tags', bucket);
     Store.notify();
     return rowId > 0 ? rowId : await Store.lastRowId('track_tags');
+  }
+
+  /** 记一个「拐点」（2026-10-05）。只记时刻与当场朝向，不涉及照片。 */
+  static async insertTrackCorner(trackId: number, timeMs: number, headingDeg?: number): Promise<number> {
+    await Store.ready;
+    const bucket: relationalStore.ValuesBucket = {
+      'trackId': trackId,
+      'timeMs': timeMs,
+      'note': ''
+    };
+    Store.putOpt(bucket, 'headingDeg', headingDeg);
+    const rowId: number = await Store.rdb!.insert('track_corners', bucket);
+    return rowId > 0 ? rowId : await Store.lastRowId('track_corners');
+  }
+
+  /** 某条轨迹的全部拐点（按时间升序）。导出与离线 PDR 都用它。 */
+  static async listCorners(trackId: number): Promise<TrackCorner[]> {
+    await Store.ready;
+    if (!Store.rdb) {
+      return [];
+    }
+    const p: relationalStore.RdbPredicates = new relationalStore.RdbPredicates('track_corners');
+    p.equalTo('trackId', trackId);
+    p.orderByAsc('timeMs');
+    const rs: relationalStore.ResultSet = await Store.rdb.query(
+      p, ['id', 'trackId', 'timeMs', 'headingDeg', 'note']
+    );
+    const out: TrackCorner[] = [];
+    while (rs.goToNextRow()) {
+      out.push({
+        id: rs.getLong(rs.getColumnIndex('id')),
+        trackId: rs.getLong(rs.getColumnIndex('trackId')),
+        timeMs: rs.getLong(rs.getColumnIndex('timeMs')),
+        headingDeg: Store.optDouble(rs, 'headingDeg'),
+        note: rs.getString(rs.getColumnIndex('note'))
+      });
+    }
+    rs.close();
+    return out;
   }
 
   /**
@@ -1199,17 +1621,20 @@ export class Store {
 
   // ---------- 工具 ----------
 
-  private static async trackIdsInArea(areaId: number): Promise<number[]> {
-    const p: relationalStore.RdbPredicates = new relationalStore.RdbPredicates('tracks');
-    if (areaId === UNASSIGNED_AREA_ID) {
-      p.isNull('areaId');
-    } else {
-      p.equalTo('areaId', areaId);
-    }
-    const rs: relationalStore.ResultSet = await Store.rdb!.query(p, ['id']);
+  /**
+   * 「在本区域有节点的轨迹」的 id 列表（原 trackIdsInArea 的替代，2026-10-08）。
+   * 轨迹不归属区域了，所以改成从 track_tags 反查；一条轨迹只出现一次。
+   */
+  private static async trackIdsTouchingArea(areaId: number): Promise<number[]> {
+    const sql: string = areaId === UNASSIGNED_AREA_ID
+      ? `SELECT DISTINCT trackId FROM track_tags WHERE areaId IS NULL`
+      : `SELECT DISTINCT trackId FROM track_tags WHERE areaId = ?`;
+    const rs: relationalStore.ResultSet = await (areaId === UNASSIGNED_AREA_ID
+      ? Store.rdb!.querySql(sql)
+      : Store.rdb!.querySql(sql, [areaId]));
     const out: number[] = [];
     while (rs.goToNextRow()) {
-      out.push(rs.getLong(rs.getColumnIndex('id')));
+      out.push(rs.getLong(rs.getColumnIndex('trackId')));
     }
     rs.close();
     return out;

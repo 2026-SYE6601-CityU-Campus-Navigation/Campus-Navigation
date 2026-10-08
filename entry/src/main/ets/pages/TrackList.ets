@@ -1,5 +1,5 @@
 import { promptAction } from '@kit.ArkUI';
-import { Area, Track } from '../data/Entities';
+import { Track } from '../data/Entities';
 import { Store } from '../data/Store';
 import { TrackRecorder } from '../sensors/TrackRecorder';
 import { RecordingBanner } from './RecordingBanner';
@@ -9,44 +9,24 @@ import {
 import { Theme } from '../common/Theme';
 import { PillButton, ThickButton } from '../common/Widgets';
 
+/**
+ * 「开始记录轨迹」对话框。
+ *
+ * **2026-10-08 改：不再让用户选「所在区域」。** 原来这里是必选项，因为一条轨迹要归属
+ * 一栋楼；但轨迹其实会跨楼（用户的原话：「不要放在区域下面了，因为会跨区域」），
+ * 开录时逼着选一栋楼本身就是错的。现在轨迹不归属任何区域：
+ *  - 谁属于哪栋楼由**节点**自己带（打节点时选，并默认继承上一个节点）；
+ *  - 室内 / 室外在录制中用 RecordingBanner 上那个三态按钮随时切，开录时不问。
+ * 所以这个对话框只剩「起个名字」一件事。
+ */
 @CustomDialog
 export struct StartTrackDialog {
   controller?: CustomDialogController;
-  onStart?: (name: string, areaId: number) => void;
-  /** 预选区域 id（从区域详情页进入时传入）；-1 表示不预选 */
-  defaultAreaId: number = -1;
+  onStart?: (name: string) => void;
   @State name: string = '';
-  @State areas: Area[] = [];
-  @State selAreaId: number = -1;
-  @State selIndex: number = 0;
 
   aboutToAppear(): void {
     this.name = defaultTrackName();
-    Store.listAreas().then((list: Area[]) => {
-      this.areas = list;
-      if (list.length === 0) {
-        this.selAreaId = -1;
-        this.selIndex = 0;
-        return;
-      }
-      let idx = 0;
-      for (let i = 0; i < list.length; i++) {
-        if (list[i].id === this.defaultAreaId) {
-          idx = i;
-          break;
-        }
-      }
-      this.selIndex = idx;
-      this.selAreaId = list[idx].id;
-    });
-  }
-
-  private areaOptions(): Array<SelectOption> {
-    const out: SelectOption[] = [];
-    for (const a of this.areas) {
-      out.push({ value: a.name });
-    }
-    return out;
   }
 
   build() {
@@ -62,22 +42,7 @@ export struct StartTrackDialog {
           this.name = v;
         })
 
-      Text('所在区域（必选）').fontSize(Theme.F_META).fontColor(Theme.INK2).width('100%')
-      if (this.areas.length === 0) {
-        Text('还没有区域，请先在首页新建区域').fontSize(Theme.F_META).fontColor(Theme.DANGER).width('100%')
-      } else {
-        Select(this.areaOptions())
-          .selected(this.selIndex)
-          .value(this.areas[this.selIndex >= 0 ? this.selIndex : 0].name)
-          .font({ size: 13.5 })
-          .width('100%')
-          .onSelect((index: number, value: string) => {
-            this.selIndex = index;
-            this.selAreaId = this.areas[index].id;
-          })
-      }
-
-      Text('开始后每秒采样 定位 + 气压 + 地磁 + 朝向 + WiFi，每 5 秒自动保存；途中可记录节点（标记+照片）、拍风景照')
+      Text('开始后每秒采样 定位 + 气压 + 地磁 + 朝向 + WiFi，每 5 秒自动保存；途中可记录节点（标记+照片）、拍风景照、打拐点，并用「室内外」按钮切换当前所在的环境')
         .fontSize(Theme.F_META)
         .fontColor(Theme.INK2)
         .width('100%')
@@ -95,9 +60,6 @@ export struct StartTrackDialog {
         }.layoutWeight(1)
 
         Column() {
-          // 刻意不做 disabled：区域列表是异步加载的，对话框首次渲染时 areas 还是空的，
-          // 一旦被算成禁用态就会出现「按钮是灰的、怎么点都没反应」，而且没有任何提示。
-          // 改成点按时校验 + 明确提示，按钮永远是可按的，问题也能自己说清楚。
           ThickButton({
             label: '开始记录',
             kind: 'primary',
@@ -107,13 +69,9 @@ export struct StartTrackDialog {
                 promptAction.showToast({ message: '请先给这条轨迹起个名字' });
                 return;
               }
-              if (this.areas.length === 0) {
-                promptAction.showToast({ message: '还没有区域，请先在首页新建区域' });
-                return;
-              }
               this.controller?.close();
               if (this.onStart) {
-                this.onStart(this.name.trim(), this.selAreaId);
+                this.onStart(this.name.trim());
               }
             }
           })
@@ -174,9 +132,8 @@ export struct TrackListPage {
 
   private startDialog: CustomDialogController = new CustomDialogController({
     builder: StartTrackDialog({
-      defaultAreaId: -1,
-      onStart: (name: string, areaId: number): void => {
-        TrackRecorder.get().start(name, areaId).catch(() => {
+      onStart: (name: string): void => {
+        TrackRecorder.get().start(name).catch(() => {
           promptAction.showToast({ message: '启动记录失败' });
         });
       }

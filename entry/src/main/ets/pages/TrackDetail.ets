@@ -3,17 +3,22 @@ import { promptAction } from '@kit.ArkUI';
 // 自家的「区域」实体也叫 Area，直接 `import { Area }` 会**遮蔽**那个全局类型，
 // 真机编译直接报 10505001（Argument of type '(oldA: Area, newA: Area) => void' is not assignable…）。
 // 所以这里用别名导入实体，把全局的 Area 留给 onAreaChange。
-import { Area as CampusArea, Marker, NodeDraft, PhotoKind, Room, Track, TrackPhoto, TrackPoint, TrackTag, markerNameForNote, markerTypeForNote } from '../data/Entities';
-import { Store, UNASSIGNED_AREA_ID } from '../data/Store';
+import { Area as CampusArea, INDOOR_IN, INDOOR_OUT, INDOOR_UNKNOWN, Marker, NodeDraft, PhotoKind, Room, Track, TrackCorner, TrackPhoto, TrackPoint, TrackSegment, TrackTag, markerNameForNote, markerTypeForNote } from '../data/Entities';
+import { Store } from '../data/Store';
 import { photoUrl } from '../sensors/TrackMedia';
 import { TrackRecorder } from '../sensors/TrackRecorder';
 import { compassDir, fmtDuration, fmtTime } from '../common/Utils';
 import { Theme } from '../common/Theme';
 import { Chip, PillButton } from '../common/Widgets';
-import { AreaTagGroup, RoomDraft, canPlanRooms, effectiveAreaId, groupClassroomTagsByArea, planRooms } from '../common/RoomPlan';
+import { AreaTagGroup, RoomDraft, canPlanRooms, dominantAreaId, effectiveAreaId, groupClassroomTagsByArea, planRooms } from '../common/RoomPlan';
+import {
+  IndoorTotals, SegmentMerge, SegmentSplit, indoorLabel, indoorOf, indoorTotals, nextIndoor,
+  nodesInsideSegment, planMerge, planSplit, previousSegment, segmentDurationMs
+} from '../common/IndoorState';
 import { DrawStyle, FloorLevel, NodePin, TrackPlan, View3D, buildFloors, buildPlan, drawTrack3D, heightSourceLabel, pinFrom, weakAccuracyLimit, weakFix } from '../common/Track3D';
 import { FloorProbe } from '../common/FloorMatch';
 import { EditNodeDialog } from './CaptureDialogs';
+import { SplitSegmentDialog } from './SegmentDialog';
 
 /**
  * 视角预设（用户 2026-09-29 要求默认改成「去楼盘俯视那些沙盘模型」的观感）。
@@ -58,6 +63,15 @@ export struct TrackDetailPage {
   @State track: Track | undefined = undefined;
   @State points: TrackPoint[] = [];
   @State tags: TrackTag[] = [];
+  /** 一键打下的拐点数（2026-10-05 新增，只用于统计卡显示） */
+  @State cornerCount: number = 0;
+  /**
+   * 室内外分段（2026-10-08 批次三新增）。轨迹的室内外是**段**不是点的属性
+   * （见 Entities.TrackSegment），所以这里按段展示，并且允许事后修正。
+   */
+  @State segments: TrackSegment[] = [];
+  /** 分段区默认展开：段数少、而且「到底有没有录到」本身就是进来想确认的事 */
+  @State segmentsOpen: boolean = true;
   @State photos: TrackPhoto[] = [];
   /** 区域清单：节点的「所在建筑」和「生成房间」都按它显示/分楼（用别名类型，见文件头的说明） */
   @State areas: CampusArea[] = [];
@@ -116,6 +130,12 @@ export struct TrackDetailPage {
     });
     Store.listTrackPhotos(this.trackId).then((ps: TrackPhoto[]) => {
       this.photos = ps;
+    });
+    Store.listCorners(this.trackId).then((cs: TrackCorner[]) => {
+      this.cornerCount = cs.length;
+    });
+    Store.listSegments(this.trackId).then((ss: TrackSegment[]) => {
+      this.segments = ss;
     });
     Store.listAreas().then((as: CampusArea[]) => {
       this.areas = as;
@@ -190,10 +210,15 @@ export struct TrackDetailPage {
 
   // ---------- 区域显示 ----------
 
-  /** 轨迹本身归属的区域 id（未分区/旧数据用 0 表示） */
-  private trackAreaId(): number {
-    const aId: number | undefined = this.track ? this.track.areaId : undefined;
-    return aId === undefined ? UNASSIGNED_AREA_ID : aId;
+  /**
+   * 这条轨迹的「基线区域」＝ 它的节点里出现最多的那个区域（2026-10-08 改）。
+   *
+   * 旧口径取 `track.areaId`（轨迹自身的区域），但轨迹已经不归属区域了。基线只用来决定
+   * 「节点的区域简称要不要显示」——落在基线里的不显示、离题的才显示，所以用「这条轨迹
+   * 主要在哪个楼」比用一个已经不存在的归属更贴切，跨楼轨迹里也不会满屏重复。
+   */
+  private baseAreaId(): number {
+    return dominantAreaId(this.tags);
   }
 
   private areaLabelOfId(id: number): string {
@@ -208,16 +233,47 @@ export struct TrackDetailPage {
     return `区域 #${id}`;
   }
 
+  /** 这条轨迹的节点一共落在**几栋楼**里（只数真实区域，未分区不算一栋） */
+  private buildingCount(): number {
+    const seen: number[] = [];
+    for (const g of this.tags) {
+      const id: number = effectiveAreaId(g);
+      if (id > 0 && seen.indexOf(id) < 0) {
+        seen.push(id);
+      }
+    }
+    return seen.length;
+  }
+
+  /**
+   * 统计卡里「区域」那一行要显示什么（2026-10-08 改）。
+   *
+   * 轨迹不再归属区域，所以这里不能再写一个「这条轨迹的区域」——那是个不存在的东西。
+   * 改成照实说：跨了几栋楼、主要在哪栋（`dominantAreaId`＝节点里出现最多的那栋，
+   * 与图上「节点区域简称只在离题时显示」用的是同一个基线，不会互相打架）。
+   */
+  private areaStatText(): string {
+    if (this.tags.length === 0) {
+      return '（还没有节点）';
+    }
+    const n: number = this.buildingCount();
+    if (n === 0) {
+      return '未分区';
+    }
+    const main: string = this.areaLabelOfId(this.baseAreaId());
+    return n > 1 ? `跨 ${n} 栋 · 主 ${main}` : main;
+  }
+
   /** 节点实际归属的区域名（节点自己写的优先，没写就沿用轨迹的区域）；空 = 没有区域 */
   private nodeAreaLabel(g: TrackTag): string {
-    const id: number = effectiveAreaId(g, this.trackAreaId());
+    const id: number = effectiveAreaId(g);
     return id <= 0 ? '' : this.areaLabelOfId(id);
   }
 
   /** 节点区域简称（如 AC1）：只在「和轨迹自身的区域不同」时返回，避免单楼轨迹里满屏重复 */
   private nodeAreaShort(g: TrackTag): string {
     const label: string = this.nodeAreaLabel(g);
-    if (label.length === 0 || label === this.areaLabelOfId(this.trackAreaId())) {
+    if (label.length === 0 || label === this.areaLabelOfId(this.baseAreaId())) {
       return '';
     }
     const parts: string[] = label.split(' ');
@@ -228,7 +284,7 @@ export struct TrackDetailPage {
 
   /** 能不能生成房间：至少有一个「教室」节点归到了真实区域（未分区/没选区域的不能建房） */
   private canGenerateRooms(): boolean {
-    return canPlanRooms(this.tags, this.trackAreaId());
+    return canPlanRooms(this.tags);
   }
 
   /**
@@ -241,7 +297,7 @@ export struct TrackDetailPage {
     if (track === undefined) {
       return;
     }
-    const groups: AreaTagGroup[] = groupClassroomTagsByArea(this.tags, this.trackAreaId());
+    const groups: AreaTagGroup[] = groupClassroomTagsByArea(this.tags);
     if (groups.length === 0) {
       promptAction.showToast({ message: '没有可新建的房间：「教室」节点都还没归到具体区域' });
       return;
@@ -361,9 +417,6 @@ export struct TrackDetailPage {
           boundRoomProvider: (): number => {
             return this.boundRoomId;
           },
-          trackAreaIdProvider: (): number => {
-            return this.trackAreaId();
-          },
           onSave: (tagId: number, draft: NodeDraft): void => {
             this.applyEdit(tagId, draft);
           },
@@ -414,6 +467,126 @@ export struct TrackDetailPage {
       .catch((e: Error) => {
         promptAction.showToast({ message: `修改失败：${e.message}` });
       });
+  }
+
+  // ---------- 室内外分段（2026-10-08 批次三）----------
+
+  /**
+   * 算段时长用的「现在」。
+   *
+   * 用轨迹自己的结束时刻，而不是 `Date.now()`：轨迹结束后它就是定值，于是这一屏的数字
+   * 不会自己变（详情页没有心跳定时器）。只有**正在录的那一条**才会退回真实时间 ——
+   * 那种情况下最后一段本来就该越走越长。
+   */
+  private segmentNow(): number {
+    if (this.track !== undefined && this.track.endedAt !== undefined) {
+      return this.track.endedAt as number;
+    }
+    return Date.now();
+  }
+
+  /** 统计卡那一行：「室内 12:30 · 室外 3:10 · 未标 0:45」 */
+  private indoorStatText(): string {
+    if (this.segments.length === 0) {
+      return '没有记录（录制时没按过「室内外」，本版之前的轨迹都没有）';
+    }
+    const t: IndoorTotals = indoorTotals(this.segments, this.segmentNow());
+    const parts: string[] = [];
+    if (t.inMs > 0) {
+      parts.push(`室内 ${fmtDuration(Math.floor(t.inMs / 1000))}`);
+    }
+    if (t.outMs > 0) {
+      parts.push(`室外 ${fmtDuration(Math.floor(t.outMs / 1000))}`);
+    }
+    if (t.unknownMs > 0) {
+      parts.push(`未标 ${fmtDuration(Math.floor(t.unknownMs / 1000))}`);
+    }
+    return parts.length > 0 ? parts.join(' · ') : '0:00';
+  }
+
+  /** 室内外状态 → 徽章配色：室内蓝（floor）、室外黄（scene）、未标灰（plain） */
+  private indoorChipKind(v: number): string {
+    if (v === INDOOR_IN) {
+      return 'floor';
+    }
+    if (v === INDOOR_OUT) {
+      return 'scene';
+    }
+    return 'plain';
+  }
+
+  /** 一段的时间范围与时长 */
+  private segmentRange(s: TrackSegment): string {
+    const end: string = s.endMs !== undefined ? fmtTime(s.endMs as number) : '还在录';
+    const d: number = Math.floor(segmentDurationMs(s, this.segmentNow()) / 1000);
+    return `${fmtTime(s.startMs)} → ${end} · ${fmtDuration(d)}`;
+  }
+
+  /** 某个节点落在哪一段（节点自身的室内外由它落在哪一段推出来，不用另存字段） */
+  private nodeIndoor(g: TrackTag): number {
+    return indoorOf(this.segments, g.timeMs);
+  }
+
+  /** 点状态徽章：三态循环（未标 → 室内 → 室外 → 未标） */
+  private cycleSegment(s: TrackSegment): void {
+    const next: number = nextIndoor(s.indoor);
+    Store.setSegmentIndoor(s.id, next).then(() => {
+      promptAction.showToast({ message: `这一段已改成「${indoorLabel(next)}」` });
+    }).catch((e: Error) => {
+      promptAction.showToast({ message: `修改失败：${e.message}` });
+    });
+  }
+
+  /**
+   * 「切分」：先挑出这一段内部能当分界点的节点，再让用户选一个、并指定后半段的状态。
+   * 一段里一个节点都没有就当场说明白 —— 不让用户打开一个空的对话框。
+   */
+  private openSplit(s: TrackSegment): void {
+    const cands: TrackTag[] = nodesInsideSegment(this.tags, s);
+    if (cands.length === 0) {
+      promptAction.showToast({ message: '这一段里没有节点可以当分界：先在这段时间里补一个节点' });
+      return;
+    }
+    // 每次打开都新建控制器：候选节点是「这一段专属」的数据，走提供者反而绕一圈。
+    // （本工程踩过的那个坑是「在相机回调里反复 new 覆盖旧实例」，这里没有那条链路。）
+    const dialog: CustomDialogController = new CustomDialogController({
+      builder: SplitSegmentDialog({
+        candidates: cands,
+        segIndoor: s.indoor,
+        onConfirm: (atMs: number, newIndoor: number): void => {
+          this.doSplit(s, atMs, newIndoor);
+        }
+      }),
+      customStyle: false
+    });
+    dialog.open();
+  }
+
+  private doSplit(s: TrackSegment, atMs: number, newIndoor: number): void {
+    const plan: SegmentSplit | undefined = planSplit(s, atMs, newIndoor);
+    if (plan === undefined) {
+      promptAction.showToast({ message: '这个时刻不能切分（不在这一段内部）' });
+      return;
+    }
+    Store.splitSegment(plan).then(() => {
+      promptAction.showToast({ message: `已切成两段，后一段是「${indoorLabel(newIndoor)}」` });
+    }).catch((e: Error) => {
+      promptAction.showToast({ message: `切分失败：${e.message}` });
+    });
+  }
+
+  /** 「并入上一段」：多按了一下按钮时用（合并后那一段取前一段的状态） */
+  private mergeWithPrevious(s: TrackSegment): void {
+    const plan: SegmentMerge | undefined = planMerge(s, previousSegment(this.segments, s));
+    if (plan === undefined) {
+      promptAction.showToast({ message: '这已经是最前面的一段了' });
+      return;
+    }
+    Store.mergeSegment(plan).then(() => {
+      promptAction.showToast({ message: `已并入前一段（${indoorLabel(plan.indoor)}）` });
+    }).catch((e: Error) => {
+      promptAction.showToast({ message: `合并失败：${e.message}` });
+    });
   }
 
   /** 删除节点前确认（照片会一起删掉，不可恢复） */
@@ -554,6 +727,12 @@ export struct TrackDetailPage {
 
   private nodeSub(g: TrackTag): string {
     let s = fmtTime(g.timeMs);
+    // 这个节点落在哪一段（室内外是**推导**出来的，节点表里没有这个字段）。
+    // 不另做徽章：这一行的徽章已经有类型/楼层/区域三个，再加一个在窄屏上会挤爆。
+    const ind: number = this.nodeIndoor(g);
+    if (ind !== INDOOR_UNKNOWN) {
+      s += ` · ${indoorLabel(ind)}`;
+    }
     if (g.headingDeg !== undefined) {
       s += ` · 朝 ${g.headingDeg.toFixed(0)}° ${compassDir(g.headingDeg)}`;
     }
@@ -636,8 +815,7 @@ export struct TrackDetailPage {
             if (this.statsOpen) {
               Row() {
                 Text('区域').fontSize(13).fontColor(Theme.INK2).width(72)
-                Text(this.track
-                  ? (this.track.areaName !== undefined ? this.track.areaName : '未分区') : '-')
+                Text(this.track ? this.areaStatText() : '-')
                   .fontSize(13.5).fontWeight(FontWeight.Medium).fontColor(Theme.INK).layoutWeight(1)
               }.width('100%')
               Row() {
@@ -666,6 +844,16 @@ export struct TrackDetailPage {
               Row() {
                 Text('节点').fontSize(13).fontColor(Theme.INK2).width(72)
                 Text(`${this.tags.length}`)
+                  .fontSize(13.5).fontWeight(FontWeight.Medium).fontColor(Theme.INK).layoutWeight(1)
+              }.width('100%')
+              Row() {
+                Text('拐点').fontSize(13).fontColor(Theme.INK2).width(72)
+                Text(this.cornerCount > 0 ? `${this.cornerCount}` : '0（采集时按「拐点」一键标记）')
+                  .fontSize(13.5).fontWeight(FontWeight.Medium).fontColor(Theme.INK).layoutWeight(1)
+              }.width('100%')
+              Row() {
+                Text('室内外').fontSize(13).fontColor(Theme.INK2).width(72)
+                Text(this.indoorStatText())
                   .fontSize(13.5).fontWeight(FontWeight.Medium).fontColor(Theme.INK).layoutWeight(1)
               }.width('100%')
               Row() {
@@ -918,6 +1106,84 @@ export struct TrackDetailPage {
             .borderRadius(Theme.R_CARD)
             .border({ width: 2, color: Theme.LINE })
           }
+
+          // 室内外分段：轨迹的室内外是**段**（不是某个点的属性，见 Entities.TrackSegment），
+          // 所以这里按段展示，并且允许事后修正 —— 录制时那个按钮是人在走路、分神的时候按的，
+          // 「进楼那一下忘了按」太常见了；不切成两半就没办法补（只有一段时，
+          // 无论怎么改状态都只能让整条轨迹变室内或室外）。
+          Column({ space: 0 }) {
+            Row({ space: 8 }) {
+              Text(`室内外分段（${this.segments.length}）`).fontSize(Theme.F_SECTION)
+                .fontWeight(FontWeight.Bold).fontColor(Theme.INK)
+              Blank()
+              Text(this.segmentsOpen ? '收起 ▾' : '展开 ▸')
+                .fontSize(Theme.F_META).fontWeight(FontWeight.Bold).fontColor(Theme.RED)
+            }
+            .width('100%')
+            .onClick(() => {
+              this.segmentsOpen = !this.segmentsOpen;
+            })
+
+            if (this.segmentsOpen) {
+              if (this.segments.length === 0) {
+                Text('这条轨迹没有室内外记录：录制时按横幅上那条「室内外」按钮就会记下来'
+                  + '（本版之前录的轨迹没有，也不做假回填）。')
+                  .fontSize(Theme.F_META).fontColor(Theme.INK2).width('100%').margin({ top: 8 })
+              } else {
+                Text('按时间顺序分成若干段。点状态徽章循环切换（未标 → 室内 → 室外）；'
+                  + '「切分」用来补录漏按的那一下 —— 选一个当时打下的节点当分界；'
+                  + '「并入上一段」用来修多按的那一下。')
+                  .fontSize(Theme.F_META).fontColor(Theme.INK2).width('100%').margin({ top: 8 })
+
+                ForEach(this.segments, (s: TrackSegment) => {
+                  Column({ space: 8 }) {
+                    Row({ space: 10 }) {
+                      // 状态徽章：外面包一层才能接 onClick（自定义组件本身不吃通用属性）
+                      Column() {
+                        Chip({ text: indoorLabel(s.indoor), kind: this.indoorChipKind(s.indoor), iconKey: '' })
+                      }.onClick(() => {
+                        this.cycleSegment(s);
+                      })
+                      Text(this.segmentRange(s))
+                        .fontSize(13).fontColor(Theme.INK2).layoutWeight(1)
+                        .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+                    }.width('100%')
+
+                    Row({ space: 8 }) {
+                      PillButton({
+                        label: '切分…',
+                        onTap: (): void => {
+                          this.openSplit(s);
+                        }
+                      })
+                      if (previousSegment(this.segments, s) !== undefined) {
+                        PillButton({
+                          label: '并入上一段',
+                          onTap: (): void => {
+                            this.mergeWithPrevious(s);
+                          }
+                        })
+                      }
+                      Blank()
+                    }.width('100%')
+                  }
+                  .width('100%')
+                  .padding({ top: 10, bottom: 10 })
+                }, (s: TrackSegment) => s.id + '')
+              }
+            } else {
+              // 收起时给一句话（沿用采样点那一段的做法）：只剩标题会让人以为没内容
+              Text(this.segments.length === 0
+                ? '这条轨迹没有室内外记录'
+                : `共 ${this.segments.length} 段：${this.indoorStatText()}`)
+                .fontSize(Theme.F_META).fontColor(Theme.INK2).width('100%').margin({ top: 8 })
+            }
+          }
+          .width('100%')
+          .padding(16)
+          .backgroundColor(Theme.CARD)
+          .borderRadius(Theme.R_CARD)
+          .border({ width: 2, color: Theme.LINE })
 
           // 逐点采样（默认收起，见 pointsOpen 的注释）
           Column({ space: 0 }) {

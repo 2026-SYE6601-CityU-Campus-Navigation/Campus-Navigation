@@ -268,6 +268,20 @@ export struct AreaDetailPage {
     return this.areaId === UNASSIGNED_AREA_ID;
   }
 
+  /**
+   * 轨迹区标题。
+   *
+   * 2026-10-08 起轨迹**不归属区域**，所以「本区域的轨迹」这种说法已经不成立了：
+   * 这里列的是「**有节点落在这个区域**的轨迹」（`Store.listTracksTouchingArea`），
+   * 一条跨楼轨迹会同时出现在它经过的每一栋楼里。标题照实写，免得用户以为
+   * 「删了这栋楼里的轨迹 = 删掉了整条轨迹」。
+   */
+  private trackSectionTitle(): string {
+    return this.isUnassigned()
+      ? `涉及未分区节点的轨迹（${this.tracks.length}）`
+      : `涉及本楼的轨迹（${this.tracks.length}）`;
+  }
+
   /** 区域分类名（空串按「城市大学」显示，与首页分区的口径保持一致） */
   private areaCategoryLabel(): string {
     const c: string = this.area ? this.area.category : '';
@@ -295,7 +309,7 @@ export struct AreaDetailPage {
     Store.listRooms(this.areaId).then((r: Room[]) => {
       this.rooms = r;
     });
-    Store.listTracksInArea(this.areaId).then((t: Track[]) => {
+    Store.listTracksTouchingArea(this.areaId).then((t: Track[]) => {
       this.tracks = t;
     });
   };
@@ -340,9 +354,8 @@ export struct AreaDetailPage {
   private openStartDialog(): void {
     this.startDialog = new CustomDialogController({
       builder: StartTrackDialog({
-        defaultAreaId: this.areaId,
-        onStart: (name: string, areaId: number): void => {
-          TrackRecorder.get().start(name, areaId).catch(() => {
+        onStart: (name: string): void => {
+          TrackRecorder.get().start(name).catch(() => {
             promptAction.showToast({ message: '启动记录失败' });
           });
         }
@@ -541,7 +554,13 @@ export struct AreaDetailPage {
   private deleteArea(): void {
     promptAction.showDialog({
       title: `删除区域「${this.areaName()}」`,
-      message: `房间 ${this.rooms.length} 个 · 轨迹 ${this.tracks.length} 条。\n移入未分区：保留全部数据；彻底删除：数据与照片将全部丢失。`,
+      message: `房间 ${this.rooms.length} 个 · 有节点在这一区域的轨迹 ${this.tracks.length} 条。\n`
+        // 2026-10-08：这段说明必须跟着模型改 —— 轨迹不再归属区域之后，「彻底删除」也
+        // **不会**再删轨迹/采样点/照片了（只删这栋楼的房间与标记、把节点上的归属清掉）。
+        // 原来那句「数据与照片将全部丢失」现在会让用户以为整条跨楼轨迹要没了，是吓人的假消息。
+        + '移入未分区：节点与房间都保留，只是不再属于任何建筑；\n'
+        + '彻底删除：这栋楼的房间与标记一起删掉，节点上的归属改成「未分区」——'
+        + '轨迹本身、采样点、节点照片都不会被删。',
       buttons: [
         { text: '取消', color: Theme.INK2 },
         { text: '移入未分区', color: Theme.INK },
@@ -598,8 +617,8 @@ export struct AreaDetailPage {
               .maxLines(1)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
             Text(this.isUnassigned()
-              ? `房间 ${this.rooms.length} · 轨迹 ${this.tracks.length}`
-              : `${this.areaCategoryLabel()} · 房间 ${this.rooms.length} · 轨迹 ${this.tracks.length}`)
+              ? `房间 ${this.rooms.length} · 有未分区节点的轨迹 ${this.tracks.length}`
+              : `${this.areaCategoryLabel()} · 房间 ${this.rooms.length} · 涉及本楼的轨迹 ${this.tracks.length}`)
               .fontSize(Theme.F_META)
               .fontColor(Theme.INK2)
           }.layoutWeight(1).alignItems(HorizontalAlign.Start)
@@ -673,7 +692,7 @@ export struct AreaDetailPage {
               Row({ space: 8 }) {
                 Text(this.selectMode
                   ? `已选 ${this.selectedIds.length} / ${this.tracks.length}`
-                  : `轨迹（${this.tracks.length}）`)
+                  : this.trackSectionTitle())
                   .fontSize(Theme.F_SECTION)
                   .fontWeight(FontWeight.Bold)
                   .fontColor(Theme.INK)
@@ -760,8 +779,9 @@ export struct AreaDetailPage {
 
               if (this.tracks.length === 0) {
                 Text(this.isUnassigned()
-                  ? '未分区没有轨迹'
-                  : '该区域还没有轨迹，点右下角「开始记录」采集（途中可记录节点 / 拍风景照）')
+                  ? '还没有「未分区」的节点：记录节点时选了「（未分区）」的会出现在这里'
+                  : '这栋楼还没有节点：记录轨迹时在这里打一个节点（门 / 门禁 / 教室…），'
+                    + '这条轨迹就会出现在这里。轨迹本身不归属任何一栋楼 —— 一条轨迹可以跨好几栋楼')
                   .fontSize(13)
                   .fontColor(Theme.INK2)
                   .width('100%')

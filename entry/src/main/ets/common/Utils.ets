@@ -90,11 +90,16 @@ export function safeFileName(s: string): string {
 
 // ---------- 轨迹列表：副标题 + 按天分组（用户 2026-09-29 要求「按天分类」） ----------
 
-/** 列表里一条轨迹的副标题：[区域] 16:27:25 · 时长 05:41 · 341 点 */
+/**
+ * 列表里一条轨迹的副标题：16:27:25 · 时长 05:41 · 341 点
+ *
+ * **2026-10-08 改：去掉了原来的 `[区域]` 前缀。** 轨迹不再归属区域（会跨区域），
+ * 挂一个区域名在副标题上是错的。真要显示「采到哪栋楼」，应当由节点区域汇总而来，
+ * 而 `Track` 里没有那个信息 —— 宁可先不显示，也不显示一个不存在的归属。
+ */
 export function trackSubtitle(t: Track): string {
   const end: number = t.endedAt !== undefined ? (t.endedAt as number) : t.startedAt;
-  const area: string = t.areaName !== undefined ? (t.areaName as string) : '未分区';
-  let s = `[${area}] ${fmtTime(t.startedAt)} · 时长 `
+  let s = `${fmtTime(t.startedAt)} · 时长 `
     + `${fmtDuration(Math.floor((end - t.startedAt) / 1000))} · ${t.pointCount} 点`;
   if (t.endedAt === undefined) {
     s += ' · 进行中';

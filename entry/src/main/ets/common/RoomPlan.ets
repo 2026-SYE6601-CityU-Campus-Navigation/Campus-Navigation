@@ -57,27 +57,30 @@ export function countClassroomTags(tags: TrackTag[]): number {
 }
 
 /**
- * 节点实际归属的区域：节点自己写的优先；没写（旧数据）就沿用轨迹的区域。
+ * 节点实际归属的区域：**只认节点自己写的那个**（2026-10-08 改）。
+ *
+ * 旧口径是「节点没写就沿用轨迹的区域」，但轨迹已经不归属区域了（一条轨迹会跨好几栋楼，
+ * 用它的区域去兜底本身就是错的），所以回退值取消 —— 节点没写就是「不属于任何楼」。
+ * 老数据不会有问题：升级时已经把「NULL 的节点 areaId」按当时的轨迹区域回填过了
+ * （见 Store 里那段一次性 UPDATE）。
+ *
  * 返回 <= 0 表示这个节点不属于任何真实区域（未分区/还没建区域），不能建房。
  */
-export function effectiveAreaId(tag: TrackTag, defaultAreaId: number): number {
-  if (tag.areaId !== undefined && tag.areaId > 0) {
-    return tag.areaId;
-  }
-  return defaultAreaId;
+export function effectiveAreaId(tag: TrackTag): number {
+  return (tag.areaId !== undefined && tag.areaId > 0) ? tag.areaId : 0;
 }
 
 /**
  * 把轨迹里的教室节点按「各自归属的区域」分组，只保留能建房的组（区域 > 0）。
  * 组内保持原时间顺序（tags 已是按 timeMs 升序查出来的）。
  */
-export function groupClassroomTagsByArea(tags: TrackTag[], defaultAreaId: number): AreaTagGroup[] {
+export function groupClassroomTagsByArea(tags: TrackTag[]): AreaTagGroup[] {
   const out: AreaTagGroup[] = [];
   for (const tag of tags) {
     if (!isClassroomTag(tag)) {
       continue;
     }
-    const aId: number = effectiveAreaId(tag, defaultAreaId);
+    const aId: number = effectiveAreaId(tag);
     if (aId <= 0) {
       continue;
     }
@@ -98,8 +101,49 @@ export function groupClassroomTagsByArea(tags: TrackTag[], defaultAreaId: number
 }
 
 /** 能不能生成房间：至少有一个教室节点属于真实区域 */
-export function canPlanRooms(tags: TrackTag[], defaultAreaId: number): boolean {
-  return groupClassroomTagsByArea(tags, defaultAreaId).length > 0;
+export function canPlanRooms(tags: TrackTag[]): boolean {
+  return groupClassroomTagsByArea(tags).length > 0;
+}
+
+/**
+ * 一条轨迹里节点出现最多的那个区域 id（0 = 没有）。
+ *
+ * 用途：轨迹详情页给节点标区域简称时，用它当「基线」——落在基线区域里的节点不显示简称，
+ * 只有「离题」的那些才显示。旧口径拿「轨迹自身的区域」当基线，但轨迹已经不归属区域了，
+ * 于是改成「这条轨迹主要在哪个楼」，语义比原来更贴切（跨楼轨迹里也不会满屏重复）。
+ * 并列时取 id 小的，保证结果稳定（同一批数据每次跑出来一样）。
+ */
+export function dominantAreaId(tags: TrackTag[]): number {
+  const ids: number[] = [];
+  const counts: number[] = [];
+  for (const tag of tags) {
+    const aId: number = effectiveAreaId(tag);
+    if (aId <= 0) {
+      continue;
+    }
+    let at = -1;
+    for (let i = 0; i < ids.length; i++) {
+      if (ids[i] === aId) {
+        at = i;
+        break;
+      }
+    }
+    if (at < 0) {
+      ids.push(aId);
+      counts.push(1);
+    } else {
+      counts[at] = counts[at] + 1;
+    }
+  }
+  let bestId = 0;
+  let bestN = 0;
+  for (let i = 0; i < ids.length; i++) {
+    if (counts[i] > bestN || (counts[i] === bestN && ids[i] < bestId)) {
+      bestId = ids[i];
+      bestN = counts[i];
+    }
+  }
+  return bestId;
 }
 
 /** 节点 → 房间名 */

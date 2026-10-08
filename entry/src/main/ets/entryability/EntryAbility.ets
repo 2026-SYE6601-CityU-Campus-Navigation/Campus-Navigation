@@ -1,7 +1,8 @@
-import { AbilityConstant, UIAbility, Want, abilityAccessCtrl } from '@kit.AbilityKit';
+import { AbilityConstant, UIAbility, Want } from '@kit.AbilityKit';
 import { window } from '@kit.ArkUI';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { Ctx } from '../common/Utils';
+import { PERM_MISSING_KEY, requestAndReport } from '../common/Permissions';
 import { Store } from '../data/Store';
 import { TrackRecorder } from '../sensors/TrackRecorder';
 
@@ -13,17 +14,17 @@ export default class EntryAbility extends UIAbility {
     AppStorage.setOrCreate('rm_recording', false);
     AppStorage.setOrCreate('rm_elapsed', 0);
     AppStorage.setOrCreate('rm_rec_track_name', '');
+    // 权限自查的结果（首页靠它显示提示条）。先给空数组，申请完再如实覆盖。
+    AppStorage.setOrCreate(PERM_MISSING_KEY, [] as string[]);
 
-    const atManager: abilityAccessCtrl.AtManager = abilityAccessCtrl.createAtManager();
-    atManager.requestPermissionsFromUser(this.context, [
-      'ohos.permission.LOCATION',
-      'ohos.permission.APPROXIMATELY_LOCATION',
-      'ohos.permission.LOCATION_IN_BACKGROUND',
-      'ohos.permission.ACCELEROMETER',
-      'ohos.permission.GYROSCOPE',
-      'ohos.permission.ACTIVITY_MOTION'
-    ]).then(() => {
-      hilog.info(0x0000, 'RoomMarker', 'location permission granted');
+    // ⚠️ 2026-10-06 改：原来这里是 `.then(() => hilog.info('location permission granted'))`
+    // —— **那是错的**。`requestPermissionsFromUser` 在用户点「拒绝」时同样 resolve，
+    // 真正的结果在返回值的 `authResults` 里（0=允许，-1=拒绝）。所以那句日志是**无条件**打的，
+    // 拒绝与批准写出一模一样的记录，App 界面上也毫无提示。
+    // 后果：2026-10-05 用户带机去城大采集，新包名（hk.edu.cityu.campusnav）被系统当成新 App、
+    // 旧授权不继承，全程没有 GPS，白跑一趟。现在改成用返回值，并把缺失项落进 AppStorage 由首页显示。
+    requestAndReport(this.context).then((missing: string[]) => {
+      AppStorage.setOrCreate(PERM_MISSING_KEY, missing);
     }).catch((err: Object) => {
       hilog.error(0x0000, 'RoomMarker', 'permission request failed: %{public}s', JSON.stringify(err));
     });
