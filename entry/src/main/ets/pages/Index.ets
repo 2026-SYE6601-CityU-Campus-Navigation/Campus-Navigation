@@ -1,16 +1,21 @@
 // NavPathStack 在新版 SDK（API 21+）中为 ArkUI 全局类型，无需也不能从 @kit.ArkUI 导入
 import { promptAction } from '@kit.ArkUI';
-import { Area, AREA_CATEGORY_CITYU, AREA_CATEGORY_TEST, Room, Track, areaCategoryOptions } from '../data/Entities';
+import {
+  Area, AREA_CATEGORY_CITYU, AREA_CATEGORY_TEST, Room, Track, TrackTag, areaCategoryOptions
+} from '../data/Entities';
 import { Store, UNASSIGNED_AREA_ID } from '../data/Store';
 import { AreaDetailPage } from './AreaDetail';
 import { GalleryParam, TrackGalleryPage } from './TrackGallery';
 import { TrackListPage } from './TrackList';
 import { TrackDetailPage } from './TrackDetail';
+import { WhereAmIPage } from './WhereAmI';
 import { LiveSensorsPage } from './LiveSensors';
 import { RoomDetailPage } from './RoomDetail';
 import { CampusBuilding, cityuBuildings, planBuildingAreas } from '../common/Campus';
 import { ClassroomParseResult, ClassroomPlan, ClassroomRow, buildingNoteOf, mergeRows, parseClassroomLines, planClassrooms, roomKeysOf, seedClassrooms } from '../common/Classrooms';
-import { fmtDateTime } from '../common/Utils';
+import { InheritedNode, previousNode } from '../common/NodeInherit';
+import { Ctx, fmtDateTime } from '../common/Utils';
+import { PERM_MISSING_KEY, describeMissing, openSettingsForMissing, permissionTitle, queryMissing } from '../common/Permissions';
 import { Theme } from '../common/Theme';
 import { PillButton, ThickButton } from '../common/Widgets';
 
@@ -30,6 +35,9 @@ struct Index {
         },
         onLive: () => {
           this.navStack.pushPath({ name: 'live' });
+        },
+        onWhereAmI: () => {
+          this.navStack.pushPath({ name: 'whereami' });
         }
       })
     }
@@ -90,6 +98,15 @@ struct Index {
         TrackGalleryPage({
           trackId: (param as GalleryParam).trackId,
           startIndex: (param as GalleryParam).startIndex,
+          onBack: () => {
+            this.navStack.pop();
+          }
+        })
+      }
+      .hideTitleBar(true)
+    } else if (name === 'whereami') {
+      NavDestination() {
+        WhereAmIPage({
           onBack: () => {
             this.navStack.pop();
           }
@@ -280,11 +297,28 @@ struct AreaListPage {
   @State lastAreaName: string = '';
   @State lastTrackName: string = '';
   @State lastAt: number = 0;
+  /**
+   * 还缺哪几项权限（2026-10-06 新增）。
+   *
+   * **为什么要有**：包名改成 hk.edu.cityu.campusnav 后系统视作新 App，旧授权不继承，
+   * 用户 2026-10-05 带机去城大采集时全程没有 GPS 却看不到任何提示，白跑一趟。
+   * 请求结果由 EntryAbility 落进 AppStorage，这里负责**显示出来**。
+   *
+   * ⚠️ 显隐条件走心跳 ForEach —— 本工程踩过「`if (AppStorage.get(...))` 不是响应式的、
+   * 只在节点创建时求值一次」的坑（见 RecordingBanner 顶部注释），所以用一个 1 秒心跳
+   * 把状态同步进本地 @State，并把 `if` 写在 ForEach 内部。
+   */
+  @State permMissing: string[] = [];
+  /** 心跳：只为驱动权限提示条的条件重建 */
+  @State heartbeat: number = 0;
+  private permTimer: number = -1;
   onOpenArea: (id: number) => void = (id: number) => {
   };
   onTracks: () => void = () => {
   };
   onLive: () => void = () => {
+  };
+  onWhereAmI: () => void = () => {
   };
 
   private reload = (): void => {
@@ -294,30 +328,86 @@ struct AreaListPage {
     Store.listRooms(UNASSIGNED_AREA_ID).then((r) => {
       this.unassignedRoomCount = r.length;
     });
-    Store.listTracksInArea(UNASSIGNED_AREA_ID).then((t) => {
+    Store.listTracksTouchingArea(UNASSIGNED_AREA_ID).then((t) => {
       this.unassignedTrackCount = t.length;
     });
-    // 最近一条轨迹所在区域 = 上次采到哪
+    // 「上次采集到哪」＝ 最近一条轨迹的**最后一个节点**落在哪栋楼（2026-10-08 改）。
+    // 原来读的是 track.areaName（轨迹自身的区域），但轨迹已经不归属区域了 —— 会跨楼。
+    // 最后一个节点才是「上次采到哪」真正想问的。一个节点都没有就按未分区算。
+    // 顺带在这里自己取一次区域表：this.areas 是另一个 promise 里填的，不能假设它已经到货，
+    // 否则首帧会写出一个空的区域名。
     Store.listTracks().then((ts: Track[]) => {
       if (ts.length === 0) {
         this.lastAreaId = -2;
         return;
       }
       const t = ts[0];
-      this.lastAreaName = t.areaName !== undefined ? t.areaName : '未分区';
       this.lastTrackName = t.name;
       this.lastAt = t.startedAt;
-      this.lastAreaId = t.areaId !== undefined ? t.areaId : UNASSIGNED_AREA_ID;
+      return Store.listTrackTags(t.id).then((tags: TrackTag[]) => {
+        const prev: InheritedNode = previousNode(tags);
+        const aId: number = prev.exists ? prev.areaId : 0;
+        return Store.listAreas().then((areas: Area[]) => {
+          this.lastAreaId = aId > 0 ? aId : UNASSIGNED_AREA_ID;
+          this.lastAreaName = aId > 0 ? this.areaNameOfId(areas, aId) : '未分区';
+        });
+      });
     });
   };
 
   aboutToAppear(): void {
     this.reload();
     Store.subscribe(this.reload);
+    this.syncPerm();
+    // 1 秒一次：用户点「去设置授权」出去、在系统设置里开完权限回来，提示条能自己收掉
+    this.permTimer = setInterval(() => {
+      this.heartbeat++;
+      this.syncPerm();
+    }, 1000);
   }
 
   aboutToDisappear(): void {
     Store.unsubscribe(this.reload);
+    if (this.permTimer >= 0) {
+      clearInterval(this.permTimer);
+      this.permTimer = -1;
+    }
+  }
+
+  /**
+   * 同步权限缺失状态。
+   *
+   * 优先用**静默查询**（不弹窗）：能拿到就以它为准 —— 用户从系统设置回来后靠这条自愈。
+   * `queryMissing()` 返回 `undefined` 表示**查不出来**（拿不到自身 tokenId 等），
+   * 这时保留 AppStorage 里的原值而**不要当成「都不缺」**，否则一次查询失败就会把
+   * 真实的缺权限提示误收掉，又变成「一声不吭」。
+   */
+  private syncPerm(): void {
+    const q: string[] | undefined = queryMissing();
+    if (q !== undefined) {
+      this.permMissing = q;
+      AppStorage.setOrCreate(PERM_MISSING_KEY, q);
+      return;
+    }
+    const v: string[] | undefined = AppStorage.get<string[]>(PERM_MISSING_KEY);
+    this.permMissing = v === undefined ? [] : v;
+  }
+
+  /**
+   * 去系统设置里补授权。
+   * 用户连续拒绝两次后系统不再弹窗（`requestPermissionsFromUser` 直接回 -1），
+   * 设置页是唯一的出路 —— 这也是「只写一行日志」救不回来的那一步。
+   */
+  private gotoSettings(): void {
+    const ctx = Ctx.ui;
+    if (!ctx) {
+      promptAction.showToast({ message: '拿不到应用上下文，请手动到「设置 → 应用 → 权限」里打开' });
+      return;
+    }
+    const missing: string[] = this.permMissing;
+    openSettingsForMissing(ctx, missing).catch(() => {
+      promptAction.showToast({ message: '打开设置页失败，请手动到「设置 → 应用 → 权限」里打开' });
+    });
   }
 
   /**
@@ -572,6 +662,43 @@ struct AreaListPage {
           })
         }.width('100%').padding({ left: Theme.PAD, right: 14, top: 14, bottom: 12 })
 
+        // ─── 权限提示条（2026-10-06）───────────────────────────────────────
+        // 缺权限时**必须看得见**：上一轮就是因为它一声不吭，用户带机跑去城大采集、
+        // 全程没有 GPS 才发现。这里是「App 说话」的地方。
+        //
+        // ⚠️ 显隐条件写在心跳 ForEach 内部：`if (AppStorage.get(...))` 这种条件只在节点
+        // 创建时求值一次，不是响应式的（本工程踩过的坑，详见 RecordingBanner 顶部注释）。
+        ForEach([this.heartbeat], (h: number) => {
+          if (this.permMissing.length > 0) {
+            Column({ space: 6 }) {
+              Text(permissionTitle(this.permMissing))
+                .fontSize(13.5).fontWeight(FontWeight.Bold).fontColor(Theme.YELLOW_INK)
+                .width('100%')
+              Text(describeMissing(this.permMissing))
+                .fontSize(Theme.F_META).fontColor(Theme.YELLOW_INK)
+                .width('100%')
+              Row() {
+                Column() {
+                  ThickButton({
+                    label: '去设置授权',
+                    kind: 'primary',
+                    compact: true,
+                    onTap: (): void => {
+                      this.gotoSettings();
+                    }
+                  })
+                }.width('100%')
+              }.width('100%').margin({ top: 2 })
+            }
+            .width('100%')
+            .padding(14)
+            .backgroundColor(Theme.YELLOW_SOFT)
+            .borderRadius(18)
+            .border({ width: 2, color: Theme.YELLOW_DEEP })
+            .margin({ left: Theme.PAD, right: Theme.PAD, bottom: 12 })
+          }
+        }, (h: number) => h + '')
+
         if (this.isEmpty()) {
           Column({ space: 8 }) {
             Blank()
@@ -623,6 +750,39 @@ struct AreaListPage {
                 .borderRadius(Theme.R_HERO)
                 .border({ width: { bottom: 5 }, color: { bottom: Theme.RED_DEEP } })
               }
+
+              // 「我在哪」（2026-10-08）：按 WiFi 指纹认出你现在在哪个地点。
+              // 放在英雄卡下面而不是顶栏：顶栏已经三个按钮，再加就挤了；而这个入口是
+              // 「回到校园时随手点一下」的动作，放在首页第一屏、不用去找。
+              Row({ space: 12 }) {
+                Column() {
+                  Text('哪')
+                    .fontSize(15)
+                    .fontWeight(FontWeight.Bold)
+                    .fontColor(Theme.RED)
+                }
+                .width(44).height(44)
+                .justifyContent(FlexAlign.Center)
+                .backgroundColor(Theme.RED_SOFT)
+                .borderRadius(Theme.R_THUMB)
+
+                Column({ space: 3 }) {
+                  Text('我在哪')
+                    .fontSize(15).fontWeight(FontWeight.Bold).fontColor(Theme.INK).width('100%')
+                  Text('按 WiFi 指纹认出你现在在哪个地点（只认录过节点的地方）')
+                    .fontSize(Theme.F_META).fontColor(Theme.INK2).width('100%')
+                    .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+                }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+                Text('›').fontSize(18).fontColor(Theme.INK3)
+              }
+              .width('100%')
+              .padding(14)
+              .backgroundColor(Theme.CARD)
+              .borderRadius(18)
+              .border({ width: 2, color: Theme.LINE })
+              .onClick(() => {
+                this.onWhereAmI();
+              })
 
               // 区域列表：固定两大类（城市大学 / 测试集），各一段；每段带自己的「＋ 添加」，
               // 点哪个分区的加号，新建出来的区域就落在哪一类。
@@ -741,9 +901,14 @@ struct AreaListPage {
                   .borderRadius(Theme.R_THUMB)
 
                   Column({ space: 3 }) {
-                    Text('未分区（旧数据）').fontSize(15).fontWeight(FontWeight.Bold)
+                    // 2026-10-08：轨迹不再归属区域了，所以这里的「轨迹 N」口径变了 ——
+                    // 现在是「有节点没归到任何一栋楼的轨迹数」（按节点统计，同一条轨迹只算一次）。
+                    // 名字去掉了「（旧数据）」那半句：新采集时漏选建筑也会落进这里，
+                    // 再写「旧数据」会让人以为只有历史遗留。用词仍跟全工程的「未分区」一致，
+                    // 不另造「未归类」—— 同一个概念在 App 与导出包里必须是同一个词。
+                    Text('未分区').fontSize(15).fontWeight(FontWeight.Bold)
                       .fontColor(Theme.INK2).width('100%')
-                    Text(`房间 ${this.unassignedRoomCount} · 轨迹 ${this.unassignedTrackCount}`)
+                    Text(`房间 ${this.unassignedRoomCount} · 有未分区节点的轨迹 ${this.unassignedTrackCount}`)
                       .fontSize(Theme.F_META).fontColor(Theme.INK2).width('100%')
                   }.layoutWeight(1).alignItems(HorizontalAlign.Start)
                   Text('›').fontSize(18).fontColor(Theme.INK3)

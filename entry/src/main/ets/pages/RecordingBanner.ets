@@ -1,10 +1,14 @@
 import { promptAction } from '@kit.ArkUI';
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { NodeDraft, PhotoKind, TrackPhotoDraft, markerNameForNote, markerTypeForNote } from '../data/Entities';
+import {
+  INDOOR_IN, INDOOR_OUT, INDOOR_UNKNOWN, NodeDraft, PhotoKind, TrackPhotoDraft,
+  markerNameForNote, markerTypeForNote
+} from '../data/Entities';
 import { Store } from '../data/Store';
 import { TrackRecorder } from '../sensors/TrackRecorder';
 import { captureTrackPhoto, deletePhotoFile, PhotoCapture } from '../sensors/TrackMedia';
 import { FloorProbe } from '../common/FloorMatch';
+import { indoorButtonText, indoorLabel } from '../common/IndoorState';
 import { fmtDuration } from '../common/Utils';
 import { Theme } from '../common/Theme';
 import { ThickButton } from '../common/Widgets';
@@ -38,6 +42,9 @@ export struct RecordingBanner {
   @State trackName: string = '';
   @State elapsedSec: number = 0;
   @State pointCount: number = 0;
+  @State cornerCount: number = 0;
+  /** 当前室内外三态（INDOOR_*）。三条颜色不同的横条就是靠它区分的，见 indoorBarBg */
+  @State indoor: number = INDOOR_UNKNOWN;
   /** 上一次拍照失败的原因（空字符串 = 没有问题） */
   @State photoError: string = '';
   private timer: number = -1;
@@ -56,6 +63,10 @@ export struct RecordingBanner {
       const e = AppStorage.get<number>('rm_elapsed');
       this.elapsedSec = e === undefined ? 0 : e;
       this.pointCount = rec.getPointCount();
+      this.cornerCount = rec.getCornerCount();
+      this.indoor = rec.currentIndoor();
+    } else {
+      this.indoor = INDOOR_UNKNOWN;
     }
   }
 
@@ -287,6 +298,70 @@ export struct RecordingBanner {
     this.sceneryDialog!.open();
   }
 
+  /**
+   * 一键打「拐点」（2026-10-05 新增）。
+   *
+   * 刻意**不弹对话框、不调相机** —— 拐点要的就是「按下这一刻」的精确时刻，
+   * 而「记录节点」那条流程（填表 + 拍照）会让时间戳偏 15~25 米。详见 Entities.TrackCorner。
+   * 误触（连点两下）由离线脚本合并（相隔 < 1.5 秒算一个），采集端不拦。
+   */
+  private markCorner(): void {
+    const rec = TrackRecorder.get();
+    if (this.requireRunningTrack() < 0) {
+      return;
+    }
+    rec.markCorner().then((id: number) => {
+      if (id < 0) {
+        promptAction.showToast({ message: '当前没有进行中的轨迹' });
+        return;
+      }
+      promptAction.showToast({ message: `已标记拐点（第 ${rec.getCornerCount()} 个）` });
+    }).catch((e: Error) => {
+      promptAction.showToast({ message: `拐点未记录：${e.message}` });
+    });
+  }
+
+  /**
+   * 一键切「室内 / 室外」（2026-10-08 新增）。
+   *
+   * 跟「拐点」一样是**一键、不弹窗、不拍照**：段边界＝按下这一刻，时间戳是精确的；
+   * 走「记录节点」那条要填表拍照的流程会让时间戳偏 15~25 米，段边界跟着一起歪。
+   *
+   * 不给 toast：横条本身颜色和文字立刻变了，走路时再弹一个覆盖半屏的提示是纯打扰。
+   */
+  private toggleIndoor(): void {
+    const rec = TrackRecorder.get();
+    if (this.requireRunningTrack() < 0) {
+      return;
+    }
+    rec.toggleIndoor().then((v: number) => {
+      this.indoor = v;
+    }).catch((e: Error) => {
+      promptAction.showToast({ message: `室内外切换失败：${e.message}` });
+    });
+  }
+
+  /** 未标 / 室内 / 室外 三条用不同底色，一眼可分（横条在深红横幅上，用浅色反而最跳） */
+  private indoorBarBg(): string {
+    if (this.indoor === INDOOR_IN) {
+      return Theme.BLUE_SOFT;
+    }
+    if (this.indoor === INDOOR_OUT) {
+      return Theme.YELLOW_SOFT;
+    }
+    return Theme.RED_DEEP;
+  }
+
+  private indoorBarFg(): string {
+    if (this.indoor === INDOOR_IN) {
+      return Theme.BLUE_DEEP;
+    }
+    if (this.indoor === INDOOR_OUT) {
+      return Theme.YELLOW_INK;
+    }
+    return Theme.ON_RED_SOFT;
+  }
+
   private stopRecording(): void {
     TrackRecorder.get().stop().then(() => {
       promptAction.showToast({ message: '轨迹已保存' });
@@ -321,6 +396,32 @@ export struct RecordingBanner {
               .maxLines(1)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
 
+            // 室内外三态（2026-10-08 新增）。
+            //
+            // 为什么单独占一整条、而不是挤进下面那排按钮：那排现在已经是 4 个按钮
+            // （1.3 / 0.8 / 0.8 + 固定 76 的停止），再塞第五个，0.8 权重的「拐点 / 风景照」
+            // 会被压到约 40vp —— 三个字直接显示不全，而这两个按钮按错就是脏数据。
+            // 单独一条还顺带解决了两件事：**当前处在哪一态是要一直看得见的**
+            // （按钮上只能写「切到X」，写不下现状），而且走路时它是整行的大靶子，好按。
+            Row({ space: 8 }) {
+              Text(`室内外：${indoorLabel(this.indoor)}`)
+                .fontSize(12.5)
+                .fontWeight(FontWeight.Bold)
+                .fontColor(this.indoorBarFg())
+              Blank()
+              Text(indoorButtonText(this.indoor))
+                .fontSize(11.5)
+                .fontColor(this.indoorBarFg())
+            }
+            .width('100%')
+            .height(38)
+            .padding({ left: 12, right: 12 })
+            .backgroundColor(this.indoorBarBg())
+            .borderRadius(12)
+            .onClick(() => {
+              this.toggleIndoor();
+            })
+
             // 拍照失败的原因留在横幅上（toast 一闪就过，在楼道里根本来不及看），
             // 下一次拍成功或保存成功才清掉
             if (this.photoError.length > 0) {
@@ -343,7 +444,18 @@ export struct RecordingBanner {
                     this.openNodeDialog();
                   }
                 })
-              }.layoutWeight(1.5)
+              }.layoutWeight(1.3)
+
+              Column() {
+                ThickButton({
+                  label: '拐点',
+                  kind: 'onred',
+                  compact: true,
+                  onTap: (): void => {
+                    this.markCorner();
+                  }
+                })
+              }.layoutWeight(0.8)
 
               Column() {
                 ThickButton({
@@ -354,7 +466,7 @@ export struct RecordingBanner {
                     this.openSceneryDialog();
                   }
                 })
-              }.layoutWeight(1)
+              }.layoutWeight(0.8)
 
               Column() {
                 ThickButton({
@@ -365,7 +477,7 @@ export struct RecordingBanner {
                     this.stopRecording();
                   }
                 })
-              }.width(84)
+              }.width(76)
             }.width('100%')
           }
           .width('100%')
