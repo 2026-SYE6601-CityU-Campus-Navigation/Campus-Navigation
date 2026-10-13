@@ -15,6 +15,7 @@ struct CompatibilityTests {
     func trackTagRawValues() {
         #expect(TrackTagType.allCases.map(\.rawValue) == [
             "厕所", "楼梯", "门", "门禁", "电梯", "教室",
+            "大门", "扶梯", "食堂", "商店", "其他室内",
         ])
     }
 

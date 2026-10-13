@@ -12,6 +12,10 @@ final class Room {
     var pressureHpa: Double?
     var createdAt: Int64
     var area: Area?
+    var code: String = ""
+    var floor: String = ""
+    // Original import code key survives later user edits to name/code.
+    var catalogKey: String?
 
     @Relationship(deleteRule: .cascade, inverse: \Marker.room)
     var markers: [Marker]

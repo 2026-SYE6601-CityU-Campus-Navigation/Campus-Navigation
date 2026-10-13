@@ -49,6 +49,9 @@ final class LocalPhotoFileStore: PhotoFileStoring {
         let filename = "\(timeMs)-\(UUID().uuidString.lowercased()).jpg"
         let relativePath = "\(relativeDirectory)/\(filename)"
         let destination = try validatedURL(for: relativePath, mustExist: false)
+        // Write an intent BEFORE creating the file. A process interruption
+        // between file write and database commit is recoverable on next launch.
+        try addCleanupIntent(relativePath)
 
         try fileManager.createDirectory(
             at: destination.deletingLastPathComponent(),
@@ -66,21 +69,97 @@ final class LocalPhotoFileStore: PhotoFileStoring {
         return try Data(contentsOf: url, options: .mappedIfSafe)
     }
 
+    // Read-only capability for the background exporter; never serialized to JSON.
+    func exportSource(relativePath: String) throws -> V3PhotoSource {
+        .init(root: rootURL, url: try validatedURL(for: relativePath, mustExist: true))
+    }
+
     func validate(relativePath: String) throws {
         _ = try validatedURL(for: relativePath, mustExist: false)
     }
 
     func delete(relativePath: String) throws {
         let url = try validatedURL(for: relativePath, mustExist: false)
-        guard fileManager.fileExists(atPath: url.path) else { return }
-        try fileManager.removeItem(at: url)
+        try addCleanupIntent(relativePath)
+        if fileManager.fileExists(atPath: url.path) { try fileManager.removeItem(at: url) }
+        try pruneEmptyTrackDirectory(below: url)
+        try confirmReferenced(relativePath: relativePath)
     }
 
     func deleteTrackDirectory(trackID: UUID) throws {
         let relativePath = "photos/\(trackID.uuidString.lowercased())"
-        let directory = try validatedURL(for: relativePath, mustExist: false)
-        guard fileManager.fileExists(atPath: directory.path) else { return }
-        try fileManager.removeItem(at: directory)
+        try delete(relativePath: relativePath)
+    }
+
+    func confirmReferenced(relativePath: String) throws {
+        try validate(relativePath: relativePath)
+        var intents = try cleanupIntents()
+        intents.remove(relativePath)
+        try writeCleanupIntents(intents)
+    }
+
+    func prepareDeletion(relativePath: String) throws {
+        try validate(relativePath: relativePath)
+        try addCleanupIntent(relativePath)
+    }
+
+    func retryPendingCleanup(protecting referencedPaths: Set<String>) throws {
+        let protectedURLs = try referencedPaths.map {
+            CanonicalPathContainment.canonicalURL(
+                try validatedURL(for: $0, mustExist: false), fileManager: fileManager
+            )
+        }
+        for path in try cleanupIntents() {
+            let candidate = CanonicalPathContainment.canonicalURL(
+                try validatedURL(for: path, mustExist: false), fileManager: fileManager
+            )
+            // An intent may predate a successful DB commit or describe a whole
+            // Track directory. Never remove any currently referenced photo.
+            if protectedURLs.contains(where: {
+                $0 == candidate || CanonicalPathContainment.isStrictDescendant($0, of: candidate, fileManager: fileManager)
+            }) {
+                try confirmReferenced(relativePath: path)
+            } else {
+                try delete(relativePath: path)
+            }
+        }
+    }
+
+    private func journalURL() throws -> URL {
+        let url = rootURL.appendingPathComponent("photo-cleanup.json")
+        guard CanonicalPathContainment.isStrictDescendant(url, of: rootURL, fileManager: fileManager) else {
+            throw PhotoStorageError.unsafeRelativePath
+        }
+        return url
+    }
+
+    private func cleanupIntents() throws -> Set<String> {
+        let url = try journalURL()
+        guard fileManager.fileExists(atPath: url.path) else { return [] }
+        let paths = try JSONDecoder().decode(Set<String>.self, from: Data(contentsOf: url))
+        // Reject the entire journal on corruption; never act on arbitrary paths.
+        for path in paths { try validate(relativePath: path) }
+        return paths
+    }
+
+    private func writeCleanupIntents(_ paths: Set<String>) throws {
+        try JSONEncoder().encode(paths.sorted()).write(to: journalURL(), options: .atomic)
+    }
+
+    private func addCleanupIntent(_ path: String) throws {
+        var paths = try cleanupIntents()
+        paths.insert(path)
+        try writeCleanupIntents(paths)
+    }
+
+    private func pruneEmptyTrackDirectory(below url: URL) throws {
+        let parent = url.deletingLastPathComponent()
+        guard CanonicalPathContainment.isStrictDescendant(parent, of: photosURL, fileManager: fileManager),
+              parent.deletingLastPathComponent().standardizedFileURL == photosURL.standardizedFileURL,
+              fileManager.fileExists(atPath: parent.path) else { return }
+        if try fileManager.contentsOfDirectory(atPath: parent.path).isEmpty {
+            try fileManager.removeItem(at: parent)
+        }
     }
 
     private func validatedURL(for relativePath: String, mustExist: Bool) throws -> URL {

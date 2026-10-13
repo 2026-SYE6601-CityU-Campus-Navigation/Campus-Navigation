@@ -1,6 +1,6 @@
 import Foundation
 
-struct ExportJSONEncoder {
+nonisolated struct ExportJSONEncoder {
     func encode<T: Encodable>(_ value: T) throws -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]

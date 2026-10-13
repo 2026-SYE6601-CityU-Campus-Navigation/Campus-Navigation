@@ -12,13 +12,18 @@ struct UnassignedRoomsView: View {
     @State private var errorMessage: String?
     @State private var exportCoordinator: AreaExportCoordinator
     private let snapshotService: any SensorSnapshotCapturing
+    private let coordinator: RecordingCoordinator
+    private let photoStorage: any PhotoFileStoring
 
     init(
+        coordinator: RecordingCoordinator,
         photoStorage: any PhotoFileStoring,
         snapshotService: any SensorSnapshotCapturing
     ) {
+        self.coordinator = coordinator
         self.snapshotService = snapshotService
-        _exportCoordinator = State(initialValue: AreaExportCoordinator(photoStorage: photoStorage))
+        self.photoStorage = photoStorage
+        _exportCoordinator = State(initialValue: AreaExportCoordinator(photoStorage: photoStorage, activeTrackID: { coordinator.activeTrackID }))
     }
 
     private var rooms: [Room] {
@@ -26,7 +31,7 @@ struct UnassignedRoomsView: View {
     }
 
     private var unassignedTrackCount: Int {
-        allTracks.lazy.filter { $0.area == nil }.count
+        TrackAreaIndex.unassigned(in: allTracks).count
     }
 
     var body: some View {
@@ -63,18 +68,24 @@ struct UnassignedRoomsView: View {
             } header: {
                 Text("房间（\(rooms.count)）")
             } footer: {
-                Text("另有 \(unassignedTrackCount) 条未分区轨迹。")
+                Text("另有 \(unassignedTrackCount) 条包含明确未分区标签的轨迹。无标签和历史未知区域轨迹请查看全部轨迹。")
+            }
+
+            NavigationLink("查看未分区标签轨迹（\(unassignedTrackCount)）") {
+                TrackListView(coordinator: coordinator, photoStorage: photoStorage, showUnassignedOnly: true)
             }
 
             AreaExportSection(
                 coordinator: exportCoordinator,
                 areaName: "未分区",
                 startExport: {
-                    try exportCoordinator.startUnassigned(
-                        tracks: allTracks.filter { $0.area == nil }
-                    )
-                }
+                    try exportCoordinator.startUnassignedV3(tracks: allTracks, rooms: allRooms)
+                },
+                isRecordingActive: coordinator.activeTrackID != nil
             )
+            Text("JSON v3 同时保留历史未分区轨迹和明确未分区标签涉及的完整轨迹。无标签或区域未知的新轨迹请从全部轨迹导出。")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
         }
         .navigationTitle("未分区")
         .navigationBarTitleDisplayMode(.inline)

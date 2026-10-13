@@ -565,7 +565,7 @@ private final class Phase8RecordingStore: RecordingPersisting {
     private(set) var finalizeCalls = 0
     var failOnAppend = false
 
-    func createTrack(name: String, area: Area, startedAt: Int64) throws -> Track {
+    func createTrack(name: String, area: Area?, startedAt: Int64) throws -> Track {
         let track = Track(name: name, area: area, startedAt: startedAt)
         tracks.append(track)
         return track

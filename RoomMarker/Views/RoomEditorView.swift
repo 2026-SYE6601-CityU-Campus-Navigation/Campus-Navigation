@@ -9,6 +9,8 @@ struct RoomEditorView: View {
     private let room: Room?
     @State private var name: String
     @State private var note: String
+    @State private var code: String
+    @State private var floor: String
     @State private var selectedAreaID: UUID?
     @State private var errorMessage: String?
 
@@ -16,6 +18,8 @@ struct RoomEditorView: View {
         self.room = room
         _name = State(initialValue: room?.name ?? "")
         _note = State(initialValue: room?.note ?? "")
+        _code = State(initialValue: room?.code ?? "")
+        _floor = State(initialValue: room?.floor ?? "")
         _selectedAreaID = State(initialValue: room?.area?.id ?? initialArea?.id)
     }
 
@@ -23,6 +27,8 @@ struct RoomEditorView: View {
         NavigationStack {
             Form {
                 Section("房间信息") {
+                    TextField("教室代码（可选，如 LT-1）", text: $code).textInputAutocapitalization(.characters)
+                    TextField("楼层（可选，如 4/F）", text: $floor)
                     TextField("房间名称", text: $name)
                         .textInputAutocapitalization(.never)
                         .accessibilityLabel("房间名称")
@@ -35,6 +41,9 @@ struct RoomEditorView: View {
                         Text("未分区").tag(UUID?.none)
                         ForEach(areas, id: \.id) { area in
                             Text(area.name).tag(Optional(area.id))
+                        }
+                        if let selectedAreaID, !areas.contains(where: { $0.id == selectedAreaID }) {
+                            Text("原区域不可用，请重新选择").tag(Optional(selectedAreaID))
                         }
                     }
                 } header: {
@@ -66,13 +75,14 @@ struct RoomEditorView: View {
     }
 
     private func save() {
-        let selectedArea = areas.first { $0.id == selectedAreaID }
         do {
+            if let selectedAreaID, !areas.contains(where: { $0.id == selectedAreaID }) { throw NodeCaptureError.areaUnavailable }
+            let selectedArea = areas.first { $0.id == selectedAreaID }
             let store = Phase2DataStore(context: modelContext)
             if let room {
-                try store.updateRoom(room, name: name, note: note, area: selectedArea)
+                try store.updateRoom(room, name: name, note: note, area: selectedArea, code: code, floor: floor)
             } else {
-                try store.createRoom(name: name, note: note, area: selectedArea)
+                try store.createRoom(name: name, note: note, area: selectedArea, code: code, floor: floor)
             }
             dismiss()
         } catch {

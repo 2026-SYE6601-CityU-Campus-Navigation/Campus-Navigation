@@ -1,4 +1,5 @@
 import Foundation
+import SwiftData
 import UIKit
 
 @MainActor
@@ -18,10 +19,32 @@ final class AreaExportSnapshotBuilder {
         self.validatesJPEG = validatesJPEG
     }
 
-    func build(area: Area, exportedAt: Int64) throws -> AreaExportSnapshot {
-        try build(
+    func build(area: Area, exportedAt: Int64, allTracks: [Track]? = nil) throws -> AreaExportSnapshot {
+        guard area.category.isEmpty, area.catalogKey == nil,
+              !area.rooms.contains(where: { !$0.code.isEmpty || !$0.floor.isEmpty || $0.catalogKey != nil }) else {
+            throw ExportValidationError.requiresV3Export
+        }
+        let availableTracks: [Track]?
+        if let allTracks {
+            availableTracks = allTracks
+        } else if let context = area.modelContext {
+            // Never silently omit persisted global members if a caller omits the query.
+            availableTracks = try context.fetch(FetchDescriptor<Track>())
+        } else {
+            availableTracks = nil
+        }
+        let candidates: [Track]
+        if let availableTracks {
+            let memberIDs = Set(TrackAreaIndex.tracks(in: area.id, from: availableTracks).map(\.id))
+            candidates = availableTracks.filter {
+                (!$0.isGlobalRecording && $0.area?.id == area.id) || memberIDs.contains($0.id)
+            }
+        } else {
+            candidates = area.tracks
+        }
+        return try build(
             area: ExportAreaSnapshot(id: area.id, name: area.name),
-            tracks: area.tracks,
+            tracks: candidates,
             exportedAt: exportedAt
         )
     }
@@ -47,6 +70,22 @@ final class AreaExportSnapshotBuilder {
             ($0.startedAt, stableID($0.id)) < ($1.startedAt, stableID($1.id))
         }
         let snapshots = try sortedTracks.map { track -> TrackExportSnapshot in
+            guard !track.isGlobalRecording, !track.isSegmentedRecording,
+                  !track.rawIMURequested, track.rawIMUInterval == nil, track.imuBatches.isEmpty,
+                  track.rawAccelState == "notRequested", track.rawGyroState == "notRequested",
+                  track.rawIMURejectedCount == 0,
+                  track.segments.isEmpty, track.corners.isEmpty,
+                  !track.points.contains(where: { $0.segmentID != nil }),
+                  !track.tags.contains(where: {
+                      $0.recordKindRawValue != "legacy" || $0.accuracy != nil || $0.pressureHpa != nil ||
+                      $0.roomID != nil || $0.roomNameSnapshot != nil || $0.roomCodeSnapshot != nil || $0.roomDoorRole != nil ||
+                      $0.areaStateRawValue != "unknown" || $0.areaID != nil || !$0.floor.isEmpty
+                  }),
+                  !track.photos.contains(where: {
+                      $0.kindRawValue != "legacyUnlinked" || $0.tagID != nil || $0.accuracy != nil || $0.pressureHpa != nil
+                  }) else {
+                throw ExportValidationError.requiresV3Export
+            }
             if let areaID = area.id {
                 guard track.area?.id == areaID else {
                     throw ExportValidationError.trackOutsideArea(trackID: track.id)
@@ -157,7 +196,7 @@ final class AreaExportSnapshotBuilder {
         return snapshot
     }
 
-    private func buildPhoto(_ photo: TrackPhoto, track: Track) throws -> TrackPhotoExportSnapshot {
+    func buildPhoto(_ photo: TrackPhoto, track: Track) throws -> TrackPhotoExportSnapshot {
         let expectedPrefix = "photos/\(track.id.uuidString.lowercased())/"
         guard photo.filePath.hasPrefix(expectedPrefix) else {
             throw ExportValidationError.invalidPhotoPath(trackID: track.id, photoID: photo.id)

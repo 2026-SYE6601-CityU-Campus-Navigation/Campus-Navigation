@@ -56,6 +56,12 @@ function safeName(name) {
   return base.replace(/[\\/:*?"<>|]/g, '_').slice(0, 120);
 }
 
+function escapeHTML(value) {
+  return String(value).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
 function stamp() {
   const d = new Date();
   const p = (n) => String(n).padStart(2, '0');
@@ -135,7 +141,7 @@ export default {
           const when = new Date(o.uploaded || Date.now()).toISOString().slice(0, 16).replace('T', ' ');
           const mb = ((o.size || 0) / 1024 / 1024).toFixed(1);
           const href = `/files/${encodeURIComponent(o.key)}?k=${encodeURIComponent(linkToken)}`;
-          return `<li><a href="${href}">${o.key}</a><span class="meta">${when} · ${mb} MB</span></li>`;
+          return `<li><a href="${href}">${escapeHTML(o.key)}</a><span class="meta">${when} · ${mb} MB</span></li>`;
         })
         .join('');
       const html = `<!doctype html><html lang="zh"><meta charset="utf-8">

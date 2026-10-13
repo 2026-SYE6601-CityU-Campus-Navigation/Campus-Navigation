@@ -10,14 +10,14 @@ RoomMarker organises that work around Areas and Rooms. It captures best-effort d
 
 ## Current status
 
-The native iOS student-project MVP is complete through physical-device acceptance.
+The native iOS student-project product now covers the current portable HarmonyOS data-collection workflow. Earlier Room/Marker/Track behavior completed physical-device acceptance; the later cross-building, catalog, JSON v3, visualisation, recognition and upload work completed offline implementation and full automated regression. A one-route teammate pilot remains the recommended gate before large-scale field collection.
 
-The iOS implementation is maintained on the `iOS-Application` branch and has also been integrated into the repository's default branch through pull-request review.
+The current implementation is maintained on the `iOS-Application` branch.
 
 - Native Swift 6, SwiftUI, and SwiftData implementation
 - Deployment target: iOS 17 or later
 - Final validation toolchain: Xcode 27.0 with the iOS 27 SDK
-- Automated baseline: **203 tests in 11 suites; 0 failed; 0 skipped**
+- Automated baseline: **447 logical tests; 0 failed; 0 skipped** (559 parameterized instances)
 - Simulator regression: iPhone 18 Pro / iOS 27.0
 - Physical acceptance: iPhone 15 Pro / iOS 26.7
 - No third-party runtime dependencies
@@ -30,12 +30,15 @@ This is an accepted course-project baseline, not a claim of universal production
 - Capture a Room reference snapshot and a sensor-backed Marker snapshot.
 - Inspect live location, pressure, magnetometer, and heading states.
 - Take a bounded one-time sensor snapshot with per-source outcomes.
-- Record an Area-bound Track in the foreground and during supported Home-background or lock-screen intervals.
-- Add typed tags and user notes while recording.
-- Capture a real camera photo, store an application-owned JPEG, and associate sensor metadata with it.
-- Inspect completed or interrupted Tracks, samples, tags, photos, and full-size previews.
-- Export immutable v2 snapshots as JSON and JPEG files inside a validated STORED ZIP.
-- Share exactly one final ZIP through the native Share Sheet.
+- Record one cross-building Track in the foreground and during supported Home-background or lock-screen intervals.
+- Capture 11 typed nodes with explicit building, floor, optional Room binding, one-to-one photo evidence and rollback compensation; retain historical standalone tags and scenery photos.
+- Capture corners, switch indoor/outdoor/unknown segments, and correct/split/merge completed segments without changing sensor measurements.
+- Capture bounded raw accelerometer/gyroscope batches with real timestamps, delivery delays and gap semantics.
+- Import a building/classroom catalog idempotently and generate Rooms from eligible classroom nodes.
+- Inspect completed or interrupted Tracks, samples, nodes, photos, raw IMU, interactive 2.5D/3D evidence and a grouped full-screen gallery.
+- Produce conservative current-place candidates from Core Location, accuracy and optional pressure without pretending to provide Wi-Fi fingerprinting.
+- Export immutable JSON v3, JPEGs and an offline HTML photo index inside a validated STORED ZIP, by area, all Tracks or selected UUIDs.
+- Share exactly one final ZIP through the native Share Sheet or upload it to a configured private HTTP(S) receiver.
 - Delete individual photos or cascade-delete a Track and its owned data.
 - Detect a Track left incomplete by process termination without fabricating an end time or automatically resuming it.
 
@@ -95,16 +98,20 @@ The implementations share product concepts and export semantics, but each uses i
 | Pressure | Supported | `CMAltimeter`, where supported |
 | Magnetometer | Supported | Core Motion magnetometer |
 | Heading | Sensor fusion with location fallback | Core Location device heading when available |
-| Tags | Six typed Track tags with notes | Same six stable tag values with notes |
+| Nodes/tags | 11 node types plus historical standalone tags | Same 11 semantic node types; explicit node/photo and optional Room binding; old standalone evidence remains independent |
 | Camera/photos | System camera picker and app-owned copy | User-initiated camera capture and app-owned JPEG |
-| Track detail | Statistics, points, tags, photos, and path view | Overview, sensor-rich points, tags, photos, and preview |
-| ZIP export | v1 JSON, photos, and manifest | v2 JSON, photos, capabilities, and manifest |
-| Native sharing | System document-save workflow | Native Share Sheet with one final ZIP |
+| Track structure | Corners and indoor/outdoor segments | Corners, indoor/outdoor/unknown segments, plus completed-segment correction/split/merge |
+| Raw IMU | Per-point acceleration/gyro series | Bounded batches with both clocks, delivery delay and explicit units; background gaps are not filled |
+| Catalog / Rooms | Building/classroom import and room generation | Idempotent catalog preview/import, explicit node-room binding and classroom-node room generation |
+| Track detail | Statistics, points, media and Track3D | Sensor-rich detail, raw IMU, grouped gallery and evidence-gated interactive 2.5D/3D view |
+| Place recognition | Nearby Wi-Fi fingerprint matching | Conservative Core Location/accuracy/pressure candidates; not continuous indoor positioning |
+| ZIP export | Extended v2 JSON, photos, manifest and selected Track export | JSON v3, photos, HTML index, area/all/selected scope and compatibility metadata |
+| Sharing/upload | Document save and upload modules | Native Share Sheet or configurable private ZIP upload; token stored in Keychain |
 | Cleanup | Area/Track cascades and photo-file cleanup | Individual photo and Track cascade cleanup |
 | Incomplete Track | Missing end time can remain displayed as active | Explicit `需要处理` state; manual finalise or delete |
 | Wi-Fi fingerprinting | Nearby AP count and Top-5 BSSID/RSSI | Intentionally unsupported; no fabricated observations |
 
-Normal iOS applications do not have a supported general-purpose equivalent to HarmonyOS nearby BSSID/RSSI scanning. The iOS v2 capability declaration therefore states:
+Normal iOS applications do not have a supported general-purpose equivalent to HarmonyOS nearby BSSID/RSSI scanning. The iOS v3 capability declaration therefore states:
 
 ```text
 nearbyWifiFingerprint: unsupported
@@ -157,7 +164,7 @@ The simulator is suitable for navigation and deterministic tests, but absent or 
 
 ### Run tests
 
-In Xcode, select the `RoomMarker` scheme and choose **Product → Test**. The accepted baseline used the iPhone 18 Pro / iOS 27.0 Simulator and completed 203 tests across 11 suites.
+In Xcode, select the `RoomMarker` scheme and choose **Product → Test**. The current baseline used the iPhone 18 Pro / iOS 27.0 Simulator and completed 447 logical tests (559 parameterized instances) with no failures or skips. Receiver/upload tooling adds 32 Python tests.
 
 ## Suggested 3–5 minute demo
 
@@ -198,10 +205,11 @@ Location denial degrades location fields without preventing independent supporte
 - Nearby Wi-Fi fingerprint scanning is available in the HarmonyOS implementation but unsupported in the normal iOS application.
 - Background delivery and timing remain controlled by iOS; the app records actual timestamps and creates no catch-up points.
 - Force-quit survival and automatic recording restart are intentionally unsupported.
-- Only one physical device/OS combination completed the final acceptance procedure.
+- Only one physical device/OS combination completed the earlier Phase 9 acceptance procedure. The latest visualisation, recognition, completed-segment editing and upload additions passed offline regression but still need the planned one-route teammate pilot.
 - Multi-hour, poor-signal, low-power, thermal-pressure, reboot, and storage-exhaustion scenarios remain outside the accepted baseline.
 - The custom archive writer produces STORED ZIP32 archives. Very large field collections require separate scale validation.
-- Export snapshot creation currently retains validated photo bytes in memory before staging.
+- The 2.5D/3D view is an evidence display, not a floor-plan-matched navigation route. Weak or missing coordinates remain weak/omitted.
+- GPS/pressure place candidates do not replace HarmonyOS Wi-Fi fingerprints and do not provide continuous indoor navigation.
 
 ## Testing and physical-device evidence
 
@@ -223,15 +231,17 @@ See [IOS_PHASE9_DEVICE_ACCEPTANCE.md](IOS_PHASE9_DEVICE_ACCEPTANCE.md) for the b
 
 ## Export format
 
-An iOS v2 Area export contains:
+An iOS JSON v3 export contains:
 
 - `manifest.json`
 - one JSON file per Track under `tracks/`
 - app-owned JPEG files under relative `photos/` paths when present
+- `index.html` for offline photo review
+- full cross-building Track data, nodes/room snapshots, corners, segments and raw IMU
 - `sourcePlatform: ios`
 - a capabilities declaration including `nearbyWifiFingerprint: unsupported`
 
-Manifest references and photo paths are relative. Staging, archive sources, and cleanup remain within RoomMarker-owned canonical directories. Export works from an immutable snapshot, does not mutate SwiftData source models, and does not move or delete source photos. The native Share Sheet receives one completed ZIP, not its staging directory.
+Manifest references and photo paths are relative. Staging, archive sources, upload multipart bodies and cleanup remain within RoomMarker-owned canonical directories. Export works from an immutable snapshot, does not mutate SwiftData source models, and does not move or delete source photos. The Share Sheet or uploader receives one completed ZIP, not its staging directory.
 
 ## Documentation
 
@@ -240,3 +250,6 @@ Manifest references and photo paths are relative. Staging, archive sources, and 
 - [iOS implementation plan](IOS_IMPLEMENTATION_PLAN.md) — historical phased plan
 - [HarmonyOS parity closure](IOS_PHASE9_5_PARITY_NOTES.md) — Room/Marker sensor parity record
 - [Physical-device acceptance](IOS_PHASE9_DEVICE_ACCEPTANCE.md) — final Phase 9 evidence and limits
+- [JSON v3 contract](IOS_JSON_V3_CONTRACT.md) — current cross-building archive semantics and migration rules
+- [Full product parity](IOS_FULL_PRODUCT_PARITY.md) — HarmonyOS feature follow-up, honest platform differences and latest regression
+- [Team installation and collection](IOS_TEAM_COLLECTION_GUIDE.md) — signing options, field workflow and ZIP handoff

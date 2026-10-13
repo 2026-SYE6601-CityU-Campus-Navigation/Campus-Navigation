@@ -1,6 +1,6 @@
 # RoomMarker iOS Implementation Plan
 
-> **Historical status — original phased plan.** This document preserves the plan written at Phase 0. Implementation subsequently progressed through Phase 9; see [IOS_PHASE9_DEVICE_ACCEPTANCE.md](IOS_PHASE9_DEVICE_ACCEPTANCE.md) for the accepted application baseline.
+> **Historical status — original phased plan.** This document preserves the plan written at Phase 0. Implementation subsequently progressed through Phase 9 and the cross-building product follow-up; see [IOS_PHASE9_DEVICE_ACCEPTANCE.md](IOS_PHASE9_DEVICE_ACCEPTANCE.md) for accepted device evidence and [IOS_FULL_PRODUCT_PARITY.md](IOS_FULL_PRODUCT_PARITY.md) for the current product.
 
 ## Plan rules
 

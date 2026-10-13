@@ -66,6 +66,7 @@ struct TrackPhotoExportSnapshot: Equatable, Sendable {
 }
 
 enum ExportValidationError: LocalizedError, Equatable, Sendable {
+    case requiresV3Export
     case trackOutsideArea(trackID: UUID)
     case invalidPhotoPath(trackID: UUID, photoID: UUID)
     case missingPhotoFile(trackID: UUID, photoID: UUID)
@@ -81,6 +82,8 @@ enum ExportValidationError: LocalizedError, Equatable, Sendable {
 
     var errorDescription: String? {
         switch self {
+        case .requiresV3Export:
+            "当前 v2 导出无法完整表达跨楼轨迹、节点照片、拐点、环境分段和原始 IMU，请等待 v3 导出支持。原始数据未更改。"
         case let .trackOutsideArea(trackID):
             "轨迹 \(trackID.uuidString) 不属于当前导出区域。"
         case let .invalidPhotoPath(trackID, photoID):

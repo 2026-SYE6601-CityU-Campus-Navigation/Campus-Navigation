@@ -6,6 +6,9 @@ struct RoomSummaryRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(room.name)
+            if !room.code.isEmpty || !room.floor.isEmpty {
+                Text("\(room.code) · \(room.floor)").font(.caption).foregroundStyle(.secondary)
+            }
             Text(room.note.isEmpty ? "\(room.markers.count) 个标记" : "\(room.note) · \(room.markers.count) 个标记")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)

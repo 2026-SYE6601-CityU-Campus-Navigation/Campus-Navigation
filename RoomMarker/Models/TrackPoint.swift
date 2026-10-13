@@ -18,6 +18,8 @@ final class TrackPoint {
     var wifiCount: Int?
     var wifiTop: String?
     var track: Track?
+    // Nil for pre-segmentation data: never infer historical environment.
+    var segmentID: UUID?
 
     var wifiAvailability: WiFiFingerprintAvailability {
         get { WiFiFingerprintAvailability(rawValue: wifiAvailabilityRawValue) ?? .unsupported }
@@ -26,7 +28,7 @@ final class TrackPoint {
 
     init(
         id: UUID = UUID(),
-        track: Track,
+        track: Track?,
         timeMs: Int64,
         latitude: Double? = nil,
         longitude: Double? = nil,
@@ -39,7 +41,8 @@ final class TrackPoint {
         headingDeg: Double? = nil,
         wifiAvailability: WiFiFingerprintAvailability = .unsupported,
         wifiCount: Int? = nil,
-        wifiTop: String? = nil
+        wifiTop: String? = nil,
+        segmentID: UUID? = nil
     ) {
         self.id = id
         self.track = track
@@ -56,5 +59,6 @@ final class TrackPoint {
         wifiAvailabilityRawValue = wifiAvailability.rawValue
         self.wifiCount = wifiCount
         self.wifiTop = wifiTop
+        self.segmentID = segmentID
     }
 }

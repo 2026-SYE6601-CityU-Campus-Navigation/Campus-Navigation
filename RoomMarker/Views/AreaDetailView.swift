@@ -5,6 +5,8 @@ struct AreaDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
     @Bindable var area: Area
+    @Query(sort: \Track.startedAt) private var allTracks: [Track]
+    private let coordinator: RecordingCoordinator
 
     @State private var editingRoom: Room?
     @State private var isShowingRoomEditor = false
@@ -12,21 +14,27 @@ struct AreaDetailView: View {
     @State private var roomPendingDeletion: Room?
     @State private var isConfirmingAreaDeletion = false
     @State private var errorMessage: String?
+    @State private var searchText = ""
     @State private var exportCoordinator: AreaExportCoordinator
     private let snapshotService: any SensorSnapshotCapturing
+    private let photoStorage: any PhotoFileStoring
 
     init(
         area: Area,
+        coordinator: RecordingCoordinator,
         photoStorage: any PhotoFileStoring,
         snapshotService: any SensorSnapshotCapturing
     ) {
         self.area = area
+        self.coordinator = coordinator
         self.snapshotService = snapshotService
-        _exportCoordinator = State(initialValue: AreaExportCoordinator(photoStorage: photoStorage))
+        self.photoStorage = photoStorage
+        _exportCoordinator = State(initialValue: AreaExportCoordinator(photoStorage: photoStorage, activeTrackID: { coordinator.activeTrackID }))
     }
 
     private var sortedRooms: [Room] {
-        area.rooms.sorted { $0.createdAt < $1.createdAt }
+        area.rooms.filter { searchText.isEmpty || ($0.name + $0.code + $0.floor).localizedStandardContains(searchText) }
+            .sorted { ($0.code, $0.name, $0.id.uuidString) < ($1.code, $1.name, $1.id.uuidString) }
     }
 
     var body: some View {
@@ -69,8 +77,12 @@ struct AreaDetailView: View {
             }
 
             Section("轨迹") {
-                Label("\(area.tracks.count) 条轨迹", systemImage: "point.topleft.down.to.point.bottomright.curvepath")
-                Text("可从首页工具栏的“轨迹”入口查看，或在前台明确开始记录。")
+                NavigationLink {
+                    TrackListView(coordinator: coordinator, photoStorage: photoStorage, initialArea: area)
+                } label: {
+                    Label("\(TrackAreaIndex.tracks(in: area.id, from: allTracks).count) 条触及轨迹", systemImage: "point.topleft.down.to.point.bottomright.curvepath")
+                }
+                Text("至少一个标签明确属于此区域时，显示整条轨迹；跨楼轨迹可同时出现在多个区域。历史原归属不作标签归属。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -78,10 +90,17 @@ struct AreaDetailView: View {
             AreaExportSection(
                 coordinator: exportCoordinator,
                 areaName: area.name,
-                startExport: { try exportCoordinator.start(area: area) }
+                startExport: { try exportCoordinator.startV3(area: area, allTracks: allTracks) },
+                isRecordingActive: coordinator.activeTrackID != nil
             )
+            Section {
+                Text("JSON v3 导出所选区域涉及的完整轨迹，包括其他区域节点、照片、分段、拐点和原始 IMU，不按楼截断。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
         }
         .navigationTitle(area.name)
+        .searchable(text: $searchText, prompt: "搜索教室代码、名称或楼层")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
@@ -114,7 +133,7 @@ struct AreaDetailView: View {
             Button("删除区域并保留内容", role: .destructive, action: deleteArea)
             Button("取消", role: .cancel) {}
         } message: {
-            Text("区域本身会被删除；其中的 \(area.rooms.count) 个房间和 \(area.tracks.count) 条轨迹会移到“未分区”。")
+            Text("\(area.rooms.count) 个房间移到未分区；此区域的标签解除区域关联。完整轨迹、采样点、标签楼层和照片保留，其他区域标签不变。")
         }
         .confirmationDialog(
             "删除房间“\(roomPendingDeletion?.name ?? "")”？",

@@ -11,8 +11,23 @@ final class TrackTag {
     var longitude: Double?
     var altitude: Double?
     var headingDeg: Double?
+    var accuracy: Double?
+    var pressureHpa: Double?
     var createdAt: Int64
     var track: Track?
+    // Scalar ownership avoids a delete cascade from an Area into a cross-building track.
+    var areaID: UUID?
+    var areaStateRawValue: String = "unknown"
+    var floor: String = ""
+    // Migration never infers a node from an old independent tag.
+    var recordKindRawValue: String = "legacy"
+    // Non-owning historical link: deleting a room must not delete track evidence.
+    var roomID: UUID?
+    var roomNameSnapshot: String?
+    var roomCodeSnapshot: String?
+    var roomDoorRole: String?
+
+    var isNode: Bool { recordKindRawValue == "node" }
 
     var tagType: TrackTagType? {
         get { TrackTagType(rawValue: tagTypeRawValue) }
@@ -21,7 +36,7 @@ final class TrackTag {
 
     init(
         id: UUID = UUID(),
-        track: Track,
+        track: Track?,
         timeMs: Int64,
         tagType: TrackTagType,
         note: String = "",
@@ -29,7 +44,13 @@ final class TrackTag {
         longitude: Double? = nil,
         altitude: Double? = nil,
         headingDeg: Double? = nil,
-        createdAt: Int64
+        accuracy: Double? = nil,
+        pressureHpa: Double? = nil,
+        createdAt: Int64,
+        areaID: UUID? = nil,
+        areaStateRawValue: String = "unknown",
+        floor: String = "",
+        recordKindRawValue: String = "legacy"
     ) {
         self.id = id
         self.track = track
@@ -40,6 +61,12 @@ final class TrackTag {
         self.longitude = longitude
         self.altitude = altitude
         self.headingDeg = headingDeg
+        self.accuracy = accuracy
+        self.pressureHpa = pressureHpa
         self.createdAt = createdAt
+        self.areaID = areaID
+        self.areaStateRawValue = areaStateRawValue
+        self.floor = floor
+        self.recordKindRawValue = recordKindRawValue
     }
 }

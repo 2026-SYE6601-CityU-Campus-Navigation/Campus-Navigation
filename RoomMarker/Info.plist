@@ -29,7 +29,14 @@
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>RoomMarker 仅在您使用传感器功能时读取位置，用于显示和采集室内导航数据。</string>
 	<key>NSMotionUsageDescription</key>
-	<string>RoomMarker 使用设备运动与环境传感器读取磁场和气压，用于采集室内导航参考数据。</string>
+	<string>RoomMarker 使用设备运动与环境传感器读取加速度、角速度、磁场和气压，用于采集室内导航参考数据。</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>RoomMarker 可连接您指定的局域网接收端上传已导出的轨迹 ZIP。</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UIBackgroundModes</key>

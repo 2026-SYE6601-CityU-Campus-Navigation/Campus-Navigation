@@ -3,22 +3,45 @@ import SwiftUI
 
 struct TrackListView: View {
     @Query(sort: \Track.startedAt, order: .reverse) private var tracks: [Track]
+    @Query private var areas: [Area]
+    @Query private var rooms: [Room]
 
     let coordinator: RecordingCoordinator
     let initialArea: Area?
+    let showUnassignedOnly: Bool
+    private let photoStorage: any PhotoFileStoring
 
     @State private var isShowingStart = false
     @State private var trackPendingDeletion: Track?
     @State private var errorMessage: String?
+    @State private var exportCoordinator: AreaExportCoordinator
 
-    init(coordinator: RecordingCoordinator, initialArea: Area? = nil) {
+    init(coordinator: RecordingCoordinator, photoStorage: any PhotoFileStoring, initialArea: Area? = nil, showUnassignedOnly: Bool = false) {
         self.coordinator = coordinator
         self.initialArea = initialArea
+        self.showUnassignedOnly = showUnassignedOnly
+        self.photoStorage = photoStorage
+        _exportCoordinator = State(initialValue: AreaExportCoordinator(photoStorage: photoStorage, activeTrackID: { coordinator.activeTrackID }))
     }
 
     var body: some View {
         List {
             interruptedSection
+
+            Section {
+                NavigationLink {
+                    TrackSelectionExportView(recording: coordinator, photoStorage: photoStorage)
+                } label: {
+                    Label("选择轨迹导出", systemImage: "checklist")
+                }
+                .disabled(exportCoordinator.state.isBusy)
+            }
+
+            if initialArea == nil && !showUnassignedOnly {
+                AreaExportSection(coordinator: exportCoordinator, areaName: "全部轨迹", startExport: {
+                    try exportCoordinator.startAllV3(tracks: tracks, areas: areas, rooms: rooms)
+                }, isRecordingActive: coordinator.activeTrackID != nil, exportTitle: "导出全部轨迹")
+            }
 
             Section("轨迹") {
                 ForEach(filteredTracks, id: \.id) { track in
@@ -39,13 +62,13 @@ struct TrackListView: View {
                     ContentUnavailableView(
                         "还没有轨迹",
                         systemImage: "point.topleft.down.to.point.bottomright.curvepath",
-                        description: Text("创建一个区域后，可在前台明确开始轨迹记录。")
+                        description: Text("可直接开始记录；区域列表按标签归属显示完整轨迹。无标签和历史未知区域轨迹请在全部轨迹中查看。")
                     )
                     .listRowBackground(Color.clear)
                 }
             }
         }
-        .navigationTitle(initialArea.map { "\($0.name)的轨迹" } ?? "轨迹")
+        .navigationTitle(initialArea.map { "\($0.name)的轨迹" } ?? (showUnassignedOnly ? "未分区标签轨迹" : "全部轨迹"))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -86,8 +109,9 @@ struct TrackListView: View {
     }
 
     private var filteredTracks: [Track] {
+        if showUnassignedOnly { return TrackAreaIndex.unassigned(in: tracks) }
         guard let initialArea else { return tracks }
-        return tracks.filter { $0.area?.id == initialArea.id }
+        return TrackAreaIndex.tracks(in: initialArea.id, from: tracks)
     }
 
     private var interruptedTracks: [Track] {
@@ -135,7 +159,7 @@ struct TrackListView: View {
                         .foregroundStyle(.red)
                 }
             }
-            Text("\(track.area?.name ?? "未分区") · \(formatDate(track.startedAt))")
+            Text("\(track.isGlobalRecording ? "全局轨迹" : "历史轨迹") · \(formatDate(track.startedAt))")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Text("\(statusText(track)) · \(track.pointCount) 个采样点")

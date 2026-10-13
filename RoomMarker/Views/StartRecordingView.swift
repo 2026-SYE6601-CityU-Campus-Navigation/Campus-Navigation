@@ -11,6 +11,8 @@ struct StartRecordingView: View {
     @State private var name = ""
     @State private var selectedAreaID: UUID?
     @State private var errorMessage: String?
+    @State private var environment: TrackEnvironment = .unknown
+    @State private var collectRawIMU = false
 
     init(coordinator: RecordingCoordinator, initialArea: Area? = nil) {
         self.coordinator = coordinator
@@ -23,15 +25,29 @@ struct StartRecordingView: View {
             Form {
                 Section("轨迹") {
                     TextField("轨迹名称", text: $name)
-                    Picker("区域", selection: $selectedAreaID) {
-                        Text("请选择").tag(UUID?.none)
+                    Picker("初始环境", selection: $environment) {
+                        ForEach(TrackEnvironment.allCases, id: \.self) { value in
+                            Text(value.title).tag(value)
+                        }
+                    }
+                    Text("室内外由您手动标注；未知不等于室内。记录中可切换环境，旧数据不自动推断。")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Picker("首个标签默认区域", selection: $selectedAreaID) {
+                        Text("未分区").tag(UUID?.none)
                         ForEach(areas, id: \.id) { area in
                             Text(area.name).tag(Optional(area.id))
                         }
                     }
+                    Text("轨迹不属于单一区域，可连续跨楼记录。此选择只用于首个标签，之后可逐个修改区域和楼层。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 Section {
+                    Toggle("采集原始 IMU", isOn: $collectRawIMU)
+                        .disabled(!coordinator.supportsRawIMU)
+                    Text("可选采集原始加速度（含重力，g）及角速度（rad/s），每路请求 50 Hz；实际频率由系统决定。增加耗电与存储，仅前台采集，后台/锁屏暂停且不补点。")
+                        .font(.caption).foregroundStyle(.secondary)
                     Text("由您在前台开始后，后台定位会在 iOS 允许时继续。后台不保证精确每秒执行，可能出现真实时间间隔；停止轨迹会停止后台定位。持续定位会增加电量消耗。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -40,15 +56,6 @@ struct StartRecordingView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                if areas.isEmpty {
-                    Section {
-                        ContentUnavailableView(
-                            "还没有区域",
-                            systemImage: "building.2",
-                            description: Text("请先回到首页创建区域，再开始记录。")
-                        )
-                    }
-                }
             }
             .navigationTitle("开始记录")
             .navigationBarTitleDisplayMode(.inline)
@@ -59,11 +66,6 @@ struct StartRecordingView: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("开始") { start() }
                         .disabled(!canStart)
-                }
-            }
-            .onAppear {
-                if selectedAreaID == nil {
-                    selectedAreaID = areas.first?.id
                 }
             }
             .alert("无法开始记录", isPresented: Binding(
@@ -84,13 +86,12 @@ struct StartRecordingView: View {
 
     private var canStart: Bool {
         !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && selectedArea != nil
             && coordinator.state == .idle
     }
 
     private func start() {
         do {
-            try coordinator.start(name: name, area: selectedArea)
+            try coordinator.start(name: name, area: selectedArea, environment: environment, collectRawIMU: collectRawIMU)
             dismiss()
         } catch {
             errorMessage = error.localizedDescription

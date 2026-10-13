@@ -50,10 +50,15 @@ protocol ZIPArchiveCreating {
     func removeArchive(at url: URL) throws
 }
 
-struct StoredZIPArchiveService: ZIPArchiveCreating {
+nonisolated struct StoredZIPArchiveService: ZIPArchiveCreating {
     private let archiveDirectory: URL
     private let fileManager: FileManager
     private let writer: StoredZIPWriter
+
+    // Only value configuration crosses actors; FileManager remains worker-local.
+    var backgroundConfiguration: V3ArchiveConfiguration {
+        .init(directory: archiveDirectory, chunkSize: writer.chunkSize)
+    }
 
     init(
         archiveDirectory: URL = ExportTemporaryLocations.archives,
@@ -65,7 +70,7 @@ struct StoredZIPArchiveService: ZIPArchiveCreating {
         self.writer = writer
     }
 
-    func createArchive(
+    nonisolated func createArchive(
         from staging: ExportStagingResult,
         areaName: String,
         exportedAt: Int64,
@@ -90,6 +95,8 @@ struct StoredZIPArchiveService: ZIPArchiveCreating {
                 archiveURL: destination,
                 entryPaths: entries.map(\.archivePath)
             )
+        } catch is CancellationError {
+            throw CancellationError()
         } catch let error as ZIPArchiveError {
             throw error
         } catch {
@@ -97,7 +104,7 @@ struct StoredZIPArchiveService: ZIPArchiveCreating {
         }
     }
 
-    func removeArchive(at url: URL) throws {
+    nonisolated func removeArchive(at url: URL) throws {
         let candidate = url.standardizedFileURL
         try validateChild(candidate, of: archiveDirectory)
         if fileManager.fileExists(atPath: candidate.path) {
@@ -106,7 +113,7 @@ struct StoredZIPArchiveService: ZIPArchiveCreating {
     }
 
     private func orderedEntries(from staging: ExportStagingResult) throws -> [ZIPSourceEntry] {
-        let sourceURLs = [staging.manifestURL] + staging.trackURLs + staging.photoURLs
+        let sourceURLs = [staging.manifestURL] + staging.trackURLs + staging.photoURLs + staging.auxiliaryURLs
         return try sourceURLs.map { sourceURL in
             let path = try relativePath(of: sourceURL, under: staging.sessionDirectory)
             guard ArchivePathValidator.isSafe(path) else {
@@ -152,13 +159,13 @@ struct StoredZIPArchiveService: ZIPArchiveCreating {
     }
 }
 
-enum ArchivePathValidator {
+nonisolated enum ArchivePathValidator {
     static func isSafe(_ path: String) -> Bool {
         CanonicalPathContainment.isSafeRelativePath(path)
     }
 }
 
-enum ExportArchiveFilename {
+nonisolated enum ExportArchiveFilename {
     static func make(areaName: String, exportedAt: Int64, archiveID: UUID) -> String {
         let safeArea = sanitize(areaName)
         let timestamp = timestampString(milliseconds: exportedAt)
@@ -189,9 +196,9 @@ enum ExportArchiveFilename {
     }
 }
 
-struct StoredZIPWriter {
+nonisolated struct StoredZIPWriter {
     private let fileManager: FileManager
-    private let chunkSize: Int
+    let chunkSize: Int
 
     init(fileManager: FileManager = .default, chunkSize: Int = 64 * 1_024) {
         self.fileManager = fileManager
@@ -211,6 +218,7 @@ struct StoredZIPWriter {
 
             var centralRecords: [CentralRecord] = []
             for entry in entries {
+                try Task.checkCancellation()
                 guard ArchivePathValidator.isSafe(entry.archivePath) else {
                     throw ZIPArchiveError.unsafeEntryPath(entry.archivePath)
                 }
@@ -260,6 +268,7 @@ struct StoredZIPWriter {
         } catch {
             try? fileManager.removeItem(at: partial)
             try? fileManager.removeItem(at: destination)
+            if error is CancellationError { throw error }
             if let archiveError = error as? ZIPArchiveError { throw archiveError }
             throw ZIPArchiveError.outputFailure(error.localizedDescription)
         }
@@ -274,6 +283,7 @@ struct StoredZIPWriter {
         var crc = CRC32()
         var total: UInt64 = 0
         while let chunk = try input.read(upToCount: chunkSize), !chunk.isEmpty {
+            try Task.checkCancellation()
             total += UInt64(chunk.count)
             guard total <= UInt64(UInt32.max) else {
                 throw ZIPArchiveError.sourceTooLarge(entry.archivePath)
@@ -287,6 +297,7 @@ struct StoredZIPWriter {
         let input = try FileHandle(forReadingFrom: source)
         defer { try? input.close() }
         while let chunk = try input.read(upToCount: chunkSize), !chunk.isEmpty {
+            try Task.checkCancellation()
             try output.write(contentsOf: chunk)
         }
     }
@@ -349,14 +360,14 @@ struct StoredZIPWriter {
     }
 }
 
-private struct CentralRecord {
+private nonisolated struct CentralRecord {
     let name: Data
     let crc32: UInt32
     let size: UInt32
     let localOffset: UInt32
 }
 
-private struct CRC32 {
+private nonisolated struct CRC32 {
     private var value: UInt32 = 0xFFFF_FFFF
 
     mutating func update(_ data: Data) {
@@ -375,7 +386,7 @@ private struct CRC32 {
 }
 
 private extension Data {
-    mutating func appendLE<T: FixedWidthInteger>(_ value: T) {
+    nonisolated mutating func appendLE<T: FixedWidthInteger>(_ value: T) {
         var littleEndian = value.littleEndian
         Swift.withUnsafeBytes(of: &littleEndian) { append(contentsOf: $0) }
     }

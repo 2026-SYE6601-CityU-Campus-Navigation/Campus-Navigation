@@ -7,6 +7,9 @@ final class Area {
     var name: String
     var note: String
     var createdAt: Int64
+    var category: String = ""
+    // Stable import identity; never inferred for historical areas during migration.
+    var catalogKey: String?
 
     @Relationship(deleteRule: .nullify, inverse: \Room.area)
     var rooms: [Room]

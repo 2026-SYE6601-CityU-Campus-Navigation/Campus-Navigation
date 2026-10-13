@@ -5,10 +5,8 @@ struct RecordingStatusBanner: View {
     let cameraService: any CameraServicing
 
     @State private var isShowingTagSheet = false
-    @State private var isShowingCamera = false
     @State private var isShowingPhotoNote = false
-    @State private var pendingCapture: CameraCaptureOutcome?
-    @State private var message: String?
+    @State private var structureMessage: String?
 
     var body: some View {
         switch coordinator.state {
@@ -43,50 +41,70 @@ struct RecordingStatusBanner: View {
                         Button {
                             isShowingTagSheet = true
                         } label: {
-                            Label("添加标签", systemImage: "tag")
+                            Label("采集节点", systemImage: "tag")
                         }
                         .buttonStyle(.bordered)
                         .frame(maxWidth: .infinity)
 
-                        Button(action: beginPhotoCapture) {
-                            Label("拍照", systemImage: "camera")
+                        Button { isShowingPhotoNote = true } label: {
+                            Label("拍摄风景", systemImage: "camera")
                         }
                         .buttonStyle(.bordered)
                         .frame(maxWidth: .infinity)
+                    }
+                    HStack(spacing: 10) {
+                        Menu {
+                            ForEach(TrackEnvironment.allCases, id: \.self) { environment in
+                                Button(environment.title) { changeEnvironment(environment) }
+                            }
+                        } label: {
+                            Label("环境：\(coordinator.activeSegment?.environment?.title ?? "不可用")",
+                                  systemImage: "building.2.crop.circle")
+                        }
+                        .disabled(coordinator.activeSegment == nil)
+                        Spacer()
+                        Button {
+                            do {
+                                _ = try coordinator.captureCorner()
+                            } catch { structureMessage = error.localizedDescription }
+                        } label: {
+                            Label("采集拐点", systemImage: "arrow.turn.up.right")
+                        }
+                        .disabled(coordinator.activeSegment == nil)
+                    }
+                    .font(.subheadline)
+                    if let count = coordinator.activeTrack?.corners.count, count > 0 {
+                        Text("已保存 \(count) 个拐点").font(.caption).foregroundStyle(.secondary)
+                    }
+                    if coordinator.activeTrack?.rawIMURequested == true, let imu = coordinator.rawIMU {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("原始 IMU · 已接收 \(imu.acceptedCount) 条 · 待存 \(imu.pendingCount) 条")
+                            Text("加速度：\(imu.status.accelerometer.title) · 角速度：\(imu.status.gyroscope.title)")
+                            if let error = imu.errorMessage {
+                                Text(error).foregroundStyle(.red)
+                                Button("重试 IMU 保存") {
+                                    do { try imu.retry() } catch { structureMessage = error.localizedDescription }
+                                }
+                            }
+                        }.font(.caption)
                     }
                 }
                 .padding(12)
                 .background(.regularMaterial)
             }
             .sheet(isPresented: $isShowingTagSheet) {
-                TrackTagCaptureView(coordinator: coordinator)
-            }
-            .fullScreenCover(isPresented: $isShowingCamera, onDismiss: presentPhotoNoteIfNeeded) {
-                CameraCaptureView { outcome in
-                    pendingCapture = outcome
-                    isShowingCamera = false
-                    if case let .failed(reason) = outcome {
-                        message = "拍照失败：\(reason)"
-                    }
-                }
-                .ignoresSafeArea()
+                TrackTagCaptureView(coordinator: coordinator, cameraService: cameraService)
             }
             .sheet(isPresented: $isShowingPhotoNote) {
-                if case let .success(jpegData, capturedAt) = pendingCapture {
-                    PhotoNoteView(jpegData: jpegData) { note in
-                        savePhoto(data: jpegData, capturedAt: capturedAt, note: note)
-                    } onDiscard: {
-                        pendingCapture = nil
-                    }
-                }
+                TrackTagCaptureView(coordinator: coordinator, cameraService: cameraService, isNode: false)
             }
-            .alert("照片", isPresented: Binding(
-                get: { message != nil },
-                set: { if !$0 { message = nil } }
+            .alert("采集未完成", isPresented: Binding(
+                get: { structureMessage != nil },
+                set: { if !$0 { structureMessage = nil } }
             )) {
                 Button("好", role: .cancel) {}
             } message: {
-                Text(message ?? "未知错误")
+                Text(structureMessage ?? "未知错误")
             }
         case .stopping:
             statusCard(title: "正在保存并停止…", showsProgress: true)
@@ -97,7 +115,7 @@ struct RecordingStatusBanner: View {
                     .foregroundStyle(.red)
                     .lineLimit(2)
                 Spacer()
-                Button("关闭") {
+                Button(coordinator.activeTrack?.rawIMURequested == true ? "重试保存并关闭" : "关闭") {
                     Task { await coordinator.resetFailure() }
                 }
             }
@@ -156,56 +174,11 @@ struct RecordingStatusBanner: View {
         }
     }
 
-    private func beginPhotoCapture() {
-        Task {
-            let authorization: CameraAuthorizationState
-            if cameraService.authorizationState == .notDetermined {
-                authorization = await cameraService.requestAuthorization()
-            } else {
-                authorization = cameraService.authorizationState
-            }
-
-            switch authorization {
-            case .authorized:
-                guard cameraService.isCameraAvailable else {
-                    pendingCapture = .unavailable
-                    _ = try? coordinator.handlePhotoCapture(.unavailable)
-                    message = "此设备或模拟器没有可用的相机。未创建照片记录。"
-                    return
-                }
-                pendingCapture = nil
-                isShowingCamera = true
-            case .denied:
-                message = "相机权限已被拒绝。可在系统设置中允许 RoomMarker 使用相机。"
-            case .restricted:
-                message = "此设备限制了相机访问。未创建照片记录。"
-            case .notDetermined:
-                message = "尚未获得相机权限。未创建照片记录。"
-            }
-        }
-    }
-
-    private func presentPhotoNoteIfNeeded() {
-        guard case .success = pendingCapture else {
-            if case .cancelled = pendingCapture {
-                _ = try? coordinator.handlePhotoCapture(.cancelled)
-            }
-            pendingCapture = nil
-            return
-        }
-        isShowingPhotoNote = true
-    }
-
-    private func savePhoto(data: Data, capturedAt: Int64, note: String) {
+    private func changeEnvironment(_ environment: TrackEnvironment) {
         do {
-            try coordinator.handlePhotoCapture(
-                .success(jpegData: data, capturedAt: capturedAt),
-                note: note
-            )
-            pendingCapture = nil
+            try coordinator.changeEnvironment(to: environment)
         } catch {
-            pendingCapture = nil
-            message = error.localizedDescription
+            structureMessage = error.localizedDescription
         }
     }
 }

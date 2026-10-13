@@ -26,19 +26,21 @@ final class Phase2DataStore {
     func createArea(
         name: String,
         note: String,
-        createdAt: Int64 = Phase2DataStore.nowMilliseconds()
+        createdAt: Int64 = Phase2DataStore.nowMilliseconds(), category: String = ""
     ) throws -> Area {
         let input = try validated(name: name, note: note)
         let area = Area(name: input.name, note: input.note, createdAt: createdAt)
+        area.category = category.trimmingCharacters(in: .whitespacesAndNewlines)
         context.insert(area)
         try repository.save()
         return area
     }
 
-    func updateArea(_ area: Area, name: String, note: String) throws {
+    func updateArea(_ area: Area, name: String, note: String, category: String? = nil) throws {
         let input = try validated(name: name, note: note)
         area.name = input.name
         area.note = input.note
+        if let category { area.category = category.trimmingCharacters(in: .whitespacesAndNewlines) }
         try repository.save()
     }
 
@@ -47,20 +49,24 @@ final class Phase2DataStore {
         name: String,
         note: String,
         area: Area?,
-        createdAt: Int64 = Phase2DataStore.nowMilliseconds()
+        createdAt: Int64 = Phase2DataStore.nowMilliseconds(), code: String = "", floor: String = ""
     ) throws -> Room {
         let input = try validated(name: name, note: note)
         let room = Room(name: input.name, note: input.note, area: area, createdAt: createdAt)
+        room.code = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        room.floor = CampusCatalog.floor(floor)
         context.insert(room)
         try repository.save()
         return room
     }
 
-    func updateRoom(_ room: Room, name: String, note: String, area: Area?) throws {
+    func updateRoom(_ room: Room, name: String, note: String, area: Area?, code: String? = nil, floor: String? = nil) throws {
         let input = try validated(name: name, note: note)
         room.name = input.name
         room.note = input.note
         room.area = area
+        if let code { room.code = code.trimmingCharacters(in: .whitespacesAndNewlines) }
+        if let floor { room.floor = CampusCatalog.floor(floor) }
         try repository.save()
     }
 
@@ -118,6 +124,31 @@ final class Phase2DataStore {
     func deleteMarker(_ marker: Marker) throws {
         context.delete(marker)
         try repository.save()
+    }
+
+    /// Metadata-only edit: never refresh timestamps, sampled values or photo records.
+    func updateTagLocation(_ tag: TrackTag, area: Area?, floor: String) throws {
+        // Existing callers preserve the historical room snapshot, even after relocation.
+        try updateTagLocationAndRoom(tag, area: area, floor: floor, updateRoomBinding: false, roomSelection: nil)
+    }
+
+    func updateTagLocationAndRoom(_ tag: TrackTag, area: Area?, floor: String,
+                                  updateRoomBinding: Bool = true, roomSelection: NodeRoomSelection?) throws {
+        if updateRoomBinding && !tag.isNode && roomSelection != nil { throw NodeRoomError.unsupportedType }
+        let room = try updateRoomBinding ? NodeRoomBinding.resolve(roomSelection,
+            type: tag.tagType ?? .otherIndoor, areaID: area?.id, context: context) : nil
+        tag.areaID = area?.id
+        tag.areaStateRawValue = area == nil ? "unassigned" : "assigned"
+        tag.floor = CampusCatalog.floor(floor)
+        if updateRoomBinding && (tag.roomID != roomSelection?.roomID || tag.roomDoorRole != roomSelection?.doorRole) {
+            NodeRoomBinding.apply(roomSelection, room: room, to: tag)
+        }
+        do {
+            try repository.save()
+        } catch {
+            context.rollback()
+            throw error
+        }
     }
 
     private func validated(name: String, note: String) throws -> (name: String, note: String) {

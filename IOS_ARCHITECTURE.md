@@ -2,7 +2,7 @@
 
 ## Status
 
-This document describes the as-built iOS application accepted at the end of Phase 9. It replaces the earlier proposed structure while preserving the design reasoning that shaped the implementation.
+This document describes the current as-built iOS application: the accepted Phase 9 baseline plus the cross-building, JSON v3, catalog, structure, raw-IMU, visualisation, recognition and upload follow-up. It replaces the earlier proposed structure while preserving the design reasoning that shaped the implementation.
 
 The implementation uses native Apple frameworks, has one application target and one unit-test target, and has no third-party runtime dependency. The deployment target is iOS 17 or later.
 
@@ -29,9 +29,9 @@ The implementation uses native Apple frameworks, has one application target and 
 | Background activity | Foreground-started Core Location updates and `CLBackgroundActivitySession` |
 | Camera | Minimal UIKit camera bridge behind `CameraServicing` |
 | Durable photos | Foundation file storage under Application Support |
-| JSON | Dedicated `Codable` v2 DTOs and configured Foundation encoding |
+| JSON | Dedicated legacy v2 and current streaming v3 DTOs with configured Foundation encoding |
 | ZIP | In-project streaming STORED ZIP32 writer with CRC32 |
-| Sharing | UIKit Share Sheet presented from SwiftUI |
+| Sharing/upload | UIKit Share Sheet or disk-streamed HTTP(S) multipart upload; token stored in Keychain |
 | Tests | Deterministic app, persistence, sensor, recording, media, export, and parity tests |
 
 ## Composition root and dependency direction
@@ -73,12 +73,17 @@ RoomMarker/
 │   ├── TrackPoint.swift
 │   ├── TrackTag.swift
 │   ├── TrackPhoto.swift
+│   ├── TrackSegment.swift
+│   ├── TrackCorner.swift
+│   ├── TrackIMUBatch.swift
 │   └── stable marker/tag/Wi-Fi capability enums
 ├── Persistence/
 │   ├── RoomMarkerSchema.swift
 │   ├── RoomMarkerRepository.swift
 │   ├── SwiftDataRepository.swift
-│   └── Phase2DataStore.swift
+│   ├── Phase2DataStore.swift
+│   ├── CampusCatalog.swift / CatalogImportStore.swift
+│   └── TrackRoomPlanning.swift
 ├── Sensors/
 │   ├── SensorTypes.swift
 │   ├── SensorServiceProtocols.swift
@@ -87,7 +92,8 @@ RoomMarker/
 │   ├── PressureSensorService.swift
 │   ├── SensorHub.swift
 │   ├── SensorSnapshotService.swift
-│   └── RoomMarkerSnapshotWorkflow.swift
+│   ├── RoomMarkerSnapshotWorkflow.swift
+│   └── RawIMUSensorService.swift
 ├── Recording/
 │   ├── RecordingTypes.swift
 │   ├── RecordingCoordinator.swift
@@ -96,13 +102,16 @@ RoomMarker/
 │   ├── RecordingLifecycle.swift
 │   ├── BackgroundLocationSession.swift
 │   ├── SampleAssembler.swift
-│   └── TrackMediaSupport.swift
+│   ├── TrackMediaSupport.swift
+│   ├── RawIMURecorder.swift
+│   └── TrackStructureEditor.swift
 ├── Media/
 │   ├── CameraCaptureView.swift
 │   ├── CameraService.swift
 │   └── PhotoFileStore.swift
 ├── DTOs/
-│   └── ExportDTOs.swift
+│   ├── ExportDTOs.swift
+│   └── ExportV3DTOs.swift
 ├── Export/
 │   ├── AreaExportCoordinator.swift
 │   ├── AreaExportSnapshotBuilder.swift
@@ -111,7 +120,16 @@ RoomMarker/
 │   ├── ExportJSONEncoder.swift
 │   ├── ExportStagingService.swift
 │   ├── StoredZIPArchive.swift
-│   └── ExportTemporaryCleanup.swift
+│   ├── ExportTemporaryCleanup.swift
+│   ├── ExportV3SnapshotBuilder.swift / ExportV3Validator.swift
+│   ├── V3StreamingExporter.swift
+│   └── PhotoHTMLIndex.swift
+├── Recognition/
+│   └── PlaceRecognitionEngine.swift
+├── Visualization/
+│   └── Track3DPlan.swift
+├── Upload/
+│   └── ZIPUploadService.swift
 ├── Views/
 │   └── Area, Room, Marker, sensor, recording, Track, media, and export views
 └── Info.plist
@@ -119,15 +137,15 @@ RoomMarker/
 RoomMarkerTests/
 ├── Fixtures/
 │   ├── HarmonyOS v1 compatibility fixtures
-│   └── iOS v2 export fixtures
-└── persistence, sensor, recording, media, export, background, and parity suites
+│   └── iOS v2/v3 export fixtures
+└── persistence, migration, sensor, recording, media, export, background, catalog, recognition, 3D, upload, and parity suites
 ```
 
 The folders reflect runtime responsibilities rather than an abstract framework hierarchy. Small workflow objects remain close to the models or infrastructure they coordinate.
 
 ## Domain and persistence
 
-The seven shared product entities remain recognisable across platforms:
+The seven original shared product entities remain recognisable across platforms:
 
 - `Area`
 - `Room`
@@ -137,15 +155,17 @@ The seven shared product entities remain recognisable across platforms:
 - `TrackTag`
 - `TrackPhoto`
 
+iOS v7 adds three owned Track evidence models—`TrackSegment`, `TrackCorner`, and `TrackIMUBatch`—without rewriting the original entities. Catalog identity and node-room binding are conservative scalar additions so old data can migrate with no inferred meaning.
+
 SwiftData uses UUID identity and `Int64` Unix-millisecond timestamps. Sensor fields are optional `Double` values. Stable Marker and Track-tag labels retain the established Chinese raw values used by the HarmonyOS export contract.
 
 Relationships implement the required ownership rules:
 
-- an Area relates to Rooms and Tracks;
+- an Area owns Rooms only through an explicit current relation; a cross-building Track uses node Area IDs and a derived area index rather than one owning Area;
 - a null Area relation is presented as synthetic `未分区`, not stored as a real Area;
 - deleting an Area through the current iOS UI clears its child relations and preserves the Rooms and Tracks;
 - a Room owns Markers through cascade deletion;
-- a Track owns TrackPoints, TrackTags, and TrackPhoto metadata through cascade deletion;
+- a Track owns TrackPoints, TrackTags, TrackPhoto metadata, segments, corners, and IMU batches through cascade deletion;
 - photo bytes are outside SwiftData, so Track and photo deletion coordinate database changes with `PhotoFileStore` cleanup.
 
 `Phase2DataStore` contains Area/Room/Marker validation and mutations. `SwiftDataRecordingStore` implements recording and media persistence. Repository protocols and in-memory containers let tests exercise semantics without a physical device.
@@ -185,15 +205,17 @@ The same sensor service also supports the standalone Sensor Snapshot screen. Tas
 
 Start performs these operations in order:
 
-1. validate a non-empty name and real Area;
-2. persist a Track with no end time;
+1. validate a non-empty name and requested initial environment;
+2. persist a global Track and its first environment segment with no end time;
 3. acquire the recording sensor consumer;
 4. acquire foreground-started background-location ownership;
-5. start the nominal one-second ticker.
+5. optionally start the foreground raw-IMU recorder and start the nominal one-second ticker.
 
 `SampleAssembler` takes the current optional sensor state and stamps the actual tick time. The coordinator rejects non-increasing tick times, buffers five points, and flushes them through the recording store. It also flushes the current tail before expected background suspension and again before finalisation.
 
 Stop waits for the ticker, persists the final tail, writes the real end time, releases background ownership, stops its sensor lease, and returns to idle. No point is interpolated after a scheduling gap and no synthetic catch-up sequence is generated.
+
+Nodes freeze their selected Area/floor/optional Room together with one JPEG and sensor metadata. Corners and environment transitions are separate evidence. `TrackStructureEditor` permits completed-segment correction, split at a real node timestamp, or merge with the previous segment; it updates point, corner and IMU segment references atomically without changing measurements or timestamps.
 
 Elapsed UI time is derived from the Track start and current clock. The active recording banner is inserted at the root safe area so it remains available across navigation, tag entry, and camera presentation.
 
@@ -209,7 +231,7 @@ Force quitting terminates the in-memory coordinator. On the next launch, `Incomp
 
 ## Tags, camera, and photo storage
 
-Tags and photos are accepted only for the active Track. Each action receives its own real timestamp and the currently available location, altitude, and heading metadata.
+New nodes and scenery photos are accepted only for the active Track. Each action receives its own real timestamp and the currently available location, accuracy, altitude, pressure and heading metadata. Historical standalone tags/photos retain their old independent meaning.
 
 Camera capture is user initiated through a UIKit bridge. Successful JPEG data is validated and written atomically under:
 
@@ -229,19 +251,17 @@ Export is coordinated by `AreaExportCoordinator`, which exposes preparing, stagi
 
 The pipeline is:
 
-1. `AreaExportSnapshotBuilder` sorts and validates the requested Area, Tracks, points, tags, photos, and JPEG data.
-2. Immutable `AreaExportSnapshot` and `TrackExportSnapshot` values detach export work from live SwiftData models.
-3. `ExportDTOMapper` produces the v2 manifest and per-Track DTOs.
-4. `ExportJSONEncoder` creates deterministic JSON with Unix-millisecond timestamps and omitted unavailable readings.
-5. `ExportStagingService` writes `manifest.json`, `tracks/*.json`, and relative `photos/.../*.jpg` files into one owned session directory.
-6. `StoredZIPArchiveService` enumerates only that session's validated descendants.
-7. `StoredZIPWriter` streams files into one STORED ZIP32 archive with CRC32 records.
-8. `ExportSharePayload` exposes exactly the completed ZIP to the native Share Sheet.
-9. Staging and archive files are removed after completion, cancellation, view departure, or the next launch's stale-export cleanup.
+1. `ExportV3SnapshotBuilder` freezes sorted model values, owned photo URLs and raw IMU payloads for the selected area/all/UUID Track scope.
+2. `ExportV3Validator` verifies identities, counts, relationships, segment membership, unsupported Wi-Fi semantics and source ownership before publication.
+3. `V3StreamingExporter` writes deterministic manifest/Track JSON while decoding at most one bounded IMU batch at a time.
+4. Photos are copied in 64 KiB chunks with ImageIO validation and SHA-256; `PhotoHTMLIndex` creates a static relative-link review page.
+5. `StoredZIPArchiveService` enumerates only the owned session's validated descendants and streams one STORED ZIP32 archive with CRC32 records.
+6. The user explicitly chooses `ExportSharePayload` or `URLSessionZIPUploader`; upload constructs a contained disk multipart body in 64 KiB chunks and never moves the source archive.
+7. Staging and archive files are removed after completion, cancellation, view departure, or the next launch's stale-export cleanup.
 
-The manifest declares `version: 2`, `sourcePlatform: ios`, and platform capabilities. The Wi-Fi capability remains `nearbyWifiFingerprint: unsupported`; iOS Track JSON contains no BSSID/RSSI, `wifiCount`, or `wifiTop` observations.
+The current manifest declares `version: 3`, `sourcePlatform: ios`, scope, catalog and platform capabilities. The Wi-Fi capability remains `nearbyWifiFingerprint: unsupported`; iOS Track JSON contains no BSSID/RSSI, `wifiCount`, or `wifiTop` observations. Legacy v2 readers/tests remain for old records; structured v3 data is never silently downgraded to v2.
 
-Snapshot construction currently retains validated JPEG bytes in memory before staging. The archive writer then streams staged files, but unusually large datasets remain a documented scale boundary.
+Export is not constant memory: frozen model arrays, raw bounded-batch payloads and uniqueness sets still scale with the Track. It does avoid retaining all decoded IMU samples or all photo bytes at once.
 
 ## Filesystem security boundary
 
@@ -277,7 +297,7 @@ Temporary cleanup enumerates only children of the RoomMarker-owned export root. 
 
 The local databases are platform-specific. Compatibility occurs through versioned exports and stable domain meaning, not by sharing a SQLite or SwiftData store.
 
-Checked-in HarmonyOS v1 fixtures verify legacy field names and optionality. iOS v2 adds platform and capability metadata so downstream readers can distinguish absent iOS Wi-Fi observations from a real empty HarmonyOS scan.
+Checked-in HarmonyOS v1 and iOS v2/v3 fixtures verify legacy field names and optionality. iOS v3 adds cross-building scope, catalog, node-photo/room relationships, segments, corners and raw IMU while keeping capability metadata so downstream readers distinguish unsupported iOS Wi-Fi from a real empty HarmonyOS scan.
 
 The implementations deliberately differ where native platform behavior differs: SwiftData replaces HarmonyOS relational storage, SwiftUI observation replaces manual store listeners, Core Location owns iOS background behavior, and the Share Sheet replaces the HarmonyOS document-save flow.
 
@@ -285,7 +305,7 @@ The implementations deliberately differ where native platform behavior differs: 
 
 Hardware, clocks, tickers, persistence, background ownership, camera outcomes, photo storage, ZIP creation, and export session identifiers have protocol or closure seams for deterministic tests.
 
-The accepted Phase 9 baseline is 203 tests across 11 suites with no failures or skips. It includes persistence cascades, partial sensors, lease ownership, ordering and tail flush, background lifecycle, camera/media cleanup, v1/v2 compatibility, immutable snapshots, ZIP structure, canonical path containment, and incomplete-Track behavior.
+The current baseline is 447 logical tests (559 parameterized instances) with no failures or skips. It includes the accepted Phase 9 suite plus V1→V7 migration, global Track indexing, node/photo compensation, catalog import, room binding/generation, segment/corner/raw-IMU integrity, v3 streaming and receiver validation, 3D evidence planning, conservative place recognition, ZIP upload staging and the original filesystem defenses.
 
 Physical acceptance on an iPhone 15 Pro / iOS 26.7 validated the sensor, camera, foreground, Home-background, lock-screen, Share Sheet, saved archive, cleanup, denied-location, and force-quit boundaries. See [IOS_PHASE9_DEVICE_ACCEPTANCE.md](IOS_PHASE9_DEVICE_ACCEPTANCE.md) for the bounded evidence and remaining risks.
 
@@ -295,5 +315,7 @@ Physical acceptance on an iPhone 15 Pro / iOS 26.7 validated the sensor, camera,
 - The application does not request Always location authorization or system relaunch after termination.
 - General nearby Wi-Fi fingerprint scanning is intentionally unsupported on iOS.
 - The archive writer is STORED ZIP32 rather than a compression or ZIP64 implementation.
-- Export snapshot photo data has not been scale-tested for unusually large field collections.
+- Export model freezing and uniqueness sets still grow with a collection; multi-hour device export and upload remain a field-performance check.
+- 2.5D/3D rendering uses recorded coordinates and accuracy gates but does not map-match a floor plan.
+- Core Location/pressure place candidates are not a replacement for HarmonyOS Wi-Fi fingerprint positioning.
 - The accepted physical matrix contains one iPhone and OS version; it is not a production device lab.

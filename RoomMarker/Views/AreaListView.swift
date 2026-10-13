@@ -12,6 +12,7 @@ struct AreaListView: View {
     @State private var isShowingAreaEditor = false
     @State private var areaPendingDeletion: Area?
     @State private var errorMessage: String?
+    @State private var searchText = ""
 
     let sensorHub: SensorHub
     let recordingCoordinator: RecordingCoordinator
@@ -24,16 +25,30 @@ struct AreaListView: View {
     }
 
     private var unassignedTracks: [Track] {
-        tracks.filter { $0.area == nil }
+        TrackAreaIndex.unassigned(in: tracks)
     }
 
     var body: some View {
         NavigationStack {
             List {
-                if !unassignedRooms.isEmpty || !unassignedTracks.isEmpty {
+                Section {
+                    NavigationLink { CatalogImportView() } label: {
+                        Label("建筑／教室目录导入", systemImage: "building.2.crop.circle")
+                    }
+                }
+                if let message = recordingCoordinator.mediaCleanupMessage {
+                    Section("照片清理") {
+                        Text(message).foregroundStyle(.orange)
+                        Button("重试照片清理") {
+                            retryPhotoCleanup()
+                        }
+                    }
+                }
+                if !unassignedRooms.isEmpty || !TrackAreaIndex.unassignedV2ExportCandidates(in: tracks).isEmpty {
                     Section {
                         NavigationLink {
                             UnassignedRoomsView(
+                                coordinator: recordingCoordinator,
                                 photoStorage: photoStorage,
                                 snapshotService: snapshotService
                             )
@@ -43,19 +58,25 @@ struct AreaListView: View {
                                 Text("房间 \(unassignedRooms.count) · 轨迹 \(unassignedTracks.count)")
                                     .font(.subheadline)
                                     .foregroundStyle(.secondary)
+                                if tracks.contains(where: { !$0.isGlobalRecording && $0.area == nil }) {
+                                    Text("另可导出历史未分区轨迹（不计入当前标签归属）。")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
                             }
                             .padding(.vertical, 2)
                         }
                     } footer: {
-                        Text("未分区代表区域关系为空，不是一个持久化区域。")
+                        Text("轨迹按明确未分区的标签统计；无标签或历史区域未知不等于未分区。")
                     }
                 }
 
                 Section("区域") {
-                    ForEach(areas, id: \.id) { area in
+                    ForEach(areas.filter { searchText.isEmpty || ($0.name + $0.category + $0.note).localizedStandardContains(searchText) }, id: \.id) { area in
                         NavigationLink {
                             AreaDetailView(
                                 area: area,
+                                coordinator: recordingCoordinator,
                                 photoStorage: photoStorage,
                                 snapshotService: snapshotService
                             )
@@ -87,6 +108,7 @@ struct AreaListView: View {
                 }
             }
             .navigationTitle("RoomMarker")
+            .searchable(text: $searchText, prompt: "搜索建筑或分类")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
@@ -100,13 +122,23 @@ struct AreaListView: View {
                         } label: {
                             Label("传感器快照", systemImage: "camera.metering.center.weighted")
                         }
+                        NavigationLink {
+                            PlaceRecognitionView(snapshotService: snapshotService)
+                        } label: {
+                            Label("我在哪", systemImage: "location.magnifyingglass")
+                        }
+                        NavigationLink {
+                            UploadSettingsView()
+                        } label: {
+                            Label("上传设置", systemImage: "icloud.and.arrow.up")
+                        }
                     } label: {
                         Label("传感器", systemImage: "sensor.tag.radiowaves.forward")
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     NavigationLink {
-                        TrackListView(coordinator: recordingCoordinator)
+                        TrackListView(coordinator: recordingCoordinator, photoStorage: photoStorage)
                     } label: {
                         Label("轨迹", systemImage: "point.topleft.down.to.point.bottomright.curvepath")
                     }
@@ -135,7 +167,7 @@ struct AreaListView: View {
                     areaPendingDeletion = nil
                 }
             } message: {
-                Text("区域本身会被删除；其中的房间和轨迹会保留并移到“未分区”。")
+                Text("房间移到未分区；此区域的标签解除区域关联。完整轨迹、采样点、标签楼层和照片保留，其他区域标签不变。")
             }
             .persistenceErrorAlert($errorMessage)
         }
@@ -160,11 +192,13 @@ struct AreaListView: View {
 
     @ViewBuilder
     private func areaRow(_ area: Area) -> some View {
+        let count = TrackAreaIndex.tracks(in: area.id, from: tracks).count
         VStack(alignment: .leading, spacing: 4) {
             Text(area.name)
+            if !area.category.isEmpty { Text(area.category).font(.caption).foregroundStyle(.secondary) }
             Text(area.note.isEmpty
-                ? "房间 \(area.rooms.count) · 轨迹 \(area.tracks.count)"
-                : "\(area.note) · 房间 \(area.rooms.count) · 轨迹 \(area.tracks.count)")
+                ? "房间 \(area.rooms.count) · 触及轨迹 \(count)"
+                : "\(area.note) · 房间 \(area.rooms.count) · 触及轨迹 \(count)")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
@@ -175,6 +209,15 @@ struct AreaListView: View {
     private func presentNewArea() {
         editingArea = nil
         isShowingAreaEditor = true
+    }
+
+    private func retryPhotoCleanup() {
+        do {
+            let photos = try modelContext.fetch(FetchDescriptor<TrackPhoto>())
+            recordingCoordinator.retryPhotoCleanup(protecting: Set(photos.map(\.filePath)))
+        } catch {
+            errorMessage = "无法读取照片引用；未执行文件清理。"
+        }
     }
 
     private func deletePendingArea() {

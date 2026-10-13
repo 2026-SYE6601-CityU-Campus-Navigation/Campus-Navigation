@@ -174,7 +174,7 @@ struct Phase6ExportTests {
     @Test("14. All six tag raw values are preserved")
     func tagRawValues() throws {
         let fixture = makeFixture(includeDefaults: false)
-        fixture.track.tags = TrackTagType.allCases.enumerated().map { index, type in
+        fixture.track.tags = TrackTagType.allCases.prefix(6).enumerated().map { index, type in
             TrackTag(track: fixture.track, timeMs: Int64(index), tagType: type, createdAt: Int64(index))
         }
         fixture.area.tracks = [fixture.track]

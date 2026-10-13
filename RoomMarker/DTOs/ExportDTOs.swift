@@ -1,11 +1,11 @@
 import Foundation
 
-enum NearbyWiFiFingerprintCapability: String, Codable, Sendable {
+nonisolated enum NearbyWiFiFingerprintCapability: String, Codable, Sendable {
     case collected
     case unsupported
 }
 
-struct ExportCapabilitiesDTO: Codable, Equatable, Sendable {
+nonisolated struct ExportCapabilitiesDTO: Codable, Equatable, Sendable {
     let nearbyWifiFingerprint: NearbyWiFiFingerprintCapability
 }
 

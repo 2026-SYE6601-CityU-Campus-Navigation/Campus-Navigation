@@ -23,13 +23,16 @@
 """
 import argparse
 import hashlib
+import hmac
+import html
 import json
 import os
+import re
 import socket
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import unquote, quote
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 
 def human_size(n: int) -> str:
@@ -42,31 +45,81 @@ def human_size(n: int) -> str:
     return f'{n} B'
 
 
-def parse_multipart(body: bytes, boundary: bytes):
-    """极简 multipart/form-data 解析：够用即可（不用 cgi，Python 3.13 已移除它）。
+class LimitedRequestReader:
+    """Length-bounded HTTP body reader with a small pushback buffer."""
 
-    返回 {字段名: 值}；文件字段的值是 (文件名, 字节内容)。
-    """
-    out = {}
-    parts = body.split(b'--' + boundary)
-    for part in parts:
-        if not part or part in (b'--\r\n', b'--', b'\r\n'):
-            continue
-        part = part.lstrip(b'\r\n')
-        head, _, content = part.partition(b'\r\n\r\n')
-        if not _:
-            continue
-        content = content.rstrip(b'\r\n')
-        text = head.decode('utf-8', 'replace')
-        if 'name="' not in text:
-            continue
-        name = text.split('name="', 1)[1].split('"', 1)[0]
-        if 'filename="' in text:
-            fname = text.split('filename="', 1)[1].split('"', 1)[0]
-            out[name] = (os.path.basename(fname) or 'upload.bin', content)
-        else:
-            out[name] = content.decode('utf-8', 'replace')
-    return out
+    def __init__(self, stream, length):
+        self.stream = stream
+        self.remaining = length
+        self.pending = bytearray()
+
+    def read(self, count):
+        output = bytearray()
+        if self.pending:
+            take = min(count, len(self.pending))
+            output.extend(self.pending[:take])
+            del self.pending[:take]
+        if len(output) < count and self.remaining:
+            chunk = self.stream.read(min(count - len(output), self.remaining))
+            self.remaining -= len(chunk)
+            output.extend(chunk)
+        return bytes(output)
+
+    def unread(self, data):
+        self.pending = bytearray(data) + self.pending
+
+    def readline(self, limit=16 * 1024):
+        output = bytearray()
+        while len(output) < limit:
+            byte = self.read(1)
+            if not byte:
+                break
+            output.extend(byte)
+            if output.endswith(b'\n'):
+                break
+        if len(output) >= limit and not output.endswith(b'\n'):
+            raise ValueError('multipart header line too long')
+        return bytes(output)
+
+
+def stream_until(reader, delimiter, write, maximum):
+    """Copy one multipart value while retaining only a small boundary window."""
+    buffer = bytearray()
+    total = 0
+    while True:
+        chunk = reader.read(64 * 1024)
+        if not chunk:
+            raise ValueError('multipart boundary missing')
+        buffer.extend(chunk)
+        match = buffer.find(delimiter)
+        if match >= 0:
+            data = bytes(buffer[:match])
+            if total + len(data) > maximum:
+                raise ValueError('multipart part too large')
+            write(data)
+            total += len(data)
+            reader.unread(buffer[match + len(delimiter):])
+            return total
+        keep = len(delimiter) - 1
+        if len(buffer) > keep:
+            data = bytes(buffer[:-keep])
+            if total + len(data) > maximum:
+                raise ValueError('multipart part too large')
+            write(data)
+            total += len(data)
+            del buffer[:-keep]
+
+
+def content_disposition(value):
+    name = re.search(r'(?:^|;\s*)name="([^"\r\n]*)"', value)
+    filename = re.search(r'(?:^|;\s*)filename="([^"\r\n]*)"', value)
+    return (name.group(1) if name else None, filename.group(1) if filename else None)
+
+
+def safe_upload_name(name):
+    base = str(name or 'upload.zip').replace('\\', '/').split('/')[-1]
+    cleaned = ''.join('_' if ord(char) < 32 or char in '/\\:*?"<>|' else char for char in base)
+    return (cleaned[:160] or 'upload.zip')
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -77,6 +130,7 @@ class Handler(BaseHTTPRequestHandler):
         payload = json.dumps(obj, ensure_ascii=False).encode('utf-8')
         self.send_response(code)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Cache-Control', 'no-store')
         self.send_header('Content-Length', str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
@@ -93,6 +147,15 @@ class Handler(BaseHTTPRequestHandler):
         host = self.headers.get('Host') or f'{self.server.server_address[0]}:{self.server.server_address[1]}'
         return f'http://{host}'
 
+    def _provided_token(self, query=''):
+        auth = self.headers.get('Authorization', '')
+        bearer = auth[7:].strip() if auth.startswith('Bearer ') else ''
+        parameter = parse_qs(query, keep_blank_values=True).get('k', [''])[0]
+        return bearer or parameter
+
+    def _authorized(self, query=''):
+        return not self.server.token or hmac.compare_digest(self._provided_token(query), self.server.token)
+
     def log_message(self, fmt, *args):  # 精简日志：带时间戳，方便对着手机上的报错时间点看
         sys.stdout.write('  [%s] %s\n' % (time.strftime('%H:%M:%S'), fmt % args))
         sys.stdout.flush()
@@ -108,11 +171,15 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------- GET ----------
     def do_GET(self):
-        if self.path.startswith('/health'):
-            self._json(200, {'ok': True, 'service': 'RoomMarker upload', 'uploadDir': self.server.upload_dir})
+        request = urlsplit(self.path)
+        if request.path == '/health':
+            self._json(200, {'ok': True, 'service': 'RoomMarker upload'})
             return
-        if self.path.startswith('/files/'):
-            name = unquote(self.path[len('/files/'):])
+        if not self._authorized(request.query):
+            self._json(403, {'ok': False, 'error': 'bad token'})
+            return
+        if request.path.startswith('/files/'):
+            name = unquote(request.path[len('/files/'):])
             path = os.path.join(self.server.upload_dir, os.path.basename(name))
             if not os.path.isfile(path):
                 self._json(404, {'ok': False, 'error': 'no such file'})
@@ -130,6 +197,9 @@ class Handler(BaseHTTPRequestHandler):
                         break
                     self.wfile.write(chunk)
             return
+        if request.path not in ('', '/'):
+            self._json(404, {'ok': False, 'error': 'unknown path'})
+            return
         # 首页：列出收到的包（给队友/老师看的入口）
         files = sorted(
             (f for f in os.listdir(self.server.upload_dir) if os.path.isfile(os.path.join(self.server.upload_dir, f))),
@@ -137,10 +207,12 @@ class Handler(BaseHTTPRequestHandler):
             reverse=True,
         ) if os.path.isdir(self.server.upload_dir) else []
         rows = []
+        query = '' if not self.server.token else '?k=' + quote(self._provided_token(request.query), safe='')
         for f in files:
             p = os.path.join(self.server.upload_dir, f)
+            shown = html.escape(f)
             rows.append(
-                f'<li><a href="/files/{quote(f)}">{f}</a>'
+                f'<li><a href="/files/{quote(f)}{query}">{shown}</a>'
                 f'<span class="meta">{time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(p)))}'
                 f' · {human_size(os.path.getsize(p))}</span></li>'
             )
@@ -157,7 +229,7 @@ class Handler(BaseHTTPRequestHandler):
 <h1>RoomMarker 轨迹包（{len(files)} 个）</h1>
 <p>这些是手机「上传到云端」传上来的 zip。点文件名直接下载；给队友或老师看时，把这个页面的局域网地址发过去即可（需在同一 WiFi）。</p>
 <ul>{''.join(rows) or '<li>还没有收到文件</li>'}</ul>
-<p class="meta">上传目录：<code>{self.server.upload_dir}</code>　·　接收接口：<code>POST /upload</code></p>
+<p class="meta">接收接口：<code>POST /upload</code></p>
 </div></html>""")
 
     # ---------- POST ----------
@@ -176,33 +248,97 @@ class Handler(BaseHTTPRequestHandler):
         if length <= 0:
             self._json(400, {'ok': False, 'error': 'empty body'})
             return
-        body = self.rfile.read(length)
-        boundary = ctype.split('boundary=', 1)[1].strip().strip('"').encode('utf-8')
-        fields = parse_multipart(body, boundary)
-
-        blob = None
+        if length > self.server.max_bytes:
+            self._json(413, {'ok': False, 'error': 'upload too large'})
+            return
+        match = re.search(r'(?:^|;)\s*boundary=(?:"([^"]+)"|([^;\s]+))', ctype)
+        if not match:
+            self._json(400, {'ok': False, 'error': 'multipart boundary missing'})
+            return
+        boundary_text = match.group(1) or match.group(2)
+        if not 1 <= len(boundary_text) <= 200 or any(ord(c) < 33 or ord(c) > 126 for c in boundary_text):
+            self._json(400, {'ok': False, 'error': 'invalid multipart boundary'})
+            return
+        boundary = boundary_text.encode('ascii')
+        reader = LimitedRequestReader(self.rfile, length)
+        temporary = os.path.join(self.server.upload_dir, f'.incoming-{time.time_ns()}-{id(self)}.part')
         fname = None
-        for key, value in fields.items():
-            if isinstance(value, tuple):
-                fname, blob = value
-                break
-        if blob is None:
-            self._json(400, {'ok': False, 'error': 'no file field found'})
+        form_token = ''
+        digest = hashlib.sha256()
+        size = 0
+        try:
+            if reader.readline() != b'--' + boundary + b'\r\n':
+                raise ValueError('invalid initial multipart boundary')
+            final = False
+            while not final:
+                headers = {}
+                while True:
+                    line = reader.readline()
+                    if line == b'\r\n':
+                        break
+                    if not line:
+                        raise ValueError('truncated multipart headers')
+                    key, separator, value = line.decode('utf-8', 'strict').partition(':')
+                    if not separator:
+                        raise ValueError('invalid multipart header')
+                    headers[key.strip().lower()] = value.strip()
+                field, filename = content_disposition(headers.get('content-disposition', ''))
+                if not field:
+                    raise ValueError('multipart field name missing')
+                delimiter = b'\r\n--' + boundary
+                if filename is not None:
+                    if fname is not None:
+                        raise ValueError('multiple files are not allowed')
+                    fname = safe_upload_name(filename)
+                    with open(temporary, 'xb') as output:
+                        def write_file(data):
+                            output.write(data)
+                            digest.update(data)
+                        size = stream_until(reader, delimiter, write_file, self.server.max_bytes)
+                else:
+                    value = bytearray()
+                    stream_until(reader, delimiter, value.extend, 4096)
+                    if field == 'token':
+                        form_token = value.decode('utf-8', 'strict')
+                suffix = reader.read(2)
+                if suffix == b'--':
+                    ending = reader.read(2)
+                    if ending not in (b'', b'\r\n'):
+                        raise ValueError('invalid final multipart boundary')
+                    final = True
+                elif suffix != b'\r\n':
+                    raise ValueError('invalid multipart continuation')
+            if reader.remaining or reader.pending:
+                raise ValueError('unexpected multipart trailing data')
+            if fname is None or not os.path.isfile(temporary):
+                raise ValueError('no file field found')
+            with open(temporary, 'rb') as incoming:
+                if incoming.read(4) != b'PK\x03\x04':
+                    raise ValueError('file is not a ZIP archive')
+            if not fname.lower().endswith('.zip'):
+                raise ValueError('file name must end in .zip')
+        except (OSError, UnicodeError, ValueError) as error:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+            self._json(400, {'ok': False, 'error': str(error)})
             return
 
         if self.server.token:
-            # 令牌两种形式都接受：表单字段 token（App 默认发）或 Authorization: Bearer（Worker/签名接口常用）
-            got = str(fields.get('token', ''))
             auth = self.headers.get('Authorization', '')
-            if got != self.server.token and auth != f'Bearer {self.server.token}':
-                print(f'  ✗ 令牌不匹配（表单 "{got}" / 头 "{auth}"）')
+            bearer = auth[7:].strip() if auth.startswith('Bearer ') else ''
+            if not (hmac.compare_digest(form_token, self.server.token) or
+                    hmac.compare_digest(bearer, self.server.token)):
+                os.unlink(temporary)
+                print('  ✗ 令牌不匹配（值未记录）')
                 self._json(403, {'ok': False, 'error': 'bad token'})
                 return
             print('  ✓ 令牌校验通过')
 
         # 文件名加上传时刻，避免覆盖；同秒重复再补序号
         stamp = time.strftime('%Y%m%d_%H%M%S')
-        base, ext = os.path.splitext(fname or 'upload.zip')
+        base, ext = os.path.splitext(fname)
         name = f'{base}_{stamp}{ext}'
         path = os.path.join(self.server.upload_dir, name)
         seq = 1
@@ -211,17 +347,15 @@ class Handler(BaseHTTPRequestHandler):
             path = os.path.join(self.server.upload_dir, name)
             seq += 1
 
-        os.makedirs(self.server.upload_dir, exist_ok=True)
-        with open(path, 'wb') as f:
-            f.write(blob)
-        digest = hashlib.sha256(blob).hexdigest()
-        print(f'  ✓ 已保存 {name}（{human_size(len(blob))}，sha256 {digest[:12]}…）')
+        os.replace(temporary, path)
+        digest_text = digest.hexdigest()
+        print(f'  ✓ 已保存 {name}（{human_size(size)}，sha256 {digest_text[:12]}…）')
 
         self._json(200, {
             'ok': True,
             'file': name,
-            'size': len(blob),
-            'sha256': digest,
+            'size': size,
+            'sha256': digest_text,
             'url': f'{self._base_url()}/files/{quote(name)}',
         })
 
@@ -252,17 +386,23 @@ def main():
     ap.add_argument('--dir', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads'),
                     help='文件保存目录（默认脚本同级的 uploads/）')
     ap.add_argument('--token', default='', help='启用令牌校验：App 的「上传令牌」要填同一个值')
+    ap.add_argument('--max-bytes', type=int, default=2 * 1024 * 1024 * 1024,
+                    help='单次请求上限（默认 2 GiB）')
     args = ap.parse_args()
 
     os.makedirs(args.dir, exist_ok=True)
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     httpd.upload_dir = args.dir
     httpd.token = args.token
+    httpd.max_bytes = args.max_bytes
 
     print('RoomMarker 轨迹包接收服务已启动')
     print(f'  保存目录：{args.dir}')
     print(f'  令牌校验：{"开启" if args.token else "关闭"}')
     print('  App「上传设置」里填下面任一地址（手机要和这台电脑在同一个 WiFi）：')
+    local_name = socket.gethostname().split('.')[0]
+    if local_name:
+        print(f'    http://{local_name}.local:{args.port}/upload')
     for ip in lan_ips():
         print(f'    http://{ip}:{args.port}/upload')
     print(f'  本机自测：http://127.0.0.1:{args.port}/upload　·　文件列表页 http://127.0.0.1:{args.port}/')

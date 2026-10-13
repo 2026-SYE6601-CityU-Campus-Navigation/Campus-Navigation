@@ -34,6 +34,8 @@ struct RoomDetailView: View {
         List {
             Section("房间信息") {
                 LabeledContent("所属区域", value: room.area?.name ?? "未分区")
+                LabeledContent("教室代码", value: room.code.isEmpty ? "未记录" : room.code)
+                LabeledContent("楼层", value: room.floor.isEmpty ? "未记录" : room.floor)
                 if !room.note.isEmpty {
                     LabeledContent("备注") {
                         Text(room.note)

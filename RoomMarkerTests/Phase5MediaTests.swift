@@ -19,10 +19,11 @@ struct Phase5MediaTests {
         #expect(tag.tagTypeRawValue == "门")
     }
 
-    @Test("2. All six tag raw values remain HarmonyOS-compatible")
+    @Test("2. Eleven types preserve all original six tag raw values")
     func exactTagRawValues() {
         #expect(TrackTagType.allCases.map(\.rawValue) == [
             "厕所", "楼梯", "门", "门禁", "电梯", "教室",
+            "大门", "扶梯", "食堂", "商店", "其他室内",
         ])
     }
 
@@ -521,7 +522,7 @@ private final class Phase5RecordingStore: RecordingPersisting {
     var batches: [[TrackPointDraft]] = []
     var persistedDrafts: [TrackPointDraft] = []
 
-    func createTrack(name: String, area: Area, startedAt: Int64) throws -> Track {
+    func createTrack(name: String, area: Area?, startedAt: Int64) throws -> Track {
         let track = Track(name: name, area: area, startedAt: startedAt)
         tracks.append(track)
         return track
@@ -562,7 +563,10 @@ private final class Phase5MediaStore: TrackMediaPersisting {
             longitude: draft.metadata.longitude,
             altitude: draft.metadata.altitude,
             headingDeg: draft.metadata.headingDeg,
-            createdAt: draft.createdAt
+            createdAt: draft.createdAt,
+            areaID: draft.areaID,
+            areaStateRawValue: draft.areaStateRawValue,
+            floor: draft.floor
         )
         tags.append(tag)
         return tag

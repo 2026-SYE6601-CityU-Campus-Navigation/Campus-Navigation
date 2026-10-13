@@ -32,9 +32,11 @@ struct ExportStagingResult: Equatable, Sendable {
     let manifestURL: URL
     let trackURLs: [URL]
     let photoURLs: [URL]
+    var auxiliaryURLs: [URL] = []
 }
 
 struct ExportStagingService {
+    var streamingBaseDirectory: URL? { fileSystem is LocalExportStagingFileSystem ? baseDirectory : nil }
     private let baseDirectory: URL
     private let fileSystem: any ExportStagingFileSystem
     private let mapper: ExportDTOMapper
@@ -56,6 +58,29 @@ struct ExportStagingService {
         _ snapshot: AreaExportSnapshot,
         sessionID: UUID = UUID()
     ) throws -> ExportStagingResult {
+        let tracks = try snapshot.tracks.map { track in
+            let dto = mapper.track(from: track, areaName: snapshot.area.name)
+            try ExportContractValidator.validate(track: dto, trackID: track.id)
+            return (track.fileName, try jsonEncoder.encode(dto))
+        }
+        return try stageFiles(manifest: jsonEncoder.encode(mapper.manifest(from: snapshot)), tracks: tracks,
+                              photos: snapshot.tracks.flatMap { $0.photos.map { ($0.relativePath, $0.jpegData) } }, sessionID: sessionID)
+    }
+
+    func stage(_ snapshot: ExportV3Snapshot, sessionID: UUID = UUID()) throws -> ExportStagingResult {
+        try ExportV3Validator.validate(snapshot)
+        return try stageFiles(manifest: jsonEncoder.encode(snapshot.manifest),
+                              tracks: snapshot.tracks.map { ($0.file, try jsonEncoder.encode($0)) },
+                              photos: snapshot.photos.map { ($0.path, $0.data) }, sessionID: sessionID)
+    }
+
+    private func stageFiles(
+        manifest: Data, tracks: [(String, Data)], photos: [(String, Data)], sessionID: UUID
+    ) throws -> ExportStagingResult {
+        let paths = ["manifest.json"] + tracks.map(\.0) + photos.map(\.0)
+        guard paths.allSatisfy(ArchivePathValidator.isSafe), Set(paths).count == paths.count else {
+            throw ExportValidationError.unsafeStagingPath("duplicate or invalid entry")
+        }
         let sessionDirectory = baseDirectory
             .appending(path: sessionID.uuidString.lowercased(), directoryHint: .isDirectory)
             .standardizedFileURL
@@ -67,25 +92,21 @@ struct ExportStagingService {
         do {
             try fileSystem.createDirectory(at: sessionDirectory)
             let manifestURL = try resolved(relativePath: "manifest.json", in: sessionDirectory)
-            let manifest = mapper.manifest(from: snapshot)
-            try fileSystem.write(jsonEncoder.encode(manifest), to: manifestURL)
+            try fileSystem.write(manifest, to: manifestURL)
 
             var trackURLs: [URL] = []
             var photoURLs: [URL] = []
-            for track in snapshot.tracks {
-                let trackDTO = mapper.track(from: track, areaName: snapshot.area.name)
-                try ExportContractValidator.validate(track: trackDTO, trackID: track.id)
-                let trackURL = try resolved(relativePath: track.fileName, in: sessionDirectory)
+            for (path, data) in tracks {
+                let trackURL = try resolved(relativePath: path, in: sessionDirectory)
                 try fileSystem.createDirectory(at: trackURL.deletingLastPathComponent())
-                try fileSystem.write(jsonEncoder.encode(trackDTO), to: trackURL)
+                try fileSystem.write(data, to: trackURL)
                 trackURLs.append(trackURL)
-
-                for photo in track.photos {
-                    let photoURL = try resolved(relativePath: photo.relativePath, in: sessionDirectory)
-                    try fileSystem.createDirectory(at: photoURL.deletingLastPathComponent())
-                    try fileSystem.write(photo.jpegData, to: photoURL)
-                    photoURLs.append(photoURL)
-                }
+            }
+            for (path, data) in photos {
+                let photoURL = try resolved(relativePath: path, in: sessionDirectory)
+                try fileSystem.createDirectory(at: photoURL.deletingLastPathComponent())
+                try fileSystem.write(data, to: photoURL)
+                photoURLs.append(photoURL)
             }
 
             return ExportStagingResult(

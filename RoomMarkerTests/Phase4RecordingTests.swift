@@ -280,14 +280,12 @@ struct Phase4RecordingTests {
         #expect(draft.wifiTop == nil)
     }
 
-    @Test("Recording requires a real Area")
-    func areaRequired() throws {
+    @Test("A global recording can start without an Area")
+    func areaIsOptional() throws {
         let fixture = makeFixture()
-
-        #expect(throws: RecordingError.areaRequired) {
-            try fixture.coordinator.start(name: "No Area", area: nil)
-        }
-        #expect(fixture.store.tracks.isEmpty)
+        try fixture.coordinator.start(name: "No Area", area: nil)
+        #expect(fixture.store.tracks.count == 1)
+        #expect(fixture.store.tracks.first?.area == nil)
     }
 
     @Test("Duplicate and out-of-order ticks are ignored without backfill")
@@ -461,7 +459,7 @@ private final class FakeRecordingStore: RecordingPersisting {
     private(set) var finalizedAfterDraftCount: Int?
     var failOnAppend = false
 
-    func createTrack(name: String, area: Area, startedAt: Int64) throws -> Track {
+    func createTrack(name: String, area: Area?, startedAt: Int64) throws -> Track {
         let track = Track(name: name, area: area, startedAt: startedAt)
         tracks.append(track)
         return track

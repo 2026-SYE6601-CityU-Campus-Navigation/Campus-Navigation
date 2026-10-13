@@ -1,6 +1,6 @@
 # RoomMarker iOS Project Brief
 
-> **Historical status — Phase 0 record.** This brief captured the product and migration decisions before implementation. The iOS MVP has since been completed and physically validated; see [IOS_PHASE9_DEVICE_ACCEPTANCE.md](IOS_PHASE9_DEVICE_ACCEPTANCE.md) for the accepted result.
+> **Historical status — Phase 0 record.** This brief captured the product and migration decisions before implementation. The iOS baseline has since completed physical acceptance and the later cross-building product follow-up; see [IOS_PHASE9_DEVICE_ACCEPTANCE.md](IOS_PHASE9_DEVICE_ACCEPTANCE.md) and [IOS_FULL_PRODUCT_PARITY.md](IOS_FULL_PRODUCT_PARITY.md).
 
 ## Status and purpose
 

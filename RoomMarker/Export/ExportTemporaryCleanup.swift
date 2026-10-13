@@ -1,10 +1,11 @@
 import Foundation
 
-enum CanonicalPathContainment {
+nonisolated enum CanonicalPathContainment {
     static func isSafeRelativePath(_ path: String) -> Bool {
         guard !path.isEmpty,
               !path.hasPrefix("/"),
-              !path.contains("\\") else {
+              !path.contains("\\"), !path.contains(":"),
+              !path.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) else {
             return false
         }
         return path.split(separator: "/", omittingEmptySubsequences: false).allSatisfy {
@@ -72,7 +73,7 @@ enum CanonicalPathContainment {
     }
 }
 
-enum ExportTemporaryLocations {
+nonisolated enum ExportTemporaryLocations {
     static let root = FileManager.default.temporaryDirectory
         .appending(path: "RoomMarkerExports", directoryHint: .isDirectory)
     static let staging = root.appending(path: "staging", directoryHint: .isDirectory)

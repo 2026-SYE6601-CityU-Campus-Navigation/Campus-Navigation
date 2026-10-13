@@ -69,4 +69,5 @@ struct TrackPointDraft: Equatable, Sendable {
     let wifiAvailability: WiFiFingerprintAvailability
     let wifiCount: Int?
     let wifiTop: String?
+    var segmentID: UUID? = nil
 }
